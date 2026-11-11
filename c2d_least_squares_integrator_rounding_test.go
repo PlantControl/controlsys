@@ -19,9 +19,12 @@ import (
 // −1.6e-16 is rounding. Its exact 1/s coefficient is 0.
 func TestIntegratorStaircaseLimitDropsRoundingLevelResidue(t *testing.T) {
 	sys := integratorRoundingResidueN41(t)
-	k, limit, bound, err := integratorStaircase(sys, true, 0.1, 41)
-	if err != nil || k != 1 || !(math.Abs(limit) <= bound) {
-		t.Fatalf("one staircase step: k=%d limit %g bound %g err %v, want k=1 with |limit| ≤ bound", k, limit, bound, err)
+	form, err := integratorStaircase(sys, true, 0.1)
+	if err != nil || form == nil || form.k != 1 {
+		t.Fatalf("staircase %+v err %v, want one step", form, err)
+	}
+	if limit, bound := form.coefficient(1); !(math.Abs(limit) <= bound) {
+		t.Fatalf("limit %g bound %g, want |limit| ≤ bound", limit, bound)
 	}
 	if k, limit, err := integratorStaircaseLimit(sys, true, 0.1); err != nil || k != 0 || limit != 0 {
 		t.Fatalf("integrators %d limit %g err %v, want 0", k, limit, err)
@@ -48,9 +51,14 @@ func TestIntegratorStaircaseLimitDropsStiffSlowPoles(t *testing.T) {
 		if count, ok := originUnresolvedPoles(tc.sys.A, n, 0.1); !ok || count != tc.steps {
 			t.Fatalf("%s: %d poles within rounding of s = 0 (ok %v), want %d", tc.name, count, ok, tc.steps)
 		}
-		k, limit, bound, err := integratorStaircase(tc.sys, true, 0.1, n)
-		if err != nil || k != tc.steps || !(math.Abs(limit) <= bound) {
-			t.Fatalf("%s: k=%d limit %g bound %g err %v, want k=%d with |limit| ≤ bound", tc.name, k, limit, bound, err, tc.steps)
+		form, err := integratorStaircase(tc.sys, true, 0.1)
+		if err != nil || form == nil || form.k != tc.steps {
+			t.Fatalf("%s: staircase %+v err %v, want %d steps", tc.name, form, err, tc.steps)
+		}
+		for q := tc.steps; q >= 1; q-- {
+			if limit, bound := form.coefficient(q); !(math.Abs(limit) <= bound) {
+				t.Fatalf("%s: 1/s^%d coefficient %g bound %g, want within", tc.name, q, limit, bound)
+			}
 		}
 		if k, limit, err := integratorStaircaseLimit(tc.sys, true, 0.1); err != nil || k != 0 {
 			t.Fatalf("%s: integrators %d limit %g err %v, want 0", tc.name, k, limit, err)
@@ -85,6 +93,27 @@ func TestLeastSquaresIntegratorLimitSkipsSlowPolesResolvedFromZero(t *testing.T)
 	}
 	if fit.MaxRelativeError > 1e-2 {
 		t.Fatalf("MaxRelativeError %g", fit.MaxRelativeError)
+	}
+}
+
+// A double integrator beside an uncontrollable pole at s = 0 under a dense
+// similarity (NDFJC6 census modal 3-c2-utrue, as main's MinimalRealization
+// keeps it on arm64): the staircase takes all three, the 1/s³ coefficient is
+// rounding, and the count is the chain with its own 1/s² coefficient, the
+// generator's c0·b0, read from the same staircase. A rerun one step shorter
+// leaves the zero pole in A22, singular to working precision.
+func TestIntegratorStaircaseLimitKeepsChainBelowRoundingLevelTop(t *testing.T) {
+	sys := integratorRoundingModalChain(t)
+	form, err := integratorStaircase(sys, true, 0.1)
+	if err != nil || form == nil || form.k != 3 {
+		t.Fatalf("staircase %+v err %v, want 3 steps", form, err)
+	}
+	if limit, bound := form.coefficient(3); !(math.Abs(limit) <= bound) {
+		t.Fatalf("1/s³ coefficient %g bound %g, want within", limit, bound)
+	}
+	const want = -0x1.9dfbada8fa2p-03
+	if k, limit, err := integratorStaircaseLimit(sys, true, 0.1); err != nil || k != 2 || math.Abs(limit-want) > 1e-8*math.Abs(want) {
+		t.Fatalf("integrators %d limit %g err %v, want 2 %g", k, limit, err, want)
 	}
 }
 
@@ -248,6 +277,55 @@ func integratorRoundingRotFast21(t *testing.T) *System {
 			-0x1.ca97e0e76cb28p-03, -0x1.94127b7fc931fp-01, -0x1.5ff2724bceda9p-01,
 		}),
 		mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func integratorRoundingModalChain(t *testing.T) *System {
+	t.Helper()
+	sys, err := New(
+		mat.NewDense(16, 16, []float64{
+			-0x1.7d7672919ad16p+02, 0x1.bbe12e6aea54ep+02, 0x1.640cb9c44f0aep-01, -0x1.c1d60c101fc98p+01, 0x1.e4188df85affbp+01, 0x1.8c4cf51e726acp+01, 0x1.68c405acf2338p+02, -0x1.f95530aa4f0afp+00, 0x1.6f344e3404386p+02, -0x1.80232a9eecb48p+02, -0x1.84119aa68a69p+01, -0x1.a388aa18f776ep+02, 0x1.1eb98315062d2p+00, -0x1.1056532740ec5p+04, -0x1.d42c50de6e86cp-01, -0x1.b086d70ca9ebfp+02,
+			0x1.68db721e72a8ep+02, -0x1.be325d34c9e32p+02, 0x1.b227d8a1c0e85p-02, 0x1.77d26e1b23b8cp+01, -0x1.ed6a35e9251f2p+00, -0x1.3bd09cb881e42p+01, -0x1.88e14bc0fe597p+01, 0x1.f4766e555c96ap+00, -0x1.ff100e54ed704p+01, 0x1.29dee463c16e7p+02, 0x1.2346b60b98cbfp+01, 0x1.88ac120c338b9p+02, -0x1.892b1a04d445ep-02, 0x1.61ef98ad07d6bp+03, -0x1.15cf9978b599p-01, 0x1.f88544d8bd608p+01,
+			0x1.e34620b87b403p+01, -0x1.f5db5f4740617p+00, -0x1.440ebef7b4bcp+01, -0x1.6b6ea588e9986p-03, -0x1.e132247a3bcbap+00, 0x1.eca1f37d93bbcp-03, 0x1.d8133664b6e37p+00, -0x1.27fc06d1d268cp-02, -0x1.2a2cf8a630386p+01, 0x1.08ce534326c9fp+02, 0x1.00c75e674d4e9p+01, 0x1.c76ae2e805f3p+01, -0x1.b428db9d97501p+00, 0x1.698907abdf6cdp+01, 0x1.695007ad988b5p+01, -0x1.6edde61173027p-03,
+			-0x1.76ea1bea155f9p+01, -0x1.e3c62086823edp-02, 0x1.ccddd11f8aaddp+01, 0x1.2baa4bef6b7b9p-01, 0x1.8855e6e15da23p+00, 0x1.19c7a3ad67ca9p+00, 0x1.3243a31e12c06p+00, 0x1.394f13cd47b1dp+00, 0x1.46f1eb5b46d41p+02, -0x1.0fa355540a9e3p-03, -0x1.2c84d14ad38eap+02, -0x1.4a49115d8b852p+02, -0x1.d69ea8aba63c2p-02, -0x1.51e86a89ba783p+02, -0x1.c223532bf8545p+00, -0x1.8bf411f82e455p-01,
+			-0x1.00f9cb63a0fd9p+03, 0x1.a5f6658a3a317p+01, 0x1.163ab910fd401p+00, 0x1.4d67a381f2025p+01, -0x1.dc1fb182613e3p-01, 0x1.56c99399d6affp-03, 0x1.a5418a51b4c41p+01, 0x1.f08d604ca20f3p-01, 0x1.9ccc93f4a7f1cp+02, -0x1.3875e0a816affp+02, -0x1.3c5fb60219718p+02, -0x1.17973a9d1a2ccp+02, 0x1.743dd8a358f6ep+00, -0x1.0677087a773dep+02, -0x1.d7579e0355923p+01, -0x1.21b31a959651dp+00,
+			0x1.cdd87f472c00ep+01, -0x1.2b5f46b656ef5p+02, -0x1.8d568e7793bdfp+01, 0x1.af59179429c6fp+00, -0x1.41d5bcdfe8715p+01, -0x1.2e9992669939bp+02, -0x1.0ea4a4ec9c555p+03, 0x1.dc2de5b6962e5p+00, -0x1.1cd51cb8921b3p+03, 0x1.e03bc7518e8e1p-01, 0x1.01ed3a4fe9cefp+03, 0x1.3daa6e63a962fp+03, -0x1.83d861fb9500bp-01, 0x1.5071485783f72p+04, -0x1.8169621ed276cp-01, 0x1.c44fc0165858ep+02,
+			-0x1.486669b265cc5p+03, 0x1.8cff7209afff6p+02, 0x1.1c61af53db172p-03, -0x1.4e9141b156859p+00, 0x1.42ac9f9c66aa4p+01, 0x1.7dc97eda9b3eap+01, 0x1.b1bcbf318bd8cp+01, -0x1.ca0957e1137e3p+00, 0x1.4364ec832cdabp+03, -0x1.0385118b59fd9p+03, -0x1.53b435f9ba434p+02, -0x1.7dfa06d758f42p+03, 0x1.0bfbc6289883ap+00, -0x1.792d0f3439d8p+04, -0x1.79068305cf06fp+01, -0x1.18a3cd501a4a8p+03,
+			0x1.a3f48598732aap+03, -0x1.953b9dc55a2fep+03, -0x1.90f98eaaddc2ep+02, 0x1.abd39e7c83037p+01, -0x1.a60789cce2bd4p+02, -0x1.7f214038dc941p+02, -0x1.d2c0dc043911ap+03, 0x1.3017221a2dc49p-08, -0x1.f1a1dc0773b05p+03, 0x1.70be89e1b8b3cp+03, 0x1.a638d5adea55cp+03, 0x1.0f5f96f8f2a97p+04, -0x1.d90dd2475f3bfp-01, 0x1.1e20b1c4335dp+05, 0x1.a640b984e71fp+00, 0x1.38217462b5c82p+03,
+			0x1.058df8d82f7e6p+03, -0x1.98fd51d9bf9fp+02, -0x1.390db0e26a97ep+01, 0x1.af4195db68eadp+01, -0x1.313145cace1e3p+02, -0x1.032c34e6fed34p+02, -0x1.0a4da844640ddp+03, 0x1.606fd825b028fp+01, -0x1.642fe32634616p+03, 0x1.fd25238d4dd13p+02, 0x1.821dca5cee756p+02, 0x1.5fcee691dd04cp+03, -0x1.bd8f2704ccde8p+01, 0x1.67ff3af99a743p+04, 0x1.5a1ed99169491p-01, 0x1.055eaef68e42fp+03,
+			0x1.4f7c9809fa3c2p+01, -0x1.5cff51c4b4b34p+02, -0x1.366f90d5d7b79p+01, 0x1.0003363c09bedp+02, -0x1.8079feec1b398p+01, -0x1.3b4536f605705p+01, -0x1.fbc5db3442dbdp+02, 0x1.53a811a6fe491p+01, -0x1.95f82e2c53d1bp+02, 0x1.12818c921819cp+01, 0x1.19d5aa77e3fc2p+01, 0x1.0d7020dfe5731p+03, -0x1.24b5048e90afbp+00, 0x1.57956bc7b8da9p+04, -0x1.55e13290b8854p+01, 0x1.10ed37f46c558p+03,
+			0x1.4f10ccf04a714p+00, -0x1.37bccb3afb4bbp+02, -0x1.1f20ffcd43cc9p-04, 0x1.29ae5756bf6e5p+02, -0x1.9768dc47c2097p+01, -0x1.308a266cb9fc2p+01, -0x1.053250dc9617p+02, 0x1.50445126666c2p+00, -0x1.e76e5e5b2357bp+00, 0x1.5135af010c2ffp+02, -0x1.226436e296cd4p+01, 0x1.d0d02e0c59c07p+01, -0x1.811762b1f4f91p+01, 0x1.22a548d3d49d4p+03, 0x1.7d7a7e9861a17p-03, 0x1.ef9636193307ap+01,
+			0x1.3a3ffdde989e8p+03, -0x1.7eeb91bf718p+03, -0x1.fb1ac2d293c95p+01, 0x1.b179ced3fff29p+02, -0x1.a8c5b3f6d5fb9p+02, -0x1.8eacf44152e7ep+02, -0x1.87499b74ae13bp+03, 0x1.fe0792b4f5662p+01, -0x1.a691c53c2dd74p+03, 0x1.9ac1b8d2943cbp+03, 0x1.2e49717f9858fp+03, 0x1.8362e743e244bp+03, -0x1.489e4a6314c3ep+00, 0x1.16e64b67dbe6p+05, 0x1.40b1a33e200adp-01, 0x1.3976439eca0b3p+03,
+			0x1.7cf597172cf4p+03, -0x1.5a3f0a6a22e0cp+03, -0x1.0f800ccd432bap-01, 0x1.193cc85a1a626p+02, -0x1.baf73d6fb9f43p+02, -0x1.3085cb95d8e0dp+02, -0x1.0a5256f5f39afp+03, 0x1.d2ec11a165ddcp+01, -0x1.58fbf23f0435ap+03, 0x1.a6d2479735b47p+03, 0x1.b84f1cb859775p+02, 0x1.8c776cf4b26eep+03, -0x1.5bc172f038f5bp+02, 0x1.a08ee8772362ap+04, 0x1.e7fdb14dc590fp-07, 0x1.5118b2cf562c7p+03,
+			-0x1.27cce1f0612dfp+02, 0x1.c2c1c04b90bf6p+02, 0x1.252abdcbfa7d8p-02, -0x1.052c05f66e73fp+02, 0x1.1328e2fb2d016p+01, 0x1.787f4345781dbp+01, 0x1.8ed535a00c5d6p+02, -0x1.7a93b4fbb303dp+01, 0x1.96aa01ea72906p+02, -0x1.e7dae18e47498p+02, -0x1.24afe5ffd3ad8p+01, -0x1.d5eaed7e4324ep+02, 0x1.10e9afc8af556p+00, -0x1.4c630b0ab90adp+04, 0x1.3e6c3364a8c8bp-02, -0x1.93d53a4d8f61p+02,
+			0x1.2ad90e60b1032p+03, -0x1.04d0d7bac8121p+03, 0x1.2135046f843fcp-04, 0x1.1903fc16b24a4p+00, -0x1.0a9dffdf06687p+01, -0x1.02785a7f92dddp+01, -0x1.0f8bfb17984c5p+02, 0x1.657c8214c6638p+01, -0x1.c6da00cb4d6c8p+02, 0x1.ef8f89886873cp+02, 0x1.880508134d885p+02, 0x1.0ab6d500bb1fbp+03, -0x1.f837781101086p+00, 0x1.18b9dc4bb231ep+04, -0x1.cca7c55777166p-03, 0x1.b92883bc0ffdap+02,
+			0x1.0bdab337cdf91p+01, -0x1.7b23749aed26ap+02, 0x1.cfcd81c67549dp+01, 0x1.2b4993110f028p+02, -0x1.e567d58ff7da5p-01, -0x1.bdb8f4a058bc9p+01, -0x1.7a77f38a2074bp+00, 0x1.4565aa9245ee6p+02, -0x1.53c6fee09d688p+01, 0x1.3b40f20739c88p+02, -0x1.4839206f123a8p+00, 0x1.50733acb9e8e9p+02, -0x1.464dd3cb8d004p+01, 0x1.59d3208b540b8p+03, -0x1.58cd870c494ecp+01, 0x1.d567f9c6595ddp+01,
+		}),
+		mat.NewDense(16, 1, []float64{
+			-0x1.e1ee17f10678fp+00,
+			0x1.b3716678c31dcp+00,
+			-0x1.5b1250270f62dp+00,
+			0x1.448562cf73bd7p-04,
+			0x1.d7fe49e38c349p-03,
+			0x1.9998f93cd9f4cp+00,
+			-0x1.66d39e7e8488cp+01,
+			0x1.0690fb87ebfc5p+01,
+			0x1.b2ec8c45de86ep-01,
+			0x1.1c37f7f444ba6p-02,
+			0x1.a938c990226b9p-01,
+			0x1.468a42e88267ep+00,
+			0x1.559c7d6bd26d7p+01,
+			-0x1.ccb22e8797e7ap-01,
+			0x1.ba3af4261ff45p+00,
+			0x1.8e1b0e6a3af76p+00,
+		}),
+		mat.NewDense(1, 16, []float64{
+			0x1.48699dfbb7de2p+01, -0x1.0f6dd0d666559p-07, -0x1.68175bbf69d31p+00, 0x1.9211a373472d3p+00, -0x1.4e15edabbec3fp+01, 0x1.17e93d8406a3cp+01, 0x1.24615b77cbc63p+01, 0x1.6e9bca2b812b7p-02, 0x1.7f870da32fbe7p+02, 0x1.fc128ad1d310cp+00, 0x1.73e386844a247p+01, -0x1.404cedfa4a347p+00, 0x1.d3c43f2548415p-01, 0x1.15d2b69880e11p+03, -0x1.4209144927716p-02, 0x1.2669eb4376085p+02,
+		}),
+		mat.NewDense(1, 1, []float64{-0x1.5e03fc43955ccp-01}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
