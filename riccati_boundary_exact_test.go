@@ -203,3 +203,30 @@ func TestRiccatiBoundaryProof_NegativeRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestDare_NearUnitCircleNotProved (I4J6DP; census zw46reg, descriptor
+// n = 2): Dare finds no verified solution, and a float64 QZ eigenvalue of
+// the extended symplectic pencil lies within the candidate band of the unit
+// circle, but its exact pencil has no root on the circle (the reduced
+// pencil oracle of the census agrees): the error must stay ErrNotConverged.
+func TestDare_NearUnitCircleNotProved(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.7071077945360846, 0.5651357546147349, -0.483579317756526, 0.30502374582034064})
+	B := mat.NewDense(2, 1, []float64{-0.006727119980158644, -0.3605160239611313})
+	Q := mat.NewDense(2, 2, []float64{0.29901236741459425, -0.33933860216785683, -0.33933860216785683, 1.811958051992169})
+	R := mat.NewDense(1, 1, []float64{1.721750259837974})
+	E := mat.NewDense(2, 2, []float64{-0.6791155402070246, -0.5629147446817965, 1.9837244002196524, -0.18599666473396131})
+	opts := &RiccatiOpts{E: E}
+	L, M := extendedPencil(false, A, B, Q, R, opts)
+	if !boundaryCandidate(false, L, M, 5) {
+		t.Error("no float64 candidate, want one")
+	}
+	if boundaryEigenvalueProved(false, A, B, Q, R, opts) {
+		t.Error("unit-circle eigenvalue proved, want none")
+	}
+	for _, ns := range []bool{false, true} {
+		_, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+		if !errors.Is(err, ErrNotConverged) || errors.Is(err, ErrNoStabilizing) {
+			t.Errorf("NoScaling %v: %v, want ErrNotConverged", ns, err)
+		}
+	}
+}
