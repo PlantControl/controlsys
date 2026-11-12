@@ -32,6 +32,7 @@ import (
 func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
 	res, err = explicitRiccatiSolution(res, opts, err)
+	descriptorClosedLoopEig(true, A, B, opts, res, err)
 	return certify("Lqr", ErrNotStabilizable, res, err)
 }
 
@@ -53,6 +54,7 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, true)
 	res, err = explicitRiccatiSolution(res, opts, err)
+	descriptorClosedLoopEig(false, A, B, opts, res, err)
 	return certify("Dlqr", ErrNotStabilizable, res, err)
 }
 

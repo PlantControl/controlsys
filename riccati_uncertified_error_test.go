@@ -58,7 +58,8 @@ func riccatiNoSolution(err error) bool {
 
 // TestRiccatiUnverifiedPartialResult: an X no Newton step certifies
 // (MATLAB icare/idare Report 1) comes back from every exported entry
-// point, non-nil and bit for bit the core's, with ErrAccuracyUnverified
+// point, non-nil and bit for bit the core's (descriptor Eig as the exits
+// recompute it, descriptorClosedLoopEig), with ErrAccuracyUnverified
 // (ZOJBZX): Care's weakBStall and its duals, and Dare's well-conditioned
 // E with a far mode (TestDare_WellConditionedEFarModeStaysUncertified).
 func TestRiccatiUnverifiedPartialResult(t *testing.T) {
@@ -81,6 +82,7 @@ func TestRiccatiUnverifiedPartialResult(t *testing.T) {
 	if err != nil || dCore.accuracy != 1 {
 		t.Fatalf("Dare core: err %v, want an uncertified X", err)
 	}
+	descriptorClosedLoopEig(false, dA, dB, dOpts, dCore, nil)
 	dlqrCore, err := dareFor(dA, dB, eyeDense(2), eyeDense(2), dOpts, true)
 	if err == nil {
 		dlqrCore, err = explicitRiccatiSolution(dlqrCore, dOpts, nil)
@@ -88,6 +90,7 @@ func TestRiccatiUnverifiedPartialResult(t *testing.T) {
 	if err != nil || dlqrCore.accuracy != 1 {
 		t.Fatalf("Dlqr core: err %v, want an uncertified X", err)
 	}
+	descriptorClosedLoopEig(false, dA, dB, dOpts, dlqrCore, nil)
 	for _, c := range []struct {
 		op      string
 		res     func() (*RiccatiResult, error)
