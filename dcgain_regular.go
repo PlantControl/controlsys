@@ -22,7 +22,8 @@ type dcRegularSolve struct {
 	// overflow reports a non-finite X or gain.
 	overflow bool
 	// certified reports that every entry of g lies within
-	// ε·(|D_ij| + Σ_l |C_il||X_lj|) + ½ulp of the exact gain.
+	// ε·(|D_ij| + Σ_l |C_il||X_lj|) + ½ulp of the exact gain, and that an
+	// entry of 0 is exact: its error bound is 0.
 	certified bool
 	// steps counts the refinement steps taken; stalled reports that the
 	// residual stopped halving; unbound that β ≥ 1, a non-finite bound or a
@@ -70,6 +71,9 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 //	(‖C_i‖₁·η_j + γ_{6n+5}·S'_ij)·(1 + γ_{3n+10}) ≤ τ_ij = ε·(|D_ij| + Σ_l|C_il||X_lj|),
 //
 // so the once-rounded fl(s' + c') is within τ_ij + ½ulp of the exact gain.
+// A rounded 0 is certified only with a bound of 0: within a nonzero bound it
+// has no correct digit, and consumers read 0 as a zero gain (UP7H7O), so
+// the refinement goes on until the sum resolves from 0 or stalls.
 // The last factor covers the double rounding of the bound and τ
 // themselves, and τ's own error ε·‖C_i‖₁·η_j against τ at the exact X
 // (2u). An entry whose bound exceeds ε·(|D_ij| + ‖C_i‖₁·max_l|X_lj|), above
@@ -298,6 +302,9 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 				e := (cnorm[i]*eta[j] + resGamma*gabs) * eFactor
 				ok := e <= tau && !math.IsInf(tau, 0) && (tau == 0 || tau >= 0x1p-1022)
 				if e == 0 && cnorm[i] != 0 && eta[j] != 0 {
+					ok = false
+				}
+				if gr.Data[i*gr.Stride+j] == 0 && e > 0 {
 					ok = false
 				}
 				if !ok {

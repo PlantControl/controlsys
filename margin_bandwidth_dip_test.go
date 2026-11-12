@@ -298,18 +298,19 @@ func TestBandwidthDipPastDCWithoutPencilRoots(t *testing.T) {
 }
 
 // 0.05s²/(s + 0.7)² with 0.7·0.7 rounded realizes D = 0.05 cancelling
-// C(−A)⁻¹B to 5.7e-20 below an ulp of D: DCGain certifies 0 to its own
-// rounding, and Bandwidth took that zero for MATLAB's high-pass +Inf, while
-// the model's gain dips 3 dB below its DC value at ω ≈ 2e-9 (CNGTCF).
-func TestBandwidthCertifiedZeroDCGainResolvedInDoubleDouble(t *testing.T) {
+// C(−A)⁻¹B to 1.4e-18, below an ulp of D: DCGain certified 0 to its own
+// rounding (UP7H7O), and Bandwidth took that zero for MATLAB's high-pass
+// +Inf, while the model's gain dips 3 dB below its DC value at ω ≈ 2e-9
+// (CNGTCF).
+func TestBandwidthCancelledDCGainResolved(t *testing.T) {
 	pole := 0.7
 	res, err := (&TransferFunc{Num: [][][]float64{{{0.05, 0, 0}}}, Den: [][]float64{{1, 2 * pole, pole * pole}}}).StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sys := res.Sys
-	if g, err := sys.DCGain(); err != nil || g.At(0, 0) != 0 {
-		t.Skipf("DCGain = %v, %v; the case needs a certified zero", g.At(0, 0), err)
+	if g, err := sys.DCGain(); err != nil || g.At(0, 0) != 1.3594567648471302e-18 {
+		t.Errorf("DCGain = %v, %v; want 1.3594567648471302e-18 (exact)", g.At(0, 0), err)
 	}
 	want := bandwidthDipOracle(sys)
 	if got, err := Bandwidth(sys, -3); err != nil || !(math.Abs(got-want) <= 1e-6*want) {

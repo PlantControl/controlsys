@@ -680,9 +680,10 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // returns ErrAccuracyUnverified; a dip not unimodal within two scan steps,
 // or one past the response's rise above twice its DC value, is outside the
 // scan. It returns +Inf when the gain never drops that far, as for a DC
-// gain of 0 (MATLAB's high-pass result); a zero that DCGain certifies only
-// to its own rounding, and that the double-double DC response resolves from
-// zero, takes that response as the DC gain instead. An infinite DC
+// gain of 0 (MATLAB's high-pass result); a zero DCGain returns with a nil
+// error that the double-double DC response resolves from zero, as DCGain's
+// unproven evaluation of a descriptor model can give, takes that response
+// as the DC gain instead. An infinite DC
 // gain (an integrator) puts the threshold at ∞, so the bandwidth is
 // undefined rather than +Inf; python-control returns NaN, which the Go error
 // rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
@@ -721,10 +722,11 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	return bw, nil
 }
 
-// bandwidth is Bandwidth for the DC gain dc, which DCGain certified when
-// certified is set. A certified zero is zero to DCGain's rounding; where the
-// double-double DC response resolves it from zero, that response is the DC
-// gain, as for D cancelling C(sI − A)⁻¹B at DC to an ulp of D.
+// bandwidth is Bandwidth for the DC gain dc, which DCGain returned with a
+// nil error when certified is set. On an explicit model such a zero is the
+// float model's exact gain (UP7H7O); where the double-double DC response
+// resolves a zero from zero, as on a descriptor model DCGain evaluates
+// without a certificate, that response is the DC gain.
 func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error) {
 	dcMag := math.Abs(dc)
 	if dcMag == 0 && certified && sys.internalDelayCount() == 0 {
