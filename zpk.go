@@ -261,7 +261,10 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 // row takes its poles from eig(A), each channel its zeros from the system
 // pencil and its gain from the leading Markov parameter, when they fit the
 // response at least as well as the roots of the transfer-function
-// polynomials, which lose tight root clusters.
+// polynomials, which lose tight root clusters. A row of such a model left
+// with the polynomial roots is checked against the stored model's response
+// (zpkUnverifiedRow); when one is not verified the result is returned with
+// an error wrapping ErrAccuracyUnverified.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
 	if err != nil {
@@ -271,7 +274,7 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
-	sys.zpkPencilRows(zpk, tfResult.RowDegrees)
+	fallback := sys.zpkPencilRows(zpk, tfResult.RowDegrees)
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
 	res := &ZPKResult{
@@ -279,9 +282,9 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 		MinimalOrder: tfResult.MinimalOrder,
 		RowDegrees:   tfResult.RowDegrees,
 	}
-	if sys.zpkVerifiable() {
-		if i := sys.zpkUnverifiedRow(zpk); i >= 0 {
-			return res, fmt.Errorf("ZPKModel: output %d not verified against the model's response: %w", i, ErrAccuracyUnverified)
+	if slices.Contains(fallback, true) {
+		if i := sys.zpkUnverifiedRow(zpk, fallback); i >= 0 {
+			return res, fmt.Errorf("ZPKModel: output %d: transfer-function roots not verified against the model's response: %w", i, ErrAccuracyUnverified)
 		}
 	}
 	return res, nil

@@ -6,8 +6,8 @@ import (
 	"slices"
 )
 
-// zpkUnverifiedRow returns the first row of z, the ZPK of the explicit
-// delay-free model sys, that is not verified against the stored model's
+// zpkUnverifiedRow returns the first row i with rows[i] set of z, the ZPK
+// of the explicit delay-free model sys, that is not verified against the stored model's
 // exact response to tol = √ε, or −1 when every row is. Row i is verified
 // when no probe refutes it and the probes where every entry of the row
 // verifies give at least n + deg_i + 1 interpolation conditions
@@ -29,8 +29,8 @@ import (
 // and Ẑ (zpkEvalBounded) verifies when |Ĝ − Ẑ| + δ_G + δ_Z ≤ tol·scale,
 // δ the rigorous first-order bounds on their evaluation for the stored
 // data and the returned roots and gain, and scale the largest |Ĝ|, |Ẑ| of
-// the probe's entries: the exact deviation is then within tol·scale. It
-// refutes the row when |Ĝ − Ẑ| − δ_G − δ_Z > tol·max(scale, terms_G), δ_G
+// the probe's checked entries: the exact deviation is then within
+// tol·scale. It refutes the row when |Ĝ − Ẑ| − δ_G − δ_Z > tol·max(scale, terms_G), δ_G
 // the computational bound and terms_G the entry's own terms Σ_l
 // |C_il||Û_lj| + |D_ij|, as classifyProbe refutes a cut: the exact
 // deviation then exceeds tol relative to the larger of the response and the
@@ -40,16 +40,20 @@ import (
 // neither. A probe the plain bounds leave open is sharpened once; one where
 // GEPP meets an exactly singular model, or where Ẑ is not finite, counts
 // for neither.
-func (sys *System) zpkUnverifiedRow(z *ZPK) int {
+func (sys *System) zpkUnverifiedRow(z *ZPK, rows []bool) int {
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return -1
 	}
 	tol := math.Sqrt(eps())
 	discrete := sys.Dt != 0
+	first := slices.Index(rows, true)
+	if first < 0 {
+		return -1
+	}
 	pts, mp, ok := axisProbes(sys, nil)
 	if !ok {
-		return 0
+		return first
 	}
 	win := zpkSharedPoleWindows(mp, z, tol)
 	var zeros, roots []complex128
@@ -95,7 +99,10 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 			}
 			for i := range p {
 				for j := range m {
-					zv[i*m+j], zb[i*m+j], zok[i*m+j] = zpkEvalBounded(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s)
+					zv[i*m+j], zb[i*m+j], zok[i*m+j] = 0, 0, false
+					if rows[i] {
+						zv[i*m+j], zb[i*m+j], zok[i*m+j] = zpkEvalBounded(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s)
+					}
 				}
 			}
 			o := k * pm
@@ -103,6 +110,9 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 			for pass := 0; ; pass++ {
 				scale := 0.0
 				for i := range p {
+					if !rows[i] {
+						continue
+					}
 					for j := range m {
 						g, _ := gfull(o, i, j)
 						scale = math.Max(scale, math.Max(cmplx.Abs(g), cmplx.Abs(zv[i*m+j])))
@@ -111,7 +121,10 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 				ts := tol * scale
 				open := false
 				for i := range p {
-					verified[i] = true
+					verified[i] = rows[i]
+					if !rows[i] {
+						continue
+					}
 					for j := range m {
 						e := i*m + j
 						if !zok[e] {
@@ -150,7 +163,9 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 	for round := range 3 {
 		short := 0
 		for i := range p {
-			short = max(short, need[i]-weight[i])
+			if rows[i] {
+				short = max(short, need[i]-weight[i])
+			}
 		}
 		if short <= 0 {
 			return -1
@@ -161,7 +176,7 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 		}
 	}
 	for i := range p {
-		if weight[i] < need[i] {
+		if rows[i] && weight[i] < need[i] {
 			return i
 		}
 	}
@@ -325,10 +340,4 @@ func zpkEvalBounded(zs, ps []complex128, k float64, s complex128) (complex128, f
 	}
 	g := gammaN(4*len(zs) + 7*len(ps))
 	return v, g*cmplx.Abs(v)/(1-g) + 2*math.SmallestNonzeroFloat64, true
-}
-
-// zpkVerifiable reports whether zpkUnverifiedRow applies to sys: an
-// explicit, finite model without delays or an LFT.
-func (sys *System) zpkVerifiable() bool {
-	return !sys.IsDescriptor() && !sys.HasDelay() && sys.LFT == nil && requireFiniteSystem("ZPKModel", sys) == nil
 }

@@ -25,15 +25,18 @@ import (
 // zero count, and each channel fits the response of the structurally
 // minimal part, at the low-frequency probe and at a probe on the scale of
 // its largest root, no worse than its polynomial roots do. Descriptor
-// models keep the polynomial roots.
-func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
+// models keep the polynomial roots. The result marks the rows of nonzero
+// degree that keep the polynomial roots for want of a pencil row, nil when
+// sys is not such a model.
+func (sys *System) zpkPencilRows(z *ZPK, deg []int) (fallback []bool) {
 	n, m, p := sys.Dims()
 	if n == 0 || sys.IsDescriptor() || sys.HasDelay() || sys.LFT != nil || len(deg) != p {
-		return
+		return nil
 	}
 	if requireFiniteSystem("ZPKModel", sys) != nil {
-		return
+		return nil
 	}
+	fallback = make([]bool, p)
 	w := newZPKPencilWork(n, m)
 	for i := range p {
 		if deg[i] == 0 {
@@ -41,6 +44,7 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 		}
 		zeros, poles, gains, ok := sys.zpkPencilRow(z, i, deg[i], w)
 		if !ok {
+			fallback[i] = true
 			continue
 		}
 		for j := range m {
@@ -52,6 +56,7 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 			z.Gain[i][j] = gains[j]
 		}
 	}
+	return fallback
 }
 
 // zpkPencilWork holds the buffers zpkPencilRow reuses across rows and
