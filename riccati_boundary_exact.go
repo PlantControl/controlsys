@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
@@ -410,8 +411,8 @@ func integerDescending(q []*big.Rat) []*big.Int {
 		lcm.Mul(lcm, new(big.Int).Quo(d, &g))
 	}
 	out := make([]*big.Int, 0, len(q))
-	for i := len(q) - 1; i >= 0; i-- {
-		v := new(big.Int).Mul(q[i].Num(), new(big.Int).Quo(lcm, q[i].Denom()))
+	for _, c := range slices.Backward(q) {
+		v := new(big.Int).Mul(c.Num(), new(big.Int).Quo(lcm, c.Denom()))
 		if len(out) == 0 && v.Sign() == 0 {
 			continue
 		}
