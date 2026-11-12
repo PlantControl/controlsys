@@ -9,7 +9,7 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// dcRegularSolve is the regular DC solve of P = x0·I − A, P·X = B, with an
+// dcRegularSolve is the regular DC solve of P = x0·E − A, P·X = B, with an
 // a posteriori forward-error certificate (HUUZRO).
 type dcRegularSolve struct {
 	// g is D + C·X from the refined X, rounded once from double-double.
@@ -47,8 +47,11 @@ func dcGamma(k int) float64 { return float64(k) * dcUnit / (1 - float64(k)*dcUni
 // of a double one, leaves the normal range and the u-based bounds fail.
 const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 
-// solveDCRegular solves P·X = B with the double LU of P = x0·I − A and
-// certifies G = D + C·X entry by entry. P⁻¹ is bounded rigorously from an
+// solveDCRegular solves P·X = B with the double LU of P = x0·E − A, E nil
+// for the identity, and certifies G = D + C·X entry by entry. x0·E must be
+// exact (x0 = 1 for a descriptor); P is rounded entry by entry, its low
+// words plo carried into the residual (OECG2I), and u·max|P_ii| below is
+// u·‖fl(P)‖∞ for E ≠ I. P⁻¹ is bounded rigorously from an
 // approximate inverse Rinv and the Neumann series:
 //
 //	β = (‖I − fl(P·Rinv)‖∞ + (γ_n‖P‖∞ + u·max|P_ii|·[x0 ≠ 0])‖Rinv‖∞)(1 + γ_{n+4}),
@@ -114,12 +117,17 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 //
 // β ≥ 1, a non-finite bound, or a nonzero product below dcProductFloor
 // leaves the row unbound; with refine unset it then returns at once.
-func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSolve {
+func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSolve {
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	ar, br, cr := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
 	nn, nm := n*n, n*m
-	slab := make([]float64, 4*nn+2*nm+6*n+p+5*m)
+	full := E != nil && x0 != 0
+	nlo := n
+	if full {
+		nlo = nn
+	}
+	slab := make([]float64, 4*nn+2*nm+5*n+nlo+p+5*m)
 	take := func(k int) []float64 {
 		v := slab[:k:k]
 		slab = slab[k:]
@@ -127,20 +135,29 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 	}
 	pd, luf, rinv, f := take(nn), take(nn), take(nn), take(nn)
 	xd, rhs := take(nm), take(nm)
-	plo, work := take(n), take(4*n)
+	plo, work := take(nlo), take(4*n)
 	cnorm, rho, rhoPrev, xmax := take(p), take(m), take(m), take(m)
 	eta, rerr, w := take(m), take(m), take(n)
 	ints := make([]int, 2*n)
 	ipiv, iwork := ints[:n:n], ints[n:]
 
-	pdiag := 0.0
+	pround := 0.0
 	for i := range n {
 		for j := range n {
 			pd[i*n+j] = -ar.Data[i*ar.Stride+j]
 		}
-		if x0 != 0 {
+		switch {
+		case full:
+			er := E.RawMatrix()
+			rs := 0.0
+			for j := range n {
+				pd[i*n+j], plo[i*n+j] = twoSum(x0*er.Data[i*er.Stride+j], -ar.Data[i*ar.Stride+j])
+				rs += math.Abs(pd[i*n+j])
+			}
+			pround = max(pround, rs)
+		case x0 != 0:
 			pd[i*n+i], plo[i] = twoSum(x0, -ar.Data[i*ar.Stride+i])
-			pdiag = max(pdiag, math.Abs(pd[i*n+i]))
+			pround = max(pround, math.Abs(pd[i*n+i]))
 		}
 	}
 	copy(luf, pd)
@@ -169,7 +186,7 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 		}
 	}
 
-	nu, pnorm, bound := dcInverseBound(P, LU, ipiv, rinv, f, work, pdiag)
+	nu, pnorm, bound := dcInverseBound(P, LU, ipiv, rinv, f, work, pround)
 	res.unbound = !bound
 	if !bound && !refine {
 		return res
@@ -199,8 +216,16 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 	tauFactor := 1 + dcGamma(2*n+4)
 	lnGamma, onestepFactor := dcGamma(3*n), 1+dcGamma(2*n+6)
 	plomax := 0.0
-	for _, v := range plo {
-		plomax = max(plomax, math.Abs(v))
+	for i := range n {
+		if !full {
+			plomax = max(plomax, math.Abs(plo[i]))
+			continue
+		}
+		rs := 0.0
+		for _, v := range plo[i*n : i*n+n] {
+			rs += math.Abs(v)
+		}
+		plomax = max(plomax, rs)
 	}
 	pexact := (pnorm + plomax) * (1 + dcGamma(1))
 	onestep := false
@@ -226,7 +251,9 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 					var q float64
 					s, q = twoSum(s, pr)
 					t := -v * xk.lo
-					if k == i {
+					if full {
+						t -= plo[i*n+k] * xk.hi
+					} else if k == i {
 						t -= plo[i] * xk.hi
 					}
 					c += q
@@ -361,7 +388,15 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 					t += math.Abs(luf[i*n+k]) * w[k]
 				}
 				lud = max(lud, t)
-				plod = max(plod, math.Abs(plo[i]*rhs[i*m+j]))
+				if full {
+					t = 0
+					for k, v := range plo[i*n : i*n+n] {
+						t += math.Abs(v * rhs[k*m+j])
+					}
+					plod = max(plod, t)
+				} else {
+					plod = max(plod, math.Abs(plo[i]*rhs[i*m+j]))
+				}
 				xm = max(xm, math.Abs(x[i*m+j].hi)+math.Abs(x[i*m+j].lo))
 			}
 			r := rerr[j] + lnGamma*lud + plod + pexact*4*dcUnit*dcUnit*xm
@@ -396,8 +431,9 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 // dcInverseBound returns ν ≥ ‖P⁻¹‖∞ for the exact P whose rounded form P
 // the factors LU (with ipiv) are of, from Rinv = LU⁻¹ (in rinv) and
 // F = fl(P·Rinv) (in f); ok is false where β ≥ 1, a bound is not finite, or
-// a product of P and Rinv may lie below dcProductFloor.
-func dcInverseBound(P, LU blas64.General, ipiv []int, rinv, f, work []float64, pdiag float64) (nu, pnorm float64, ok bool) {
+// a product of P and Rinv may lie below dcProductFloor. u·pround bounds
+// ‖P − fl(P)‖∞.
+func dcInverseBound(P, LU blas64.General, ipiv []int, rinv, f, work []float64, pround float64) (nu, pnorm float64, ok bool) {
 	n := P.Rows
 	copy(rinv, LU.Data)
 	Rinv := blas64.General{Rows: n, Cols: n, Stride: n, Data: rinv}
@@ -446,7 +482,7 @@ func dcInverseBound(P, LU blas64.General, ipiv []int, rinv, f, work []float64, p
 		resid = max(resid, s)
 	}
 	g := 1 + dcGamma(n+4)
-	beta := (resid + (dcGamma(n)*pnorm+dcUnit*pdiag)*rnorm) * g
+	beta := (resid + (dcGamma(n)*pnorm+dcUnit*pround)*rnorm) * g
 	if !(beta < 1) {
 		return 0, 0, false
 	}

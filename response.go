@@ -399,13 +399,16 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
-// unity at DC. Where the DC solve with I−A (A) succeeds, a nil error means
-// the exact gain of the float model to within the rounding of each entry's
-// own terms, ε·(|D_ij| + Σ_l |C_il||X_lj|) with X = (I−A)⁻¹B, plus half an
-// ulp: a rigorous forward-error bound proves the solve, after double-double
+// unity at DC. Where the DC solve with I−A (A) succeeds, E−A (A) for a
+// descriptor model without internal delays, a nil error means the exact
+// gain of the float model to within the rounding of each entry's own terms,
+// ε·(|D_ij| + Σ_l |C_il||X_lj|) with X = (I−A)⁻¹B, plus half an ulp; a
+// structurally zero gain may be returned as a value within its error bound
+// of 0. A rigorous forward-error bound proves the solve, after double-double
 // refinement where needed, or the exact solve replaces it; above order 16 a
 // solve the bound cannot prove keeps its refined value with
-// ErrAccuracyUnverified. A 0 within that bound has no correct digit and
+// ErrAccuracyUnverified, except that a descriptor model returns its
+// evaluated gain where the evaluation gives one. A 0 within that bound has no correct digit and
 // asserts a zero gain, so it is certified only where the bound is itself 0;
 // otherwise the solve refines on, and the exact solve decides a 0 that
 // persists, or above order 16 it keeps ErrAccuracyUnverified: D cancelling
@@ -451,19 +454,30 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
 	}
-	if sys.HasInternalDelay() || sys.IsDescriptor() {
-		gain, err := sys.dcGainByEvaluation()
-		if err == nil || !errors.Is(err, ErrSingularTransform) {
+	var unproven *mat.Dense
+	if sys.IsDescriptor() && !sys.HasInternalDelay() {
+		gain, err, ok := sys.dcGainDescriptorRegular()
+		if ok {
 			return gain, err
 		}
-		return sys.dcGainOfDelayFreeExplicit(err, offPole)
+		unproven = gain
+	}
+	if sys.HasInternalDelay() || sys.IsDescriptor() {
+		gain, err := sys.dcGainByEvaluation()
+		if err != nil && errors.Is(err, ErrSingularTransform) {
+			gain, err = sys.dcGainOfDelayFreeExplicit(err, offPole)
+		}
+		if gain == nil && unproven != nil {
+			return unproven, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
+		}
+		return gain, err
 	}
 
 	x0 := 0.0
 	if sys.IsDiscrete() {
 		x0 = 1
 	}
-	r := solveDCRegular(sys.A, sys.B, sys.C, sys.D, x0, n > exactDetMaxOrder)
+	r := solveDCRegular(nil, sys.A, sys.B, sys.C, sys.D, x0, n > exactDetMaxOrder)
 	switch {
 	case r.solveErr != nil:
 		return sys.dcGainOffPole(offPole, r.solveErr)
@@ -474,7 +488,7 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	case n > exactDetMaxOrder:
 		return r.g, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
 	}
-	strict, overflow, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, x0)
+	strict, overflow, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, x0)
 	switch {
 	case !ok:
 		return sys.dcGainOffPole(offPole, mat.Condition(r.cond))
@@ -482,6 +496,40 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 		return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
 	}
 	return strict, nil
+}
+
+// dcGainDescriptorRegular certifies the DC gain of a delay-free descriptor
+// model as the explicit path does: P = −A (E drops out at s = 0) or E − A
+// at z = 1, solved by solveDCRegular, then the exact solve for
+// n ≤ exactDetMaxOrder (OECG2I). ok is false where P is singular or
+// ill-conditioned in double, the gain overflowed, P is exactly singular,
+// or the solve is unproven above exactDetMaxOrder: dcGainByEvaluation and
+// its routes decide then, the unproven gain (returned with ok false)
+// standing with ErrAccuracyUnverified only where they give no value.
+func (sys *System) dcGainDescriptorRegular() (gain *mat.Dense, err error, ok bool) {
+	n, _, _ := sys.Dims()
+	x0 := 0.0
+	var e *mat.Dense
+	if sys.IsDiscrete() {
+		x0, e = 1, sys.E
+	}
+	r := solveDCRegular(e, sys.A, sys.B, sys.C, sys.D, x0, n > exactDetMaxOrder)
+	switch {
+	case r.solveErr != nil || r.overflow:
+		return nil, nil, false
+	case r.certified:
+		return r.g, nil, true
+	case n > exactDetMaxOrder:
+		return r.g, nil, false
+	}
+	strict, overflow, ok := exactDCGainAtNonsingular(e, sys.A, sys.B, sys.C, sys.D, x0)
+	switch {
+	case !ok:
+		return nil, nil, false
+	case overflow:
+		return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow), true
+	}
+	return strict, nil, true
 }
 
 // dcGainOverflowed resolves a delay-free explicit model whose DC solve
@@ -569,7 +617,7 @@ func (sys *System) dcGainBalancedCertified(x0 float64) (*mat.Dense, bool) {
 			}
 		}
 	}
-	r := solveDCRegular(mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), sys.D, x0, true)
+	r := solveDCRegular(nil, mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), sys.D, x0, true)
 	return r.g, r.certified && r.solveErr == nil && !r.overflow
 }
 
@@ -717,7 +765,7 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 		x0 = 1
 	}
 	if !r.singular {
-		if strict, _, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, x0); ok {
+		if strict, _, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, x0); ok {
 			return dcGainOffDC(g, strict)
 		}
 	}
@@ -1401,7 +1449,7 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
-	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
+	pHat, bHat, cHat, shift := exactScaledModel(nil, A, B, C, x0)
 
 	w := n + m
 	work := make([]*big.Int, n*w)
@@ -1473,13 +1521,13 @@ func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense
 	return gain, overflow
 }
 
-// exactDCGainAtNonsingular is exactDCGainLimitChecked where x0·I − A is
-// exactly nonsingular, by one fraction-free solve; ok is false where it is
-// exactly singular.
-func exactDCGainAtNonsingular(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow, ok bool) {
+// exactDCGainAtNonsingular is exactDCGainLimitChecked where x0·E − A (E nil
+// for the identity) is exactly nonsingular, by one fraction-free solve; ok
+// is false where it is exactly singular.
+func exactDCGainAtNonsingular(E, A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow, ok bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
-	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
+	pHat, bHat, cHat, shift := exactScaledModel(E, A, B, C, x0)
 	w := n + m
 	work := make([]*big.Int, n*w)
 	y := make([]*big.Int, n*m)
@@ -1568,7 +1616,7 @@ func dyadicQuoFloat64(num, den *big.Int, shift int, d float64) float64 {
 func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *mat.Dense, overflow bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
-	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
+	pHat, bHat, cHat, shift := exactScaledModel(nil, A, B, C, x0)
 	adj, det := faddeevLeVerrier(pHat, n)
 	od := 0
 	for det[od].Sign() == 0 {
@@ -1623,9 +1671,10 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *m
 	return gain, strict, overflow
 }
 
-// exactScaledModel returns P̂ = s·(x0·I − A), B̂ and Ĉ as integers, each
-// scaled by a power of two, and the shift with G = D + 2^shift·Ĉ(σ̂I + P̂)⁻¹B̂.
-func exactScaledModel(A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.Int, shift int) {
+// exactScaledModel returns P̂ = s·(x0·E − A), E nil for the identity, B̂
+// and Ĉ as integers, each scaled by a power of two, and the shift with
+// G = D + 2^shift·Ĉ(σ̂I + P̂)⁻¹B̂ (at σ̂ = 0 for E ≠ I, where x0 must be 1).
+func exactScaledModel(E, A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.Int, shift int) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	aRaw, bRaw, cRaw := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
@@ -1644,11 +1693,21 @@ func exactScaledModel(A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.I
 		return e0
 	}
 	seedA := math.MaxInt
-	if x0 != 0 {
+	full := E != nil && x0 != 0
+	var eRaw blas64.General
+	switch {
+	case full:
+		eRaw = E.RawMatrix()
+		seedA = minExp(eRaw, math.MaxInt)
+	case x0 != 0:
 		_, seedA = math.Frexp(x0)
 	}
 	ea, eb, ec := minExp(aRaw, seedA), minExp(bRaw, math.MaxInt), minExp(cRaw, math.MaxInt)
-	slab := make([]big.Int, n*n+n*m+p*n+n)
+	nx := n
+	if full {
+		nx = n * n
+	}
+	slab := make([]big.Int, n*n+n*m+p*n+nx)
 	scaled := func(v float64, e0 int) *big.Int {
 		f, e := math.Frexp(v)
 		x := &slab[0]
@@ -1661,7 +1720,12 @@ func exactScaledModel(A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.I
 		for j := range n {
 			v := scaled(aRaw.Data[i*aRaw.Stride+j], ea)
 			v.Neg(v)
-			if i == j && x0 != 0 {
+			switch {
+			case full:
+				if e := x0 * eRaw.Data[i*eRaw.Stride+j]; e != 0 {
+					v.Add(v, scaled(e, ea))
+				}
+			case i == j && x0 != 0:
 				v.Add(v, scaled(x0, ea))
 			}
 			pHat[i*n+j] = v

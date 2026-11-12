@@ -682,8 +682,8 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // scan. It returns +Inf when the gain never drops that far, as for a DC
 // gain of 0 (MATLAB's high-pass result); a zero DCGain returns with a nil
 // error that the double-double DC response resolves from zero, as DCGain's
-// unproven evaluation of a descriptor model can give, takes that response
-// as the DC gain instead. An infinite DC
+// unproven evaluation of a descriptor model with an ill-conditioned pencil
+// at DC can give, takes that response as the DC gain instead. An infinite DC
 // gain (an integrator) puts the threshold at ∞, so the bandwidth is
 // undefined rather than +Inf; python-control returns NaN, which the Go error
 // rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
@@ -723,10 +723,12 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 }
 
 // bandwidth is Bandwidth for the DC gain dc, which DCGain returned with a
-// nil error when certified is set. On an explicit model such a zero is the
-// float model's exact gain (UP7H7O); where the double-double DC response
-// resolves a zero from zero, as on a descriptor model DCGain evaluates
-// without a certificate, that response is the DC gain.
+// nil error when certified is set. Where DCGain's regular solve certifies
+// it, such a zero is the float model's exact gain (UP7H7O, OECG2I); where
+// the double-double DC response resolves a zero from zero, as on a
+// descriptor model whose pencil is ill-conditioned or singular at DC, which
+// DCGain evaluates without a certificate or through ToExplicit, that
+// response is the DC gain.
 func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error) {
 	dcMag := math.Abs(dc)
 	if dcMag == 0 && certified && sys.internalDelayCount() == 0 {

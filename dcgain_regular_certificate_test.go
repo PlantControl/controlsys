@@ -10,8 +10,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// dcGainExactRat returns X* = (x0·I − A)⁻¹B and G* = D + C·X* of the float
-// model in exact arithmetic; ok is false where x0·I − A is exactly singular.
+// dcGainExactRat returns X* = (x0·E − A)⁻¹B and G* = D + C·X* of the float
+// model in exact arithmetic, E = I for an explicit model and dropping out at
+// x0 = 0; ok is false where x0·E − A is exactly singular.
 func dcGainExactRat(sys *System) (x, g []*big.Rat, ok bool) {
 	n, m, p := sys.Dims()
 	x0 := 0.0
@@ -23,7 +24,10 @@ func dcGainExactRat(sys *System) (x, g []*big.Rat, ok bool) {
 	for i := range n {
 		for j := range n {
 			v := new(big.Rat).Neg(new(big.Rat).SetFloat64(sys.A.At(i, j)))
-			if i == j {
+			switch {
+			case x0 != 0 && sys.E != nil:
+				v.Add(v, new(big.Rat).SetFloat64(x0*sys.E.At(i, j)))
+			case i == j:
 				v.Add(v, new(big.Rat).SetFloat64(x0))
 			}
 			M[i*w+j] = v
@@ -85,7 +89,7 @@ func dcGainExactRat(sys *System) (x, g []*big.Rat, ok bool) {
 // dcGainOwnRoundingExcess returns the largest |g_ij − G*_ij| − τ_ij − ½ulp(g_ij)
 // over the entries, τ_ij = ε·(|D_ij| + Σ_l |C_il||X*_lj|) the rounding of
 // the entry's own terms (positive: the nil promise of the regular DC path is
-// broken), and ok false where x0·I − A is exactly singular.
+// broken), and ok false where x0·E − A is exactly singular.
 func dcGainOwnRoundingExcess(sys *System, g *mat.Dense) (excess float64, ok bool) {
 	x, gs, ok := dcGainExactRat(sys)
 	if !ok {

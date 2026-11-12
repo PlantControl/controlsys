@@ -231,9 +231,9 @@ func originResponseInto(sys *System, sp poleGeometry, dst []complex128) (done bo
 	} else if !(cluster() && rouche()) {
 		return false, nil
 	}
-	g := solveDCRegular(sys.A, sys.B, sys.C, sys.D, 0, false)
+	g := solveDCRegular(nil, sys.A, sys.B, sys.C, sys.D, 0, false)
 	if g.solveErr != nil || g.overflow || !g.certified {
-		strict, overflow, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, 0)
+		strict, overflow, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, 0)
 		if !ok {
 			return false, nil
 		}
