@@ -270,7 +270,7 @@ func axisRootProved(p []*big.Rat) bool {
 		}
 		q = append(q, c)
 	}
-	return q[0].Sign() == 0 || negativeRoots(q) > 0
+	return q[0].Sign() == 0 || hasNegativeRoot(q)
 }
 
 // unitCircleRootProved reports whether the ascending polynomial p of
@@ -348,40 +348,40 @@ func polyMulInt(a, b []*big.Int) []*big.Int {
 	return out
 }
 
-// negativeRoots returns the number of distinct real roots on (−∞, 0) of
-// the ascending polynomial q with q(0) ≠ 0, by its Sturm sequence.
-func negativeRoots(q []*big.Rat) int {
-	desc := func(a []*big.Rat) []*big.Rat {
-		out := make([]*big.Rat, len(a))
-		for i, v := range a {
-			out[len(a)-1-i] = new(big.Rat).Set(v)
-		}
-		for len(out) > 0 && out[0].Sign() == 0 {
-			out = out[1:]
-		}
-		return out
-	}
-	f := desc(q)
+// hasNegativeRoot reports whether the ascending polynomial q with
+// q(0) ≠ 0 has a real root on (−∞, 0): at once when q changes sign between
+// −∞ and 0, else by the count of its Sturm sequence, kept in integers as a
+// primitive pseudo-remainder sequence (each remainder scaled by a positive
+// factor, which leaves the sign changes unchanged).
+func hasNegativeRoot(q []*big.Rat) bool {
+	f := integerDescending(q)
 	deg := len(f) - 1
 	if deg <= 0 {
-		return 0
+		return false
 	}
-	df := make([]*big.Rat, deg)
+	atNegInf := func(p []*big.Int) int {
+		if (len(p)-1)%2 == 1 {
+			return -p[0].Sign()
+		}
+		return p[0].Sign()
+	}
+	atZero := func(p []*big.Int) int { return p[len(p)-1].Sign() }
+	if atNegInf(f) != atZero(f) {
+		return true
+	}
+	df := make([]*big.Int, deg)
 	for i := range deg {
-		df[i] = new(big.Rat).Mul(f[i], big.NewRat(int64(deg-i), 1))
+		df[i] = new(big.Int).Mul(f[i], big.NewInt(int64(deg-i)))
 	}
-	seq := [][]*big.Rat{f, df}
+	seq := [][]*big.Int{f, primitive(df)}
 	for {
-		r := polyRem(seq[len(seq)-2], seq[len(seq)-1])
+		r := sturmRem(seq[len(seq)-2], seq[len(seq)-1])
 		if len(r) == 0 {
 			break
 		}
-		for _, x := range r {
-			x.Neg(x)
-		}
 		seq = append(seq, r)
 	}
-	changes := func(sign func([]*big.Rat) int) int {
+	changes := func(sign func([]*big.Int) int) int {
 		k, last := 0, 0
 		for _, p := range seq {
 			s := sign(p)
@@ -395,33 +395,75 @@ func negativeRoots(q []*big.Rat) int {
 		}
 		return k
 	}
-	atNegInf := changes(func(p []*big.Rat) int {
-		if (len(p)-1)%2 == 1 {
-			return -p[0].Sign()
-		}
-		return p[0].Sign()
-	})
-	atZero := changes(func(p []*big.Rat) int { return p[len(p)-1].Sign() })
-	return atNegInf - atZero
+	return changes(atNegInf) > changes(atZero)
 }
 
-// polyRem returns a mod b for descending a and b, trimmed of exactly zero
-// leading coefficients.
-func polyRem(a, b []*big.Rat) []*big.Rat {
-	r := make([]*big.Rat, len(a))
-	for i, x := range a {
-		r[i] = new(big.Rat).Set(x)
+// integerDescending returns the ascending rational q as a descending
+// integer polynomial with the same roots and signs, trimmed of exactly
+// zero leading coefficients.
+func integerDescending(q []*big.Rat) []*big.Int {
+	lcm := big.NewInt(1)
+	var g big.Int
+	for _, c := range q {
+		d := c.Denom()
+		g.GCD(nil, nil, lcm, d)
+		lcm.Mul(lcm, new(big.Int).Quo(d, &g))
 	}
-	var t big.Rat
+	out := make([]*big.Int, 0, len(q))
+	for i := len(q) - 1; i >= 0; i-- {
+		v := new(big.Int).Mul(q[i].Num(), new(big.Int).Quo(lcm, q[i].Denom()))
+		if len(out) == 0 && v.Sign() == 0 {
+			continue
+		}
+		out = append(out, v)
+	}
+	return primitive(out)
+}
+
+// primitive divides the integer polynomial p by the positive gcd of its
+// coefficients, in place.
+func primitive(p []*big.Int) []*big.Int {
+	g := new(big.Int)
+	for _, c := range p {
+		g.GCD(nil, nil, g, new(big.Int).Abs(c))
+	}
+	if g.Sign() > 0 && g.Cmp(big.NewInt(1)) != 0 {
+		for _, c := range p {
+			c.Quo(c, g)
+		}
+	}
+	return p
+}
+
+// sturmRem returns a positive multiple of −(a mod b) for descending integer
+// a and b, primitive and trimmed of exactly zero leading coefficients.
+func sturmRem(a, b []*big.Int) []*big.Int {
+	r := make([]*big.Int, len(a))
+	for i, x := range a {
+		r[i] = new(big.Int).Set(x)
+	}
+	lb := b[0]
+	var t big.Int
 	for len(r) >= len(b) {
-		f := new(big.Rat).Quo(r[0], b[0])
+		f := new(big.Int).Set(r[0])
+		for i := range r {
+			r[i].Mul(r[i], lb)
+		}
 		for i := range b {
 			r[i].Sub(r[i], t.Mul(f, b[i]))
 		}
 		r = r[1:]
+		if lb.Sign() < 0 {
+			for _, x := range r {
+				x.Neg(x)
+			}
+		}
 	}
 	for len(r) > 0 && r[0].Sign() == 0 {
 		r = r[1:]
 	}
-	return r
+	for _, x := range r {
+		x.Neg(x)
+	}
+	return primitive(r)
 }

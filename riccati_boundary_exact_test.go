@@ -155,3 +155,51 @@ func TestRiccatiBoundaryProof_NearAxisNotProved(t *testing.T) {
 		}
 	}
 }
+
+// TestRiccatiBoundaryProof_NegativeRoot (I4J6DP): hasNegativeRoot, by sign
+// change or the integer Sturm count, against polynomials built from known
+// roots: repeated (even multiplicity, no sign change) and positive real
+// roots, and quadratics with no real root.
+func TestRiccatiBoundaryProof_NegativeRoot(t *testing.T) {
+	asc := func(roots []int64, quads int, scale int64) []*big.Rat {
+		p := []*big.Rat{big.NewRat(scale, 1)}
+		mul := func(f []*big.Rat) {
+			out := make([]*big.Rat, len(p)+len(f)-1)
+			for i := range out {
+				out[i] = new(big.Rat)
+			}
+			for i := range p {
+				for j := range f {
+					out[i+j].Add(out[i+j], new(big.Rat).Mul(p[i], f[j]))
+				}
+			}
+			p = out
+		}
+		for _, r := range roots {
+			mul([]*big.Rat{big.NewRat(-r, 3), big.NewRat(1, 1)})
+		}
+		for k := range quads {
+			mul([]*big.Rat{big.NewRat(int64(k+2), 1), big.NewRat(int64(k), 7), big.NewRat(1, 1)})
+		}
+		return p
+	}
+	for _, c := range []struct {
+		roots []int64
+		quads int
+		scale int64
+		want  bool
+	}{
+		{[]int64{-1}, 0, 1, true},
+		{[]int64{-1, -1}, 1, -3, true},
+		{[]int64{-1, -1, -2, -2}, 2, 5, true},
+		{[]int64{-4, -4, 4}, 1, -1, true},
+		{[]int64{5, 6}, 3, 2, false},
+		{[]int64{-3, -3, -5, -5, 2, 2}, 2, 7, true},
+		{[]int64{1, 2, 2}, 1, -2, false},
+		{nil, 3, 1, false},
+	} {
+		if got := hasNegativeRoot(asc(c.roots, c.quads, c.scale)); got != c.want {
+			t.Errorf("roots %v/3, %d quadratics, scale %d: negative root %v, want %v", c.roots, c.quads, c.scale, got, c.want)
+		}
+	}
+}
