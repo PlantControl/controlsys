@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math/cmplx"
 	"testing"
 
@@ -43,8 +44,11 @@ func TestZPKModelRotatedDiscreteDoubleIntegratorKeepsMarkovGain(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	// eig(A) splits the double pole by 6e-9 against a rounding bound of
+	// 2e-9, so near z = 1 the response misses the stored model's beyond √ε
+	// (X5OSBB census oracle 1.3e6·√ε): unverified.
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("err %v, want ErrAccuracyUnverified", err)
 	}
 	z := res.ZPK
 	if len(z.Poles[0][0]) != 2 || len(z.Zeros[0][0]) != 1 {

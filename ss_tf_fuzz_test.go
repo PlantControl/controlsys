@@ -101,7 +101,7 @@ func FuzzSSToTF(f *testing.F) {
 
 		zr, err := sys.ZPKModel(nil)
 		fzContract(t, s, "ZPKModel", zr != nil, err)
-		fzErr(t, s, "ZPKModel", err)
+		fzErr(t, s, "ZPKModel", err, ErrAccuracyUnverified)
 		if zr.MinimalOrder != res.MinimalOrder || !slices.Equal(zr.RowDegrees, res.RowDegrees) {
 			t.Fatalf("ZPKModel order %d %v, TF %d %v\n%s", zr.MinimalOrder, zr.RowDegrees, res.MinimalOrder, res.RowDegrees, s)
 		}

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -40,8 +41,11 @@ func zpkClusteredDiscreteMatched(t *testing.T) *System {
 func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 	sys := zpkClusteredDiscreteMatched(t)
 	res, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	// Its eigenvalue and tzero roots stay inside the unit circle but are
+	// off the stored model's response beyond √ε near the cluster (X5OSBB
+	// census oracle 6.5e30·√ε), so ZPKModel reports them unverified.
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("err %v, want ErrAccuracyUnverified", err)
 	}
 	if res.MinimalOrder != 8 || len(res.RowDegrees) != 1 || res.RowDegrees[0] != 8 {
 		t.Fatalf("MinimalOrder %d RowDegrees %v, want 8 [8]", res.MinimalOrder, res.RowDegrees)

@@ -274,11 +274,17 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	sys.zpkPencilRows(zpk, tfResult.RowDegrees)
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
-	return &ZPKResult{
+	res := &ZPKResult{
 		ZPK:          zpk,
 		MinimalOrder: tfResult.MinimalOrder,
 		RowDegrees:   tfResult.RowDegrees,
-	}, nil
+	}
+	if sys.zpkVerifiable() {
+		if i := sys.zpkUnverifiedRow(zpk); i >= 0 {
+			return res, fmt.Errorf("ZPKModel: output %d not verified against the model's response: %w", i, ErrAccuracyUnverified)
+		}
+	}
+	return res, nil
 }
 
 // ZPKResult is the result of (*System).ZPKModel.
