@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -14,6 +15,8 @@ import (
 type dcRegularSolve struct {
 	// g is D + C·X from the refined X, rounded once from double-double.
 	g *mat.Dense
+	// x is the refined X, row-major n×m, where g is.
+	x []dd
 	// cond is the LU condition estimate of the double P.
 	cond float64
 	// solveErr is the LU solve's failure (an ill-conditioned or exactly
@@ -50,9 +53,12 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 // solveDCRegular solves P·X = B with the double LU of P = x0·E − A, E nil
 // for the identity, and certifies G = D + C·X entry by entry. x0·E must be
 // exact (x0 = 1 for a descriptor); P is rounded entry by entry, its low
-// words plo carried into the residual (OECG2I), and u·max|P_ii| below is
-// u·‖fl(P)‖∞ for E ≠ I. P⁻¹ is bounded rigorously from an
-// approximate inverse Rinv and the Neumann series:
+// words plo carried into the residual (OECG2I). For E ≠ I, u·max|P_ii|
+// below is max_i Σ_j|plo_ij|·(1 + γ_{2n+2}): twoSum's plo is the exact
+// rounding error, so that is ‖P − fl(P)‖∞ itself, 0 for an exact P, and a
+// descriptor model with E = 2I certifies as its explicit twin (KQVXXL).
+// P⁻¹ is bounded rigorously from an approximate inverse Rinv and the
+// Neumann series:
 //
 //	β = (‖I − fl(P·Rinv)‖∞ + (γ_n‖P‖∞ + u·max|P_ii|·[x0 ≠ 0])‖Rinv‖∞)(1 + γ_{n+4}),
 //	ν = ‖Rinv‖∞/(1 − β)·(1 + γ_{n+4}) ≥ ‖P⁻¹‖∞ for β < 1,
@@ -149,16 +155,28 @@ func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegular
 		switch {
 		case full:
 			er := E.RawMatrix()
-			rs := 0.0
 			for j := range n {
 				pd[i*n+j], plo[i*n+j] = twoSum(x0*er.Data[i*er.Stride+j], -ar.Data[i*ar.Stride+j])
-				rs += math.Abs(pd[i*n+j])
 			}
-			pround = max(pround, rs)
 		case x0 != 0:
 			pd[i*n+i], plo[i] = twoSum(x0, -ar.Data[i*ar.Stride+i])
 			pround = max(pround, math.Abs(pd[i*n+i]))
 		}
+	}
+	plomax := 0.0
+	for i := range n {
+		if !full {
+			plomax = max(plomax, math.Abs(plo[i]))
+			continue
+		}
+		rs := 0.0
+		for _, v := range plo[i*n : i*n+n] {
+			rs += math.Abs(v)
+		}
+		plomax = max(plomax, rs)
+	}
+	if full {
+		pround = plomax * (1 + dcGamma(2*n+2)) / dcUnit
 	}
 	copy(luf, pd)
 	P := blas64.General{Rows: n, Cols: n, Stride: n, Data: pd}
@@ -215,18 +233,6 @@ func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegular
 	eFactor := 1 + dcGamma(3*n+10)
 	tauFactor := 1 + dcGamma(2*n+4)
 	lnGamma, onestepFactor := dcGamma(3*n), 1+dcGamma(2*n+6)
-	plomax := 0.0
-	for i := range n {
-		if !full {
-			plomax = max(plomax, math.Abs(plo[i]))
-			continue
-		}
-		rs := 0.0
-		for _, v := range plo[i*n : i*n+n] {
-			rs += math.Abs(v)
-		}
-		plomax = max(plomax, rs)
-	}
 	pexact := (pnorm + plomax) * (1 + dcGamma(1))
 	onestep := false
 	for step := 0; ; step++ {
@@ -424,7 +430,7 @@ func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegular
 		res.overflow, res.certified = true, false
 		return res
 	}
-	res.g = g
+	res.g, res.x = g, x
 	return res
 }
 
@@ -491,4 +497,87 @@ func dcInverseBound(P, LU blas64.General, ipiv []int, rinv, f, work []float64, p
 		return 0, 0, false
 	}
 	return nu, pnorm, true
+}
+
+// dcExactResidualPrec is the precision of dcGainExactResidual's sums: one
+// that would round fails the check.
+const dcExactResidualPrec = 512
+
+// dcGainExactResidual certifies solveDCRegular's refined X where it is the
+// exact solution: B − (x0·E − A)·X, E nil for the identity, x0·E exact, is
+// 0 in exact arithmetic. G = D + C·X is then summed exactly and rounded
+// once, the exact gain, a 0 included. ok is false where a residual is
+// nonzero, a sum needs more than dcExactResidualPrec bits, or G overflows.
+// It costs a product per nonzero pair and stops at the first nonzero
+// residual, so a dyadic model past exactDetMaxOrder, whose exact X fits
+// double-double, certifies without the exact solve.
+func dcGainExactResidual(E, A, B, C, D *mat.Dense, x0 float64, x []dd) (*mat.Dense, bool) {
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	ar, br, cr := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
+	full := E != nil && x0 != 0
+	var er blas64.General
+	if full {
+		er = E.RawMatrix()
+	}
+	s := new(big.Float).SetPrec(dcExactResidualPrec)
+	t := new(big.Float).SetPrec(dcExactResidualPrec)
+	f := new(big.Float).SetPrec(53)
+	exact := true
+	add := func(a float64, v dd) {
+		for _, w := range [2]float64{v.hi, v.lo} {
+			if !exact || a == 0 || w == 0 {
+				continue
+			}
+			if math.IsNaN(w) || math.IsInf(w, 0) {
+				exact = false
+				continue
+			}
+			t.SetFloat64(a)
+			t.Mul(t, f.SetFloat64(w))
+			s.Add(s, t)
+			exact = s.Acc() == big.Exact
+		}
+	}
+	for i := range n {
+		for j := range m {
+			s.SetFloat64(br.Data[i*br.Stride+j])
+			for k := range n {
+				xk := x[k*m+j]
+				add(ar.Data[i*ar.Stride+k], xk)
+				switch {
+				case full:
+					add(-x0*er.Data[i*er.Stride+k], xk)
+				case x0 != 0 && k == i:
+					add(-x0, xk)
+				}
+			}
+			if !exact || s.Sign() != 0 {
+				return nil, false
+			}
+		}
+	}
+	g := mat.NewDense(p, m, nil)
+	gr := g.RawMatrix()
+	var dr blas64.General
+	if D != nil {
+		dr = D.RawMatrix()
+	}
+	for i := range p {
+		for j := range m {
+			s.SetFloat64(0)
+			if D != nil {
+				s.SetFloat64(dr.Data[i*dr.Stride+j])
+			}
+			for l, c := range cr.Data[i*cr.Stride : i*cr.Stride+n] {
+				add(c, x[l*m+j])
+			}
+			v, _ := s.Float64()
+			if !exact || math.IsInf(v, 0) {
+				return nil, false
+			}
+			gr.Data[i*gr.Stride+j] = v
+		}
+	}
+	return g, true
 }
