@@ -16,9 +16,11 @@ import (
 // the g×p noise cross-covariance E{w v'}, may be nil for 0. opts carries only
 // the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
 // ErrOptionUnsupported. Errors are those of the dual Care (RiccatiResult):
-// an uncertified solution comes with ErrAccuracyUnverified, and a boundary
+// an uncertified solution comes with ErrAccuracyUnverified, a boundary
 // mode the PBH test finds undetectable is ErrNoStabilizing with
-// ErrNotDetectable.
+// ErrNotDetectable, and an eigenvalue of the dual Hamiltonian pencil (of
+// Aᵀ, Cᵀ, G*Qn*G', Rn and G*Nn as stored) proved exactly on the imaginary
+// axis is ErrNoStabilizing alone in place of ErrNotConverged.
 func Lqe(A, G, C, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	for _, m := range []struct {
 		name string
@@ -57,8 +59,9 @@ func Lqe(A, G, C, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, err
 	if n == 0 {
 		return nil, fmt.Errorf("Lqe: no states: %w", ErrDimensionMismatch)
 	}
-	res, err := kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
-	return certify("Lqe", ErrNotDetectable, res, err)
+	dual := newEstimatorDual(A, nil, G, C, nil, Qn, Rn, Nn, opts)
+	res, err := dual.solve("Lqe", true, A, nil, C)
+	return dual.certify("Lqe", true, res, err)
 }
 
 // rejectKalmanOpts keeps opts to the Workspace: the noise cross-covariance is
@@ -106,7 +109,8 @@ func rejectKalmanOpts(op string, opts *RiccatiOpts) error {
 // that Estim and Reg build from sys, i.e. E times the explicit-model gain.
 // MATLAB's kalman documentation does not specify descriptor models; this is
 // the form consistent with Estim. Singular E returns ErrDescriptorSingular.
-// The Riccati errors are as for Lqe.
+// The Riccati errors are as for Lqe, of the dual Care or Dare (its pencil
+// of Aᵀ, Cᵀ, G*Qn*G', Rbar, Nbar and E' as stored).
 func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Kalman", sys); err != nil {
 		return nil, err
@@ -127,8 +131,9 @@ func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResu
 	if err := validateNoiseCrossCovariance("Kalman", Nn, policy.m, policy.p); err != nil {
 		return nil, err
 	}
-	res, err := kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
-	return certify("Kalman", ErrNotDetectable, res, err)
+	dual := newEstimatorDual(sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
+	res, err := dual.solve("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.C)
+	return dual.certify("Kalman", sys.IsContinuous(), res, err)
 }
 
 func validateNoiseCrossCovariance(op string, Nn *mat.Dense, g, p int) error {
@@ -147,6 +152,17 @@ func validateNoiseCrossCovariance(op string, Nn *mat.Dense, g, p int) error {
 // kalmanGain solves the dual Riccati equation of Lqe, Kalman and Lqg with
 // the cores of Care and Dare, uncertified: its exported callers certify.
 func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	return newEstimatorDual(A, E, G, C, H, Qn, Rn, Nn, opts).solve(context, continuous, A, E, C)
+}
+
+// estimatorDual is the dual problem kalmanGain solves: Care or Dare of
+// (Aᵀ, Cᵀ, G·Qn·Gᵀ, Rbar) with cross term Nbar and descriptor Eᵀ in opts.
+type estimatorDual struct {
+	At, Ct, Qbar, Rbar *mat.Dense
+	opts               *RiccatiOpts
+}
+
+func newEstimatorDual(A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) estimatorDual {
 	n, _ := A.Dims()
 	g := Qn.RawMatrix().Rows
 	p, _ := C.Dims()
@@ -186,24 +202,34 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 	if opts != nil {
 		ropts.Workspace, ropts.NoScaling = opts.Workspace, opts.NoScaling
 	}
+	return estimatorDual{At: At, Ct: Ct, Qbar: Qbar, Rbar: Rbar, opts: ropts}
+}
+
+func (d estimatorDual) solve(context string, continuous bool, A, E, C *mat.Dense) (*RiccatiResult, error) {
 	var res *RiccatiResult
 	var err error
 	if continuous {
-		res, err = careCore(At, Ct, Qbar, Rbar, ropts)
+		res, err = careCore(d.At, d.Ct, d.Qbar, d.Rbar, d.opts)
 	} else {
-		res, err = dareFor(At, Ct, Qbar, Rbar, ropts, false)
+		res, err = dareFor(d.At, d.Ct, d.Qbar, d.Rbar, d.opts, false)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", context, err)
 	}
 	L := transposeGain(res.K)
-	if res.kw == nil && ropts.E != nil {
+	if res.kw == nil && d.opts.E != nil {
 		// Primal (A − LC, E), not the dual (Aᵀ − CᵀLᵀ, Eᵀ): QZ of the dual,
 		// balanced by the transposed scalings, put zw46 modes 2e-3 off
 		// where the primal's were 1.5e-6.
 		setClosedLoopPencilEig(continuous, A, L, C, E, res)
 	}
 	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil
+}
+
+// certify is the exit of Lqe and Kalman: certifyBoundary on the dual
+// problem.
+func (d estimatorDual) certify(op string, continuous bool, res *RiccatiResult, err error) (*RiccatiResult, error) {
+	return certifyBoundary(op, ErrNotDetectable, continuous, d.At, d.Ct, d.Qbar, d.Rbar, d.opts, res, err)
 }
 
 // Kalmd computes the discrete Kalman filter gain from a continuous plant
@@ -219,7 +245,8 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 // A descriptor plant with nonsingular E is discretized as its explicit model
 // x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
 // singular E returns ErrDescriptorSingular. The Riccati errors are as for
-// Lqe, of the discrete dual.
+// Lqe, of the discrete dual, but for the boundary-eigenvalue proof, which
+// Kalmd does not run: its ErrNotConverged stays.
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Kalmd", sys); err != nil {
 		return nil, err

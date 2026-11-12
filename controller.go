@@ -27,13 +27,14 @@ import (
 // the Care solution X_g with E); K is unchanged and Eig holds the
 // generalized eigenvalues of (A-BK, E). Errors are those of Care
 // (RiccatiResult): an uncertified solution comes with ErrAccuracyUnverified,
-// and an unstabilizable boundary mode is ErrNoStabilizing with
-// ErrNotStabilizable.
+// an unstabilizable boundary mode is ErrNoStabilizing with
+// ErrNotStabilizable, and a Hamiltonian pencil eigenvalue proved exactly on
+// the imaginary axis is ErrNoStabilizing alone in place of ErrNotConverged.
 func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
 	res, err = explicitRiccatiSolution(res, opts, err)
 	descriptorClosedLoopEig(true, A, B, opts, res, err)
-	return certify("Lqr", ErrNotStabilizable, res, err)
+	return certifyBoundary("Lqr", ErrNotStabilizable, true, A, B, Q, R, opts, res, err)
 }
 
 // Dlqr solves the discrete-time linear-quadratic regulator problem.
@@ -50,12 +51,13 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // beyond 1e-8. Where Dare solved the explicit model in extended precision
 // (near-singular E), X and K are those of that solve, certified when eps
 // perturbations of the data move neither beyond 1e-8, whether or not
-// Dare's X is. Errors are otherwise those of Dare, as for Lqr.
+// Dare's X is. Errors are otherwise those of Dare, as for Lqr (a symplectic
+// pencil eigenvalue proved exactly on the unit circle included).
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, true)
 	res, err = explicitRiccatiSolution(res, opts, err)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
-	return certify("Dlqr", ErrNotStabilizable, res, err)
+	return certifyBoundary("Dlqr", ErrNotStabilizable, false, A, B, Q, R, opts, res, err)
 }
 
 // explicitRiccatiSolution maps the generalized solution X of a Care or Dare

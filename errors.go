@@ -7,7 +7,8 @@ import "errors"
 // ErrAccuracyUnverified and ErrNotConverged may additionally wrap the
 // sentinel of the check that failed, and ErrNoStabilizing that of the
 // structural property it found missing (ErrNotStabilizable, ErrNotDetectable),
-// except for Care and Dare's proved boundary eigenvalue, which wraps none.
+// except for the proved boundary eigenvalue of Care, Dare, Lqr, Dlqr, Lqe
+// and Kalman, which wraps none.
 // ErrSchurFailed is itself an ErrNotConverged.
 //
 // An operation that returns a result alongside a non-nil error does so only
@@ -147,10 +148,11 @@ var (
 	// stabilizing solution (MATLAB icare/idare: no stabilizing solution),
 	// for one of two causes: a mode on or beyond the stability boundary,
 	// within a first-order band of the data, that fails the PBH rank test
-	// (wrapped with ErrNotStabilizable or ErrNotDetectable); or, from Care
-	// and Dare only, a Hamiltonian (symplectic) pencil eigenvalue exactly
-	// on the imaginary axis (unit circle), proved in exact arithmetic on
-	// the stored data (wrapped with neither). A solve that only fails to
+	// (wrapped with ErrNotStabilizable or ErrNotDetectable); or, from Care,
+	// Dare, Lqr, Dlqr (and Lqi, Lqrd, which return them), Lqe and Kalman
+	// (on their dual problem) only, a Hamiltonian (symplectic) pencil
+	// eigenvalue exactly on the imaginary axis (unit circle), proved in
+	// exact arithmetic on the stored data (wrapped with neither). A solve that only fails to
 	// find or verify a solution returns ErrNotConverged instead.
 	ErrNoStabilizing = errors.New("controlsys: no stabilizing solution exists")
 

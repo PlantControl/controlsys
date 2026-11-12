@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -27,8 +28,22 @@ const (
 	exactPencilCandidate = 1e-4
 )
 
-// boundaryProof is the error Care (continuous) or Dare reports for a solve
-// that ended in ErrNotConverged when boundaryEigenvalueProved holds.
+// certifyBoundary is the exit of Care, Dare, Lqr, Dlqr, Lqe and Kalman:
+// certify, then, for an error that is ErrNotConverged, the boundaryProof of
+// the Care (continuous) or Dare problem (A, B, Q, R, opts) op solved (for
+// Lqe and Kalman the dual one) in its place when it proves one.
+func certifyBoundary(op string, unsolvable error, continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, error) {
+	res, err = certify(op, unsolvable, res, err)
+	if errors.Is(err, ErrNotConverged) {
+		if perr := boundaryProof(op, continuous, A, B, Q, R, opts); perr != nil {
+			return nil, perr
+		}
+	}
+	return res, err
+}
+
+// boundaryProof is the error op reports for a solve of Care (continuous)
+// or Dare that ended in ErrNotConverged when boundaryEigenvalueProved holds.
 func boundaryProof(op string, continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) error {
 	if !boundaryEigenvalueProved(continuous, A, B, Q, R, opts) {
 		return nil
