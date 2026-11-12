@@ -176,7 +176,12 @@ type RiccatiOpts struct {
 //   - ErrNoStabilizing, with ErrNotStabilizable (ErrNotDetectable for
 //     Kalman, Lqe and Kalmd): a mode of (A, B) on or beyond the boundary,
 //     within a first-order band of the data, fails the PBH rank test, so
-//     no stabilizing solution exists (Report 3).
+//     no stabilizing solution exists (Report 3). From Care and Dare,
+//     ErrNoStabilizing alone: a solve that would end in ErrNotConverged
+//     whose Hamiltonian (symplectic) pencil is proved, in exact arithmetic
+//     on the stored data, to have an eigenvalue on the imaginary axis
+//     (unit circle); a stabilizing X would leave none there
+//     (icare/idare: no stabilizing solution).
 //   - ErrNotConverged: no candidate X passed verification (a float64 stable
 //     count other than n, a Newton or Hewer breakdown, an exhausted search).
 //     It does not prove that no stabilizing solution exists.
@@ -349,11 +354,22 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // verification, which proves nothing), ErrSchurFailed (itself an
 // ErrNotConverged) or ErrSingularEquation (Report 2). RiccatiResult lists
 // the errors; only ErrAccuracyUnverified comes with a result, which, like a
-// certified one, lives in opts.Workspace when one is given.
+// certified one, lives in opts.Workspace when one is given. Before it
+// returns ErrNotConverged, Care tries to prove that no stabilizing solution
+// exists (boundaryEigenvalueProved): with Q and R exactly symmetric and
+// 2n+m ≤ 40, an eigenvalue of the extended Hamiltonian pencil of the data
+// exactly on the imaginary axis is ErrNoStabilizing, not wrapped with
+// ErrNotStabilizable; without a proof ErrNotConverged stays.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
 	descriptorClosedLoopEig(true, A, B, opts, res, err)
-	return certify("Care", ErrNotStabilizable, res, err)
+	res, err = certify("Care", ErrNotStabilizable, res, err)
+	if errors.Is(err, ErrNotConverged) {
+		if perr := boundaryProof("Care", true, A, B, Q, R, opts); perr != nil {
+			return nil, perr
+		}
+	}
+	return res, err
 }
 
 // careCore is Care before certify: an uncertified X has accuracy 1 and a
@@ -962,7 +978,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // at σ ≈ ‖X‖, and ErrAccuracyUnverified where X holds no digit of
 // R + BᵀXB in an input, placedHewer), else ErrNotConverged: under cheap
 // control of a strongly unstable plant no cost scale of the pencil may
-// resolve its split. It runs them too over an uncertified pencil solution,
+// resolve its split. As Care, Dare returns ErrNoStabilizing alone in
+// place of ErrNotConverged when an eigenvalue of its extended symplectic
+// pencil is proved exactly on the unit circle (boundaryEigenvalueProved). It runs them too over an uncertified pencil solution,
 // which a certified placed X replaces: under cheap control with m = n the pencil's X can be off by
 // 4e-3 where Hewer from a placed gain certifies it to 1e-10. Not with B
 // of condition above rotationCond in the given inputs, where Newton's
@@ -1040,7 +1058,13 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
-	return certify("Dare", ErrNotStabilizable, res, err)
+	res, err = certify("Dare", ErrNotStabilizable, res, err)
+	if errors.Is(err, ErrNotConverged) {
+		if perr := boundaryProof("Dare", false, A, B, Q, R, opts); perr != nil {
+			return nil, perr
+		}
+	}
+	return res, err
 }
 
 // dareFor is Dare before certify, as careCore is Care; explicit is set by callers that return EᵀXE

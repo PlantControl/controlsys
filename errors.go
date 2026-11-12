@@ -6,7 +6,8 @@ import "errors"
 // primary sentinel of these, so callers can branch with errors.Is.
 // ErrAccuracyUnverified and ErrNotConverged may additionally wrap the
 // sentinel of the check that failed, and ErrNoStabilizing that of the
-// structural property it found missing (ErrNotStabilizable, ErrNotDetectable).
+// structural property it found missing (ErrNotStabilizable, ErrNotDetectable),
+// except for Care and Dare's proved boundary eigenvalue, which wraps none.
 // ErrSchurFailed is itself an ErrNotConverged.
 //
 // An operation that returns a result alongside a non-nil error does so only
@@ -143,10 +144,14 @@ var (
 	ErrSingularEquation = errors.New("controlsys: matrix equation is singular or nearly singular")
 
 	// ErrNoStabilizing reports a Riccati equation proved to have no
-	// stabilizing solution: a mode on or beyond the stability boundary,
-	// within a first-order band of the data, that fails the PBH rank test.
-	// A solve that only fails to find or verify a solution returns
-	// ErrNotConverged instead.
+	// stabilizing solution (MATLAB icare/idare: no stabilizing solution),
+	// for one of two causes: a mode on or beyond the stability boundary,
+	// within a first-order band of the data, that fails the PBH rank test
+	// (wrapped with ErrNotStabilizable or ErrNotDetectable); or, from Care
+	// and Dare only, a Hamiltonian (symplectic) pencil eigenvalue exactly
+	// on the imaginary axis (unit circle), proved in exact arithmetic on
+	// the stored data (wrapped with neither). A solve that only fails to
+	// find or verify a solution returns ErrNotConverged instead.
 	ErrNoStabilizing = errors.New("controlsys: no stabilizing solution exists")
 
 	// ErrSingularR reports a control or noise weight R that is singular or not
