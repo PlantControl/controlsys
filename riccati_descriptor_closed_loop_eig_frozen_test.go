@@ -378,3 +378,23 @@ var (
 		2.4129949005810807,
 	})
 )
+
+// Care with a cross term on near-singular E, z5a seed 3229 (dt 0, R = 1e-5,
+// E[1][1] = 2.7e-14, λ∞ = −1.4349e16, oracle −2.30284): old nil, −2 (13%
+// off, 1.35e14× the bound; amd64 9.3e13×). Now −2.30284 to 3e-16 but
+// unbalanced 7.3·n over the bound, balanced 5e6·n and β = 0 on the
+// row-equilibrated pencil, so Accuracy 1 on both arches.
+func TestCareDescriptorClosedLoopEigCrossTerm(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{
+		-1.6711098163248748, 1.9207814342216034,
+		1.4979712769888387, -0.850076811216145,
+	})
+	B := mat.NewDense(2, 1, []float64{-0.0007938628332011533, -1.1461272067437613})
+	E := mat.NewDense(2, 2, []float64{
+		1.022497425664561, -0.4216738337385455,
+		0, 2.732296210026974e-14,
+	})
+	S := mat.NewDense(2, 1, []float64{0.0001527290971034706, -0.00020409952445133705})
+	res, err := Care(A, B, eyeDense(2), mat.NewDense(1, 1, []float64{1e-5}), &RiccatiOpts{E: E, S: S})
+	assertEigCertifiedOrUnverified(t, "z5a/3229", res, err, false, fixed(A), fixed(B), gain, fixed(E))
+}
