@@ -353,7 +353,13 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
 	descriptorClosedLoopEig(true, A, B, opts, res, err)
-	return certify("Care", ErrNotStabilizable, res, err)
+	res, err = certify("Care", ErrNotStabilizable, res, err)
+	if errors.Is(err, ErrNotConverged) {
+		if perr := boundaryProof("Care", true, A, B, Q, R, opts); perr != nil {
+			return nil, perr
+		}
+	}
+	return res, err
 }
 
 // careCore is Care before certify: an uncertified X has accuracy 1 and a
@@ -1040,7 +1046,13 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
-	return certify("Dare", ErrNotStabilizable, res, err)
+	res, err = certify("Dare", ErrNotStabilizable, res, err)
+	if errors.Is(err, ErrNotConverged) {
+		if perr := boundaryProof("Dare", false, A, B, Q, R, opts); perr != nil {
+			return nil, perr
+		}
+	}
+	return res, err
 }
 
 // dareFor is Dare before certify, as careCore is Care; explicit is set by callers that return EᵀXE
