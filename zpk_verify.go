@@ -18,9 +18,10 @@ import (
 // arithmetic. As for the cuts of Reduce (frequencyAxisCutInBand),
 // agreement within tol at those points gives no uniform bound between them.
 //
-// The probes are those of axisProbes, the axis points beside the zeros of
-// z (eigenAxisProbes) and the static point (s = 0, z = 1), where the
-// relative error of a ZPK peaks; while some row is short of its count,
+// The probes are those of axisProbes, the axis points beside the zeros and
+// poles of z (eigenAxisProbes) and the static point (s = 0, z = 1), where the
+// relative error of a ZPK peaks, or where a misplaced pole of z puts the
+// peak of G − Z; while some row is short of its count,
 // zpkFillProbes adds a geometric grid sized to the shortfall. A probe
 // within rounding of an eigenvalue of A is dropped (axisProbes).
 //
@@ -51,13 +52,15 @@ func (sys *System) zpkUnverifiedRow(z *ZPK) int {
 		return 0
 	}
 	win := zpkSharedPoleWindows(mp, z, tol)
-	var zeros []complex128
+	var zeros, roots []complex128
 	for i := range p {
 		for j := range m {
 			zeros = append(zeros, z.Zeros[i][j]...)
+			roots = append(roots, z.Zeros[i][j]...)
+			roots = append(roots, z.Poles[i][j]...)
 		}
 	}
-	extra := eigenAxisProbes(zeros, discrete)
+	extra := eigenAxisProbes(roots, discrete)
 	if discrete {
 		extra = append(extra, 1)
 	} else {
