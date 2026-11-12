@@ -120,3 +120,38 @@ func TestCare_AxisPairInexactSymmetryNotProved(t *testing.T) {
 		}
 	}
 }
+
+// TestRiccatiBoundaryProof_NearAxisNotProved (I4J6DP): a lightly damped
+// mode, damping 1e-12 (continuous) or radius 1 − 1e-9 (discrete), puts a
+// Hamiltonian (symplectic) pencil eigenvalue within the float64 candidate
+// band of the boundary but, in exact arithmetic, off it: the proof must
+// fail, and Care and Dare keep their certified X.
+func TestRiccatiBoundaryProof_NearAxisNotProved(t *testing.T) {
+	const d = 1e-12
+	B := mat.NewDense(3, 1, []float64{0, 1e-5, 1})
+	Q := mat.NewDense(3, 3, []float64{1e-10, 0, 0, 0, 0, 0, 0, 0, 1})
+	R := mat.NewDense(1, 1, []float64{1})
+	for _, c := range []struct {
+		continuous bool
+		a          []float64
+	}{
+		{true, []float64{-d, 2, 0.3, -0.5, -d, 0.1, 0, 0, -1}},
+		{false, []float64{0.6, 0.8 - 1e-9, 0.1, -0.8, 0.6, 0, 0, 0, 0.5}},
+	} {
+		A := mat.NewDense(3, 3, c.a)
+		L, M := extendedPencil(c.continuous, A, B, Q, R, nil)
+		if !boundaryCandidate(c.continuous, L, M, 7) {
+			t.Errorf("continuous %v: no float64 candidate, want one", c.continuous)
+		}
+		if boundaryEigenvalueProved(c.continuous, A, B, Q, R, nil) {
+			t.Errorf("continuous %v: boundary eigenvalue proved, want none", c.continuous)
+		}
+		solve := Dare
+		if c.continuous {
+			solve = Care
+		}
+		if _, err := solve(A, B, Q, R, nil); err != nil {
+			t.Errorf("continuous %v: %v, want a certified X", c.continuous, err)
+		}
+	}
+}
