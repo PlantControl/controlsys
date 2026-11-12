@@ -1376,10 +1376,10 @@ func setClosedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense, res *Riccati
 // on 121 of 2968 random Lqi pencils, 'B' first on 539), then of (Â, Ê)
 // itself, whose stage bound is the census bound over n by construction: it
 // certifies only where its eigenvalues each agree, within the two stage
-// bounds, with those of the nearer-certified earlier stage, graded and near-singular E having
-// put each earlier stage 1e5–1e14 over the bound in turn. Otherwise the
-// eigenvalues of the nearer-certified earlier stage are returned,
-// uncertified.
+// bounds, with those of the nearer-certified earlier stage, graded and
+// near-singular E having put each earlier stage 1e5–1e14 over the bound in
+// turn. Otherwise the eigenvalues of the nearer-certified earlier stage are
+// returned, uncertified.
 func closedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense) ([]complex128, bool) {
 	n, m := B.Dims()
 	nn := n * n
