@@ -68,12 +68,21 @@ func TestKalman_BoundaryModeUnreachableFromNoise(t *testing.T) {
 
 // TestDare_BoundaryModeUnobservableToCost (DBOVA4): Kalman's dual Dare
 // solved directly, (Aᵀ, Cᵀ, B·Bᵀ, I, Eᵀ): the z = −1 mode is unobservable
-// to the cost Q = B·Bᵀ, and Dare fails (ErrNotConverged) as Kalman does.
+// to the cost Q = B·Bᵀ, so z = −1 is an exact eigenvalue of the symplectic
+// pencil of the stored data. Dare returned ErrNotConverged; it now proves
+// that eigenvalue and returns ErrNoStabilizing alone (I4J6DP). Kalman
+// keeps ErrNotConverged (JFLGVW).
 func TestDare_BoundaryModeUnobservableToCost(t *testing.T) {
 	At, Ct, Q, Et := dualDare(boundaryUnreachablePlant(0))
+	raw := func(m *mat.Dense) []float64 { return mat.DenseCopyOf(m).RawMatrix().Data }
+	if !symplecticUnitCircleRoot(t, 4, 1, raw(At), raw(Ct), raw(Q), []float64{1}, nil, raw(Et)) {
+		t.Fatal("oracle: no exact symplectic root on the unit circle")
+	}
 	for _, ns := range []bool{false, true} {
-		res, err := acceptUnverified(Dare(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et, NoScaling: ns}))
-		wantNoStabilizing(t, fmt.Sprintf("NoScaling %v", ns), res, err)
+		_, err := Dare(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et, NoScaling: ns})
+		if !errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrNotStabilizable) || errors.Is(err, ErrNotConverged) {
+			t.Errorf("NoScaling %v: %v, want ErrNoStabilizing alone", ns, err)
+		}
 	}
 }
 

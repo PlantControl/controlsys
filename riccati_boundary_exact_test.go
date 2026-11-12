@@ -10,13 +10,23 @@ import (
 )
 
 // symplecticUnitCircleRoot reports whether the exact symplectic pencil
-// z·[I G; 0 Āᵀ] − [Ā 0; −Q̄ I] of Ā = A − BR⁻¹Sᵀ, G = BR⁻¹Bᵀ,
+// z·[E G; 0 Āᵀ] − [Ā 0; −Q̄ Eᵀ] (E = I when e is nil; S = 0 when s is
+// nil) of Ā = A − BR⁻¹Sᵀ, G = BR⁻¹Bᵀ,
 // Q̄ = Q − SR⁻¹Sᵀ (reduced, unlike the extended pencil Dare's proof uses)
 // has a root on the unit circle: at z = −1, or a root of
 // P(s) = (1−s)^2n·p((1+s)/(1−s)) on the imaginary axis (evenPolyAxisRoot).
-func symplecticUnitCircleRoot(t *testing.T, n, m int, a, b, q, r, s []float64) bool {
+func symplecticUnitCircleRoot(t *testing.T, n, m int, a, b, q, r, s, e []float64) bool {
 	t.Helper()
-	A, B, Q, S := fzRatPoly(a), fzRatPoly(b), fzRatPoly(q), fzRatPoly(s)
+	if s == nil {
+		s = make([]float64, n*m)
+	}
+	if e == nil {
+		e = make([]float64, n*n)
+		for i := range n {
+			e[i*n+i] = 1
+		}
+	}
+	A, B, Q, S, E := fzRatPoly(a), fzRatPoly(b), fzRatPoly(q), fzRatPoly(s), fzRatPoly(e)
 	Ri := mqRatInv(fzRatPoly(r), m)
 	if Ri == nil {
 		t.Fatal("R singular in exact arithmetic")
@@ -35,9 +45,9 @@ func symplecticUnitCircleRoot(t *testing.T, n, m int, a, b, q, r, s []float64) b
 			M[(n+i)*d+j].Sub(SF[i*n+j], Q[i*n+j])
 			L[i*d+n+j].Set(G[i*n+j])
 			L[(n+i)*d+n+j].Sub(A[j*n+i], BF[j*n+i])
+			L[i*d+j].Set(E[i*n+j])
+			M[(n+i)*d+n+j].Set(E[j*n+i])
 		}
-		L[i*d+i].SetInt64(1)
-		M[(n+i)*d+n+i].SetInt64(1)
 	}
 	p := fzTrimRat(mqDetPoly(L, M, d))
 	for len(p) < d+1 {
@@ -92,7 +102,7 @@ func dareUnitCirclePair() (a, b, q, r, s []float64) {
 func TestDare_UnitCirclePairNoStabilizing(t *testing.T) {
 	const n, m = 4, 2
 	a, b, q, r, s := dareUnitCirclePair()
-	if !symplecticUnitCircleRoot(t, n, m, a, b, q, r, s) {
+	if !symplecticUnitCircleRoot(t, n, m, a, b, q, r, s, nil) {
 		t.Fatal("oracle: no exact symplectic root on the unit circle")
 	}
 	for _, ns := range []bool{false, true} {
