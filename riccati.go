@@ -1371,9 +1371,10 @@ func setClosedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense, res *Riccati
 // certifies when every stage bound is within 8× the census bound, both κ
 // having the same |yᴴEx|. A small normwise QZ backward error alone is not
 // enough: balancing put modes of random Lqi pencils with κ(E) ~ 1e8 4.5%
-// off, 125× the bound. The stages are QZ of the pencil balanced as by
-// Dggbal 'B', then unbalanced (Dggev permutes), then of (Â, Ê) itself,
-// whose stage bound is the census bound over n by construction: it
+// off, 125× the bound. The stages are QZ of the pencil unbalanced (Dggev
+// permutes), then balanced as by Dggbal 'B' (unbalanced first fell back
+// on 121 of 2968 random Lqi pencils, 'B' first on 539), then of (Â, Ê)
+// itself, whose stage bound is the census bound over n by construction: it
 // certifies only where its eigenvalues are also each within the stage bound
 // of the nearer-certified earlier stage, graded and near-singular E having
 // put each earlier stage 1e5–1e14 over the bound in turn. Otherwise the
@@ -1411,7 +1412,7 @@ func closedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense) ([]complex128, 
 		dl: buf[7*nn+2*n : 7*nn+3*n], dr: buf[7*nn+3*n:]}
 	tol := closedLoopEigTol * float64(n)
 	var best *closedLoopStage
-	for _, balance := range []bool{true, false} {
+	for _, balance := range []bool{false, true} {
 		copy(w.dl, ones)
 		copy(w.dr, ones)
 		if balance {
