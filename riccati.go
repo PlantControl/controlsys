@@ -1375,8 +1375,8 @@ func setClosedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense, res *Riccati
 // permutes), then balanced as by Dggbal 'B' (unbalanced first fell back
 // on 121 of 2968 random Lqi pencils, 'B' first on 539), then of (Â, Ê)
 // itself, whose stage bound is the census bound over n by construction: it
-// certifies only where its eigenvalues are also each within the stage bound
-// of the nearer-certified earlier stage, graded and near-singular E having
+// certifies only where its eigenvalues each agree, within the two stage
+// bounds, with those of the nearer-certified earlier stage, graded and near-singular E having
 // put each earlier stage 1e5–1e14 over the bound in turn. Otherwise the
 // eigenvalues of the nearer-certified earlier stage are returned,
 // uncertified.
@@ -1434,7 +1434,7 @@ func closedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense) ([]complex128, 
 	}
 	copy(w.dl, d)
 	copy(w.dr, ones)
-	if s := w.stage(); s != nil && s.rho <= tol && best.agrees(s.eig) {
+	if s := w.stage(); s != nil && s.rho <= tol && best.agrees(s) {
 		return s.eig, true
 	}
 	return best.eig, false
@@ -1451,18 +1451,22 @@ type closedLoopStage struct {
 	rho   float64
 }
 
-// agrees reports whether each of eig is within the stage bound of a
-// distinct eigenvalue of s, paired nearest first.
-func (s *closedLoopStage) agrees(eig []complex128) bool {
+// agrees reports whether each eigenvalue of t is within the sum of its
+// stage bound and that of a distinct eigenvalue of s, paired nearest first:
+// two estimates each within its own bound of the same eigenvalue are that
+// far apart at most, and the stage bound of either alone rejected correct
+// eigenvalues of t, whose large modes are absolutely less accurate than
+// balancing leaves them.
+func (s *closedLoopStage) agrees(t *closedLoopStage) bool {
 	used := make([]bool, len(s.eig))
-	for _, v := range eig {
+	for k, v := range t.eig {
 		bi, bd := -1, math.Inf(1)
 		for i, w := range s.eig {
 			if dist := cmplx.Abs(v - w); !used[i] && dist < bd {
 				bi, bd = i, dist
 			}
 		}
-		if bi < 0 || !isFinite(s.bound[bi]) || !(bd <= s.bound[bi]) {
+		if bi < 0 || !isFinite(s.bound[bi]) || !isFinite(t.bound[k]) || !(bd <= s.bound[bi]+t.bound[k]) {
 			return false
 		}
 		used[bi] = true
