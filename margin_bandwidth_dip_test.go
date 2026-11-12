@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"math/rand/v2"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 const bandwidthDipPrec = 320
@@ -315,6 +317,41 @@ func TestBandwidthCancelledDCGainResolved(t *testing.T) {
 	want := bandwidthDipOracle(sys)
 	if got, err := Bandwidth(sys, -3); err != nil || !(math.Abs(got-want) <= 1e-6*want) {
 		t.Errorf("Bandwidth = %v, %v; want %v (big.Float oracle)", got, err, want)
+	}
+}
+
+// KQVXXL removed Bandwidth's reading of a certified zero DC gain from the
+// double-double DC response (CNGTCF): DCGain certifies a zero only where it
+// is exact (UP7H7O, OECG2I, KQVXXL). On the CNGTCF literal, and on its
+// descriptor twin with E = 2I, A and B doubled, the DC gain stays the exact
+// 1.36e-18 and Bandwidth the oracle's.
+func TestBandwidthCancelledDCGainDescriptorTwin(t *testing.T) {
+	pole := 0.7
+	res, err := (&TransferFunc{Num: [][][]float64{{{0.05, 0, 0}}}, Den: [][]float64{{1, 2 * pole, pole * pole}}}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := res.Sys
+	want := bandwidthDipOracle(sys)
+	n, _, _ := sys.Dims()
+	e := mat.NewDense(n, n, nil)
+	for i := range n {
+		e.Set(i, i, 2)
+	}
+	a, b := mat.DenseCopyOf(sys.A), mat.DenseCopyOf(sys.B)
+	a.Scale(2, a)
+	b.Scale(2, b)
+	desc, err := NewDescriptor(a, b, sys.C, sys.D, e, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]*System{"explicit": sys, "descriptor": desc} {
+		if g, err := s.DCGain(); err != nil || g.At(0, 0) != 1.3594567648471302e-18 {
+			t.Errorf("%s: DCGain = %v, %v; want 1.3594567648471302e-18 (exact)", name, g.At(0, 0), err)
+		}
+		if got, err := Bandwidth(s, -3); err != nil || !(math.Abs(got-want) <= 1e-6*want) {
+			t.Errorf("%s: Bandwidth = %v, %v; want %v (big.Float oracle)", name, got, err, want)
+		}
 	}
 }
 

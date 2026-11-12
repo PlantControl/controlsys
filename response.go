@@ -407,9 +407,9 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // of 0. A rigorous forward-error bound proves the solve, after double-double
 // refinement where needed, or the exact solve replaces it; above order 16 a
 // solve the bound cannot prove keeps its refined value with
-// ErrAccuracyUnverified, except that a descriptor model returns its
-// evaluated gain where the evaluation gives one. A 0 within that bound has no correct digit and
-// asserts a zero gain, so it is certified only where the bound is itself 0;
+// ErrAccuracyUnverified, except that a descriptor model's refined solution
+// that solves the pencil exactly certifies its gain. A 0 within that bound
+// has no correct digit and asserts a zero gain, so it is certified only where the bound is itself 0;
 // otherwise the solve refines on, and the exact solve decides a 0 that
 // persists, or above order 16 it keeps ErrAccuracyUnverified: D cancelling
 // C(I−A)⁻¹B to rounding returns the float model's gain, not 0.
@@ -428,6 +428,15 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // limit; and where a pole within rounding of DC reads as
 // an integrator, the Inf MATLAB returns, the float model's exact limit
 // being finite. Reduce removes cancelling modes for a certified gain.
+// A delay-free descriptor model whose pencil x0·E − A is singular to
+// working precision takes the exact solve of the pencil for models of
+// order up to 16, after the bound on the balanced pencil, merged as above
+// with an Inf its evaluation reads at a pole within rounding of DC; an
+// exactly singular pencil (a pole at DC) keeps its evaluation, or its
+// explicit form's gain where the evaluation fails. Beyond order 16 the
+// bound on the balanced pencil proves its gain, or up to order 20 the
+// exact solve where the evaluation gives a finite gain, and otherwise the
+// evaluated gain has ErrAccuracyUnverified.
 // A model with no inputs or no outputs has an empty gain, which a
 // *mat.Dense cannot hold, so it returns ErrDimensionMismatch; a NaN or Inf
 // model entry returns ErrInvalidArgument.
@@ -454,23 +463,11 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
 	}
-	var unproven *mat.Dense
 	if sys.IsDescriptor() && !sys.HasInternalDelay() {
-		gain, err, ok := sys.dcGainDescriptorRegular()
-		if ok {
-			return gain, err
-		}
-		unproven = gain
+		return sys.dcGainDescriptor(offPole)
 	}
-	if sys.HasInternalDelay() || sys.IsDescriptor() {
-		gain, err := sys.dcGainByEvaluation()
-		if err != nil && errors.Is(err, ErrSingularTransform) {
-			gain, err = sys.dcGainOfDelayFreeExplicit(err, offPole)
-		}
-		if gain == nil && unproven != nil {
-			return unproven, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
-		}
-		return gain, err
+	if sys.HasInternalDelay() {
+		return sys.dcGainByRoute(offPole)
 	}
 
 	x0 := 0.0
@@ -498,15 +495,24 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	return strict, nil
 }
 
-// dcGainDescriptorRegular certifies the DC gain of a delay-free descriptor
-// model as the explicit path does: P = −A (E drops out at s = 0) or E − A
-// at z = 1, solved by solveDCRegular, then the exact solve for
-// n ≤ exactDetMaxOrder (OECG2I). ok is false where P is singular or
-// ill-conditioned in double, the gain overflowed, P is exactly singular,
-// or the solve is unproven above exactDetMaxOrder: dcGainByEvaluation and
-// its routes decide then, the unproven gain (returned with ok false)
-// standing with ErrAccuracyUnverified only where they give no value.
-func (sys *System) dcGainDescriptorRegular() (gain *mat.Dense, err error, ok bool) {
+// dcGainDescriptor certifies the DC gain of a delay-free descriptor model
+// against the model as given, as the explicit path does: P = −A (E drops
+// out at s = 0) or E − A at z = 1, solved by solveDCRegular, then the
+// exact solve for n ≤ exactDetMaxOrder. Where P is ill-conditioned in
+// double, dcGainBalancedCertified proves the gain first, as it does a
+// graded model at a quarter of the exact solve's cost. Otherwise, where P
+// is ill-conditioned or singular in double, or the gain overflowed, the
+// exact solve decides too: an exactly singular P keeps dcGainByRoute, a
+// pole at DC or a singular pencil; otherwise the gain is the exact one,
+// merged with the route's reading by dcGainOffDC (an Inf there is a pole
+// within rounding of DC, kept with ErrAccuracyUnverified). Above
+// exactDetMaxOrder a solve the bound cannot prove certifies where its
+// refined X is exact (dcGainExactResidual), an ill-conditioned P where
+// dcGainBalancedCertified proves it, and up to dcDescriptorExactMaxOrder
+// where the route's finite gain gives way to the exact solve's; otherwise
+// the refined gain, or else the route's, has ErrAccuracyUnverified
+// (KQVXXL).
+func (sys *System) dcGainDescriptor(offPole bool) (*mat.Dense, error) {
 	n, _, _ := sys.Dims()
 	x0 := 0.0
 	var e *mat.Dense
@@ -514,22 +520,91 @@ func (sys *System) dcGainDescriptorRegular() (gain *mat.Dense, err error, ok boo
 		x0, e = 1, sys.E
 	}
 	r := solveDCRegular(e, sys.A, sys.B, sys.C, sys.D, x0, n > exactDetMaxOrder)
+	solved := r.solveErr == nil && !r.overflow
 	switch {
-	case r.solveErr != nil || r.overflow:
-		return nil, nil, false
-	case r.certified:
-		return r.g, nil, true
+	case solved && r.certified:
+		return r.g, nil
+	case !offPole && !(solved && n <= exactDetMaxOrder):
+		g, err := sys.dcGainByRoute(offPole)
+		if g == nil && solved {
+			return r.g, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
+		}
+		return g, err
 	case n > exactDetMaxOrder:
-		return r.g, nil, false
+		return sys.dcGainDescriptorLarge(r, e, x0, offPole)
+	case finiteCondition(r.solveErr):
+		if g, ok := sys.dcGainBalancedCertified(x0); ok {
+			return g, nil
+		}
 	}
 	strict, overflow, ok := exactDCGainAtNonsingular(e, sys.A, sys.B, sys.C, sys.D, x0)
 	switch {
 	case !ok:
-		return nil, nil, false
-	case overflow:
-		return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow), true
+		return sys.dcGainByRoute(offPole)
+	case r.solveErr == nil:
+		if overflow {
+			return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
+		}
+		return strict, nil
 	}
-	return strict, nil, true
+	g, err := sys.dcGainByRoute(offPole)
+	if err != nil && !(g != nil && errors.Is(err, ErrAccuracyUnverified)) {
+		g = nil
+	}
+	return dcGainOffDC(g, strict)
+}
+
+// dcDescriptorExactMaxOrder caps the exact pencil solve that decides an
+// unproven descriptor DC solve above exactDetMaxOrder: the largest order
+// whose solve the OECG2I census leaves unproven (KQVXXL).
+const dcDescriptorExactMaxOrder = 20
+
+// dcGainDescriptorLarge is dcGainDescriptor above exactDetMaxOrder, r the
+// uncertified solve.
+func (sys *System) dcGainDescriptorLarge(r dcRegularSolve, e *mat.Dense, x0 float64, offPole bool) (*mat.Dense, error) {
+	n, _, _ := sys.Dims()
+	solved := r.solveErr == nil && !r.overflow
+	switch {
+	case solved:
+		if g, ok := dcGainExactResidual(e, sys.A, sys.B, sys.C, sys.D, x0, r.x); ok {
+			return g, nil
+		}
+	case r.solveErr != nil:
+		if g, ok := sys.dcGainBalancedCertified(x0); ok {
+			return g, nil
+		}
+	}
+	g, err := sys.dcGainByRoute(offPole)
+	if err == nil && n <= dcDescriptorExactMaxOrder && allFiniteDense(g) {
+		if strict, overflow, ok := exactDCGainAtNonsingular(e, sys.A, sys.B, sys.C, sys.D, x0); ok && !overflow {
+			return strict, nil
+		}
+	}
+	unverified := fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
+	switch {
+	case solved:
+		return r.g, unverified
+	case err == nil:
+		return g, unverified
+	}
+	return g, err
+}
+
+// finiteCondition reports a solve that failed on a finite condition
+// estimate, not an exactly singular double LU.
+func finiteCondition(err error) bool {
+	c, ok := err.(mat.Condition)
+	return ok && !math.IsInf(float64(c), 0)
+}
+
+// dcGainByRoute evaluates the model at DC, closing internal delays and
+// honouring E, and resolves a singular pencil by the explicit model.
+func (sys *System) dcGainByRoute(offPole bool) (*mat.Dense, error) {
+	gain, err := sys.dcGainByEvaluation()
+	if err != nil && errors.Is(err, ErrSingularTransform) {
+		gain, err = sys.dcGainOfDelayFreeExplicit(err, offPole)
+	}
+	return gain, err
 }
 
 // dcGainOverflowed resolves a delay-free explicit model whose DC solve
@@ -603,21 +678,28 @@ func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, erro
 }
 
 // dcGainBalancedCertified runs solveDCRegular on the radix-2 balanced
-// realization Â = S⁻¹AS, B̂ = S⁻¹B, Ĉ = CS. With every nonzero scaled entry
-// finite and normal the scaling is exact, so x0·I − Â = S⁻¹(x0·I − A)S,
-// D + Ĉ·X̂ = D + C·X, and each term |Ĉ_il||X̂_lj| = |C_il||X_lj|: a
-// certificate there is the original gain's, to within its own rounding.
+// realization Â = S⁻¹AS, B̂ = S⁻¹B, Ĉ = CS, and Ê = S⁻¹ES for a discrete
+// descriptor model. With every nonzero scaled entry finite and normal the
+// scaling is exact, so x0·Ê − Â = S⁻¹(x0·E − A)S, D + Ĉ·X̂ = D + C·X, and
+// each term |Ĉ_il||X̂_lj| = |C_il||X_lj|: a certificate there is the
+// original gain's, to within its own rounding.
 func (sys *System) dcGainBalancedCertified(x0 float64) (*mat.Dense, bool) {
 	n, m, p := sys.Dims()
 	br := newBalancedRealization(sys, n, m, p)
-	for _, s := range [][]float64{br.a, br.b, br.c} {
+	scaled := [][]float64{br.a, br.b, br.c}
+	var e *mat.Dense
+	if br.e != nil && x0 != 0 {
+		scaled = append(scaled, br.e)
+		e = mat.NewDense(n, n, br.e)
+	}
+	for _, s := range scaled {
 		for _, v := range s {
 			if v != 0 && !(math.Abs(v) >= 0x1p-1022 && math.Abs(v) <= math.MaxFloat64) {
 				return nil, false
 			}
 		}
 	}
-	r := solveDCRegular(nil, mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), sys.D, x0, true)
+	r := solveDCRegular(e, mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), sys.D, x0, true)
 	return r.g, r.certified && r.solveErr == nil && !r.overflow
 }
 
@@ -1523,8 +1605,12 @@ func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense
 
 // exactDCGainAtNonsingular is exactDCGainLimitChecked where x0·E − A (E nil
 // for the identity) is exactly nonsingular, by one fraction-free solve; ok
-// is false where it is exactly singular.
+// is false where it is exactly singular, at once where a row or column of
+// x0·E − A is exactly zero.
 func exactDCGainAtNonsingular(E, A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow, ok bool) {
+	if pencilHasZeroLine(E, A, x0) {
+		return nil, false, false
+	}
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	pHat, bHat, cHat, shift := exactScaledModel(E, A, B, C, x0)
@@ -2329,6 +2415,27 @@ func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure b
 }
 
 // hasZeroLine reports whether a − shift·I has an exactly zero row or column.
+// pencilHasZeroLine reports a row or column of x0·E − A, E nil for the
+// identity, that is exactly zero.
+func pencilHasZeroLine(E, A *mat.Dense, x0 float64) bool {
+	if E == nil || x0 == 0 {
+		return hasZeroLine(A, x0)
+	}
+	ar, er := A.RawMatrix(), E.RawMatrix()
+	n := ar.Rows
+	for k := range n {
+		row, col := true, true
+		for j := 0; j < n && (row || col); j++ {
+			row = row && x0*er.Data[k*er.Stride+j] == ar.Data[k*ar.Stride+j]
+			col = col && x0*er.Data[j*er.Stride+k] == ar.Data[j*ar.Stride+k]
+		}
+		if row || col {
+			return true
+		}
+	}
+	return false
+}
+
 func hasZeroLine(a *mat.Dense, shift float64) bool {
 	raw := a.RawMatrix()
 	n := raw.Rows
