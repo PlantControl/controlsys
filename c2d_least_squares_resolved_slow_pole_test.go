@@ -153,16 +153,14 @@ func TestC2DFitLeastSquaresFreeFitOfPolesResolvedFromZero(t *testing.T) {
 	})
 }
 
-// The count resolves every pole from s = 0 (fz 12571: exact stored pole
-// −8.83e-8, 120× its rounding bound) or takes one whose 1/s coefficient is
-// within its bound (fz 13418: pole 1.65e-10, neighbour 1.6e-8 in A22), so
-// k = 0, but FreqResponse(0) takes the pole limit, +Inf, although G(0) of
-// the stored model is finite (−284.9069183, 2.384283283e6; NSYMIV). The
-// free fit samples the open grid and returns nil. Main held 3 and 2
-// integrators.
-func TestC2DFitLeastSquaresOpenGridWhereResponseIsInfiniteAtDC(t *testing.T) {
+// Every pole is resolved from s = 0 (fz 12571: exact stored pole −8.83e-8,
+// 300× its first-order rounding disk 2.96e-10), so k = 0, and FreqResponse(0) is the certified
+// G(0) = −284.9069183 of the stored model (NSYMIV; NDFJC6 took +Inf there
+// and sampled the open grid). The free fit samples the closed grid and
+// returns nil. Main held 3 integrators.
+func TestC2DFitLeastSquaresClosedGridWhereSlowPoleIsResolved(t *testing.T) {
 	checkLeastSquaresFrozenFit(t, []leastSquaresFrozenCase{
-		// base (main, arm64 model) k>0: MaxRelativeError 1.42e-05, exact 1.35e-05; head k=0: 1.16e-05.
+		// base (main, arm64 model) k=3: MaxRelativeError 1.42e-05, exact 1.35e-05; NDFJC6 k=0 open grid: 1.164e-05; NSYMIV closed grid: 1.6276e-05.
 		{
 			name: "fz/12571",
 			n:    5,
@@ -170,8 +168,19 @@ func TestC2DFitLeastSquaresOpenGridWhereResponseIsInfiniteAtDC(t *testing.T) {
 			b:    []float64{-0x1.c70385196a53cp-05, -0x1.f42ffb31e6e4ep-01, -0x1.de524cca020a6p-02, 0x1.743cab5f8f06dp-01, 0x1.b64e813f7e6a6p-01},
 			c:    []float64{0x1.19cad07eba302p-16, -0x1.7c8ec13ae1efbp-16, -0x1.1dda5a2ab48ecp-19, 0x1.93a93449e44d3p-16, -0x1.c288c59f3f4ebp-17},
 			d:    -0x1.55a6e837610d9p-05,
-			ceil: 1.164e-05,
+			ceil: 1.63e-05,
 		},
+	})
+}
+
+// The count takes a pole whose 1/s coefficient is within its bound (fz
+// 13418: pole 1.65e-10 inside its rounding disk 1.28e-9, neighbour 1.6e-8
+// in A22), so k = 0, and FreqResponse(0) keeps the pole limit, +Inf
+// (NSYMIV), although G(0) of the stored model is finite (2.384283283e6).
+// The free fit samples the open grid and returns nil. Main held 2
+// integrators.
+func TestC2DFitLeastSquaresOpenGridWhereResponseIsInfiniteAtDC(t *testing.T) {
+	checkLeastSquaresFrozenFit(t, []leastSquaresFrozenCase{
 		// base (main, arm64 model) k>0: MaxRelativeError 6.26e-06, exact 3.39e-06; head k=0: 2.5e-06.
 		{
 			name: "fz/13418",
