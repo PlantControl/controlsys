@@ -8,6 +8,7 @@ import (
 	"math/cmplx"
 	"slices"
 
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -163,6 +164,11 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		}
 		return lerr
 	}
+	if s == 0 && sys.IsContinuous() && !gate.snap && !newDescriptorPolicy(sys).isDescriptor() {
+		if done, oerr := originResponseInto(sys, sp, dst); done {
+			return oerr
+		}
+	}
 	sample := func(pt frequencyPoint, dst []complex128) error {
 		if err := eval(pt, dst); err == nil || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pt, dst) {
 			return err
@@ -173,6 +179,358 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return limit(lerr)
 	}
 	return limit(poleLimitInto(sample, s, wide, dst, err))
+}
+
+// originResponseInto sets dst to the response at s = 0 of the continuous
+// explicit sys, n ≤ exactDetMaxOrder, whose double solve failed there,
+// when no pole lies within its own rounding disk around s = 0: the pole
+// limit's snap to an integrator then has no rounding of A to rest on, and
+// its samples, past a slow pole far below ‖A‖, miss the response. No
+// cluster of the computed poles may reach s = 0 (originPoleCluster), and
+// as the computed poles err by the eigensolver's normwise backward error,
+// far beyond their componentwise disks, det(sI − A) must also have no
+// exact root in |s| ≤ c, c the largest first-order bound
+// ε·|y|ᵀ|A||x|/|yᴴx| on a pole's move (c as poleSpacing formed it where it
+// did). That Rouché test runs in double-double (originDiskRootBound), and
+// in exact arithmetic (originDiskRootFree) only where that does not decide
+// it. The order affects only the cost: the double-double Rouché test runs
+// first where poleSpacing formed c and no computed pole lies within the
+// single-pole scale of the cluster test (poleGeometry.originInside), the
+// cluster test first otherwise. A computed pole exactly at 0 keeps the snap at
+// once. The response
+// is then −CA⁻¹B + D as DCGain certifies it: solveDCRegular, else the
+// exact solve of the float model. done is false, leaving dst unchanged,
+// where those tests fail or A is exactly singular.
+func originResponseInto(sys *System, sp poleGeometry, dst []complex128) (done bool, err error) {
+	n, _, _ := sys.Dims()
+	if n > exactDetMaxOrder || sp.originZero {
+		return false, nil
+	}
+	cluster := func() bool {
+		reached, ok := originPoleReached(sys.A, n)
+		return ok && !reached
+	}
+	rouche := func() bool {
+		move := sp.originMove
+		if !(move > 0) {
+			pe, ok := newPoleEigen(sys.A)
+			if !ok {
+				return false
+			}
+			for k := range pe.poles {
+				move = max(move, pe.movement(sys.A, k))
+			}
+		}
+		free, decided := originDiskRootBound(sys.A, move)
+		return free || !decided && originDiskRootFree(sys.A, move)
+	}
+	if sp.originMove > 0 && !sp.originInside {
+		if !(rouche() && cluster()) {
+			return false, nil
+		}
+	} else if !(cluster() && rouche()) {
+		return false, nil
+	}
+	g := solveDCRegular(sys.A, sys.B, sys.C, sys.D, 0, false)
+	if g.solveErr != nil || g.overflow || !g.certified {
+		strict, overflow, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, 0)
+		if !ok {
+			return false, nil
+		}
+		if overflow {
+			return true, fmt.Errorf("response at s = 0 overflows float64: %w", ErrOverflow)
+		}
+		g.g = strict
+	}
+	raw := g.g.RawMatrix()
+	for i := range raw.Rows {
+		for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			dst[i*raw.Cols+j] = complex(v, 0)
+		}
+	}
+	return true, nil
+}
+
+// originDiskRootBound decides originDiskRootFree in double-double where
+// it can: decided is false where it cannot, and free is then false. The
+// constant term of det(sI − A) is the determinant, far below the terms it
+// sums for a pole near s = 0 against ‖A‖, so a double recursion cannot
+// resolve it. The coefficients cᵢ of det(sI − Â), Â = 2^−p·A scaled
+// exactly to max|âᵢⱼ| < 1 (unscaled where that would leave the normal
+// range; where that or the bounds' range below fails, the test is retried
+// on D⁻¹AD, and runs on it at once where a product of n entries of Â may
+// already fall below 2⁻⁹⁰⁰, D the exact power-of-two balancing of
+// pow2Balance), come from Berkowitz's recursion in double-double (dd.add, the
+// accurate sum of Joldes, Muller and Popescu, Alg. 6, relative error
+// ≤ 3u²/(1 − 4u); dd.mul, their Alg. 10, ≤ 7u²; u = 2⁻⁵³), each with a
+// running bound eᵢ on its error: a product x̂ŷ adds |x̂|e_y + |ŷ|e_x +
+// e_x·e_y and each operation its own error, taken as 16u² of the computed
+// result's modulus bound |hi|(1 + 2u). Those bounds hold away from
+// underflow and overflow, so any intermediate magnitude outside
+// [2⁻⁹⁰⁰, 2⁹⁰⁰] leaves the test undecided; 4·2⁻¹⁰⁷⁴ per term covers
+// underflow of the bound's own products. A bound summed over k terms is
+// computed in at most 14k + 2 double roundings of nonnegative terms and is
+// scaled by 1 + (20k + 20)u. With
+// aᵢ = |ĉ_{n−i}|(1 + 2u) + e_{n−i} and R = 2^−p·r < 1, the Horner sum
+// S = Σ aᵢRⁱ, at most 6n + 6 roundings deep, is bounded above by
+// fl(S)(1 + (6n + 12)u) + (2n + 2)·2⁻¹⁰⁷⁴, and the same sum of
+// max(|ĉ|(1 − 2u) − e, 0) below by fl(S)(1 − (6n + 12)u) −
+// (2n + 2)·2⁻¹⁰⁷⁴. The disk is root-free where the lower bound on |c₀|
+// exceeds the upper one on S, and holds a root where the upper bound on
+// |c₀| is at most the lower one on S, which implies the outward-rounded
+// test of originDiskRootFree reaches the same answer; elsewhere, or where
+// R ≥ 1, it is undecided.
+func originDiskRootBound(A *mat.Dense, r float64) (free, decided bool) {
+	raw := A.RawMatrix()
+	n := raw.Rows
+	if n == 0 || !(r >= 0) {
+		return false, false
+	}
+	orig := func() []float64 {
+		a := make([]float64, n*n)
+		for i := range n {
+			copy(a[i*n:(i+1)*n], raw.Data[i*raw.Stride:i*raw.Stride+n])
+		}
+		return a
+	}
+	hi, lo := math.MinInt, math.MaxInt
+	for i := range n {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			if v != 0 {
+				_, e := math.Frexp(v)
+				hi, lo = max(hi, e), min(lo, e)
+			}
+		}
+	}
+	if (lo-hi-1)*n >= -900 {
+		free, decided, wide := originDiskRootBoundOf(orig(), n, r)
+		if decided || !wide {
+			return free, decided
+		}
+	}
+	bal := orig()
+	pow2Balance(bal, n)
+	free, decided, _ = originDiskRootBoundOf(bal, n, r)
+	return free, decided
+}
+
+// pow2Balance balances the n×n row-major a in place by Osborne's
+// iteration with power-of-two factors: D⁻¹AD for d_i = 2^k, k half the
+// exponent difference of the off-diagonal row and column sums of i, taken
+// only where it lowers their total and every scaled entry stays normal, so
+// that each step is exact. The total strictly decreases over a finite set
+// of factors, so the iteration ends.
+func pow2Balance(a []float64, n int) {
+	normal := func(v float64) bool { return v == 0 || math.Abs(v) >= 0x1p-1022 && !math.IsInf(v, 0) }
+	for changed := true; changed; {
+		changed = false
+		for i := range n {
+			var c, r float64
+			for j := range n {
+				if j != i {
+					c += math.Abs(a[j*n+i])
+					r += math.Abs(a[i*n+j])
+				}
+			}
+			if c == 0 || r == 0 {
+				continue
+			}
+			_, ec := math.Frexp(c)
+			_, er := math.Frexp(r)
+			k := (er - ec) / 2
+			if k == 0 || !(math.Ldexp(c, k)+math.Ldexp(r, -k) < c+r) {
+				continue
+			}
+			ok := true
+			for j := range n {
+				if j != i {
+					ok = ok && normal(math.Ldexp(a[j*n+i], k)) && normal(math.Ldexp(a[i*n+j], -k))
+				}
+			}
+			if !ok {
+				continue
+			}
+			for j := range n {
+				if j != i {
+					a[j*n+i] = math.Ldexp(a[j*n+i], k)
+					a[i*n+j] = math.Ldexp(a[i*n+j], -k)
+				}
+			}
+			changed = true
+		}
+	}
+}
+
+// originDiskRootBoundOf is originDiskRootBound on the n×n row-major a;
+// wide reports a range the scaling or the double-double bounds could not
+// cover.
+func originDiskRootBoundOf(a []float64, n int, r float64) (free, decided, wide bool) {
+	const u, eta, opErr = 0x1p-53, 0x1p-1074, 16 * 0x1p-106
+	raw := blas64.General{Rows: n, Cols: n, Stride: n, Data: a}
+	hi, lo := math.MinInt, math.MaxInt
+	for i := range n {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			if v != 0 {
+				_, e := math.Frexp(v)
+				hi, lo = max(hi, e), min(lo, e)
+			}
+		}
+	}
+	if hi == math.MinInt {
+		return false, false, false
+	}
+	p := hi
+	if lo-p < -1021 {
+		p, wide = 0, true
+	}
+	m := make([]float64, n*n)
+	for i := range n {
+		for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			m[i*n+j] = math.Ldexp(v, -p)
+		}
+	}
+	R := math.Ldexp(r, -p)
+	if !(R < 1) {
+		return false, false, wide
+	}
+	type dde struct {
+		v dd
+		e float64
+	}
+	inRange := true
+	mag := func(x dd) float64 {
+		a := math.Abs(x.hi)
+		if a != 0 && !(a >= 0x1p-900 && a <= 0x1p900) {
+			inRange = false
+		}
+		return a * (1 + 2*u)
+	}
+	inflate := func(e float64, k int) float64 { return e * (1 + float64(20*k+20)*u) }
+	dot := func(a []float64, x []dde) dde {
+		var s dd
+		var es float64
+		for j, xj := range x {
+			aj := a[j]
+			pr := xj.v.mul(dd{aj, 0})
+			es += math.Abs(aj)*xj.e + opErr*mag(pr) + 4*eta
+			s = s.add(pr)
+			es += opErr * mag(s)
+		}
+		return dde{s, inflate(es, len(x))}
+	}
+	c := []dde{{dd{1, 0}, 0}, {dd{-m[0], 0}, 0}}
+	for r := 1; r < n; r++ {
+		col := make([]dde, r+2)
+		col[0], col[1] = dde{dd{1, 0}, 0}, dde{dd{-m[r*n+r], 0}, 0}
+		v := make([]dde, r)
+		for i := range v {
+			v[i] = dde{dd{m[i*n+r], 0}, 0}
+		}
+		w := make([]dde, r)
+		for k := range r {
+			sk := dot(m[r*n:r*n+r], v)
+			col[k+2] = dde{sk.v.neg(), sk.e}
+			if k == r-1 {
+				break
+			}
+			for i := range r {
+				w[i] = dot(m[i*n:i*n+r], v)
+			}
+			v, w = w, v
+		}
+		next := make([]dde, r+2)
+		for i := range next {
+			var s dd
+			var es float64
+			terms := 0
+			for j := max(0, i-r-1); j <= min(i, r); j++ {
+				x, y := col[i-j], c[j]
+				pr := x.v.mul(y.v)
+				es += mag(x.v)*y.e + mag(y.v)*x.e + x.e*y.e + opErr*mag(pr) + 4*eta
+				s = s.add(pr)
+				es += opErr * mag(s)
+				terms++
+			}
+			next[i] = dde{s, inflate(es, terms)}
+		}
+		c = next
+	}
+	if !inRange {
+		return false, false, true
+	}
+	for _, x := range c {
+		if math.IsInf(x.v.hi, 0) || math.IsNaN(x.v.hi) || math.IsNaN(x.v.lo) || math.IsInf(x.e, 0) || math.IsNaN(x.e) {
+			return false, false, wide
+		}
+	}
+	var sUp, sLo float64
+	for i := range n {
+		a := math.Abs(c[i].v.hi)
+		sUp = a*(1+2*u) + c[i].e + R*sUp
+		sLo = max(a*(1-2*u)-c[i].e, 0) + R*sLo
+	}
+	slack := float64(6*n+12) * u
+	sUp = R*sUp*(1+slack) + float64(2*n+2)*eta
+	sLo = R*sLo*(1-slack) - float64(2*n+2)*eta
+	a0 := math.Abs(c[n].v.hi)
+	c0Lo := max(a0*(1-2*u)-c[n].e, 0) * (1 - 4*u)
+	c0Up := (a0*(1+2*u) + c[n].e) * (1 + 4*u)
+	if math.IsInf(sUp, 0) || math.IsNaN(sUp) || math.IsInf(c0Up, 0) {
+		return false, false, wide
+	}
+	switch {
+	case c0Lo > sUp:
+		return true, true, wide
+	case c0Up <= sLo:
+		return false, true, wide
+	}
+	return false, false, wide
+}
+
+// originDiskRootFree reports whether det(sI − A), in exact arithmetic, has
+// no root in |s| ≤ r, by Rouché's theorem: its constant term exceeds the
+// sum of the other terms' moduli on |s| = r, bounded above. A is scaled
+// exactly to integers by 2^k, which scales the roots and r by 2^k too.
+func originDiskRootFree(A *mat.Dense, r float64) bool {
+	if !(r < math.Inf(1)) {
+		return false
+	}
+	raw := A.RawMatrix()
+	n := raw.Rows
+	e0 := math.MaxInt
+	for i := range n {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			if v != 0 {
+				_, e := math.Frexp(v)
+				e0 = min(e0, e)
+			}
+		}
+	}
+	if e0 == math.MaxInt {
+		return false
+	}
+	m := make([][]*big.Int, n)
+	for i := range n {
+		m[i] = make([]*big.Int, n)
+		for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			f, e := math.Frexp(v)
+			x := big.NewInt(int64(math.Ldexp(f, 53)))
+			m[i][j] = x.Lsh(x, uint(e-e0))
+		}
+	}
+	coef := intCharPoly(m)
+	const prec = 256
+	up := func() *big.Float { return new(big.Float).SetPrec(prec).SetMode(big.ToPositiveInf) }
+	rr := up().SetFloat64(r)
+	rr.SetMantExp(rr, 53-e0)
+	sum, pow, t := up(), up().SetInt64(1), up()
+	for i := n - 1; i >= 0; i-- {
+		pow.Mul(pow, rr)
+		t.SetInt(new(big.Int).Abs(coef[i]))
+		sum.Add(sum, t.Mul(t, pow))
+	}
+	c0 := new(big.Float).SetPrec(prec).SetMode(big.ToNegativeInf).SetInt(new(big.Int).Abs(coef[n]))
+	return c0.Cmp(sum) > 0
 }
 
 // errOffDCPoleUnverified rejects a pole limit off DC whose pole the
@@ -428,9 +786,15 @@ func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 // one fast pole near 1e15, puts a slow pole below eps·‖A‖ that only its
 // componentwise rounding moves (BLHSVK). So does an exactly stored tiny
 // diagonal entry, whose response is −CA⁻¹B + D as A is nonsingular.
+// originMove, where resolvedPoles ran, is the largest of those bounds and
+// originInside reports a computed pole within n/2 times its own, the
+// single-pole scale of originPoleCluster; originZero reports a computed
+// pole exactly at s = 0.
 type poleGeometry struct {
-	rho, wide, gap, scale float64
-	near, offDC           bool
+	rho, wide, gap, scale    float64
+	near, offDC              bool
+	originMove               float64
+	originZero, originInside bool
 }
 
 func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
@@ -452,11 +816,13 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 		scale = 1
 	}
 	var resolved []bool
+	originMove, originInside := 0.0, false
+	originZero := s == 0 && slices.Contains(poles, 0)
 	if s == 0 && !newDescriptorPolicy(sys).isDescriptor() && slices.ContainsFunc(poles, func(p complex128) bool {
 		return p != 0 && cmplx.Abs(p) <= poleClusterTol*scale
 	}) {
-		if p, r := resolvedPoles(sys.A, n); r != nil {
-			poles, resolved = p, r
+		if p, r, mv, in := resolvedPoles(sys.A, n); r != nil {
+			poles, resolved, originMove, originInside = p, r, mv, in
 		}
 	}
 	rho := scale
@@ -521,7 +887,7 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 		dc = 1
 	}
 	offDC := gap <= 1e-3*cmplx.Abs(s-dc)
-	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near, offDC: offDC}, nil
+	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near, offDC: offDC, originMove: originMove, originZero: originZero, originInside: originInside}, nil
 }
 
 // resolvedPoles returns the eigenvalues of the n×n A with, for each, whether
@@ -530,20 +896,26 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 // eigenvectors x, y, invariant under diagonal scaling of A. A rounded
 // integrator, an exact zero or a computed one of a dense realization, has
 // a bound of the order of its own modulus and is not resolved. Where the
-// factorization fails it returns nil.
-func resolvedPoles(A *mat.Dense, n int) ([]complex128, []bool) {
+// factorization fails it returns nil. move is the largest bound, +Inf
+// where an eigenvalue is exactly 0, and inside reports an eigenvalue whose
+// modulus is within n/2 times its bound, the scale γ_n = nu of the
+// single-pole cluster test of originPoleCluster.
+func resolvedPoles(A *mat.Dense, n int) (poles []complex128, resolved []bool, move float64, inside bool) {
 	poles, yax, yx, ok := eigenvalueRoundingTerms(A, n)
 	if !ok {
-		return nil, nil
+		return nil, nil, 0, false
 	}
-	resolved := make([]bool, len(poles))
+	resolved = make([]bool, len(poles))
 	for k, p := range poles {
 		if p == 0 {
+			move = math.Inf(1)
 			continue
 		}
 		resolved[k] = eps()*yax[k] <= poleClusterTol*cmplx.Abs(p)*yx[k]
+		move = max(move, eps()*yax[k]/yx[k])
+		inside = inside || cmplx.Abs(p)*yx[k] <= float64(n)/2*eps()*yax[k]
 	}
-	return poles, resolved
+	return poles, resolved, move, inside
 }
 
 // eigenvalueRoundingTerms returns the eigenvalues of the n×n A with, for

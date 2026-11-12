@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/lapack"
@@ -681,14 +682,35 @@ func (f *integratorForm) coefficient(q int) (float64, float64) {
 }
 
 // originUnresolvedPoles counts the eigenvalues λ of the n×n A that are
-// integrators to a fit at dt: those of the largest cluster of the m
-// smallest in modulus that componentwise rounding of A can carry to s = 0
-// together, and any zero or with e^{λ·dt} within the IsStable boundary
-// band poleStabilityTolerance of z = 1, where the discrete fit cannot place
-// a free pole apart from an exact one. Closeness to s = 0 on the scale of
-// ‖A‖ is not enough: a slow pole of a stiff graded realization is located
-// to ε of itself, and rounding of A does not move it to s = 0 (KEEWB4,
-// NDFJC6).
+// integrators to a fit at dt: those of originPoleCluster, and any zero or
+// with e^{λ·dt} within the IsStable boundary band poleStabilityTolerance
+// of z = 1, where the discrete fit cannot place a free pole apart from an
+// exact one. It reports false where the Schur factorization fails.
+func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
+	cluster, evals, ok := originPoleCluster(A, n)
+	if !ok {
+		return 0, false
+	}
+	count := cluster
+	for _, p := range evals[cluster:] {
+		re, im := real(p)*dt, imag(p)*dt
+		half := math.Sin(im / 2)
+		toOne := complex(math.Expm1(re)*math.Cos(im)-2*half*half, math.Exp(re)*math.Sin(im))
+		nearOne := !cmplx.IsInf(toOne) && cmplx.Abs(toOne) <= poleStabilityTolerance(1+toOne)
+		if p == 0 || nearOne {
+			count++
+		}
+	}
+	return count, true
+}
+
+// originPoleCluster returns the size of the largest cluster of the m
+// eigenvalues of the n×n A smallest in modulus that componentwise
+// rounding of A can carry to s = 0 together, with the eigenvalues of A
+// ordered by modulus where the reordering succeeded. Closeness to s = 0 on
+// the scale of ‖A‖ is not enough: a slow pole of a stiff graded
+// realization is located to ε of itself, and rounding of A does not move
+// it to s = 0 (KEEWB4, NDFJC6).
 //
 // With A = Z·T·Zᵀ in real Schur form ordered by modulus, the m leading
 // eigenvalues are those of T11, with invariant bases X = Z1 and
@@ -707,10 +729,22 @@ func (f *integratorForm) coefficient(q int) (float64, float64) {
 // together. A cluster the Sylvester equation cannot separate from the
 // rest does not pass, nor does one past a block the reordering cannot
 // move. It reports false where the Schur factorization fails.
-func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
+func originPoleCluster(A *mat.Dense, n int) (int, []complex128, bool) {
+	return originPoleClusterScan(A, n, false)
+}
+
+// originPoleReached reports whether originPoleCluster is positive, or an
+// eigenvalue is exactly 0, stopping at the first cluster that passes. ok
+// is false where the Schur factorization fails.
+func originPoleReached(A *mat.Dense, n int) (reached, ok bool) {
+	cluster, evals, ok := originPoleClusterScan(A, n, true)
+	return cluster > 0 || slices.Contains(evals, 0), ok
+}
+
+func originPoleClusterScan(A *mat.Dense, n int, first bool) (int, []complex128, bool) {
 	t, z, ok := realSchur(A)
 	if !ok {
-		return 0, false
+		return 0, nil, false
 	}
 	work := make([]float64, n)
 	ordered := 0
@@ -731,7 +765,9 @@ func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
 	}
 	evals := schurEigenvaluesRaw(t, n)
 	ar := A.RawMatrix()
-	absAX := make([]float64, n)
+	absAX := make([]float64, n*n)
+	haveAX := 0
+	absY := make([]float64, n*n)
 	g := float64(n) * eps() / 2
 	coef := make([]complex128, n+1)
 	cluster := 0
@@ -746,31 +782,36 @@ func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
 				continue
 			}
 		}
-		yax := 0.0
-		for j := range m {
+		for ; haveAX < m; haveAX++ {
 			for i := range n {
 				s := 0.0
 				for l, v := range ar.Data[i*ar.Stride : i*ar.Stride+n] {
-					s += math.Abs(v) * math.Abs(z[l*n+j])
+					s += math.Abs(v) * math.Abs(z[l*n+haveAX])
 				}
-				absAX[i] = s
+				absAX[haveAX*n+i] = s
 			}
+		}
+		for i := range m {
+			for l := range n {
+				y := z[l*n+i]
+				for q := range n - m {
+					y -= z[l*n+m+q] * x[i*(n-m)+q]
+				}
+				absY[i*n+l] = math.Abs(y)
+			}
+		}
+		yax := 0.0
+		for j := range m {
 			for i := range m {
 				s := 0.0
 				for l := range n {
-					y := z[l*n+i]
-					for q := range n - m {
-						y -= z[l*n+m+q] * x[i*(n-m)+q]
-					}
-					s += math.Abs(y) * absAX[l]
+					s += absY[i*n+l] * absAX[j*n+l]
 				}
 				yax = math.Hypot(yax, s)
 			}
 		}
 		delta := g / (1 - g) * yax
-		var t11 mat.Dense
-		t11.CloneFrom(mat.NewDense(n, n, t).Slice(0, m, 0, m))
-		normT := mat.Norm(&t11, 2)
+		normT := -1.0
 		clear(coef)
 		coef[0] = 1
 		for i, p := range evals[:m] {
@@ -781,23 +822,21 @@ func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
 		pass, binom := true, 1.0
 		for i := 1; i <= m && pass; i++ {
 			binom = binom * float64(m-i+1) / float64(i)
+			if i == 2 {
+				var t11 mat.Dense
+				t11.CloneFrom(mat.NewDense(n, n, t).Slice(0, m, 0, m))
+				normT = mat.Norm(&t11, 2)
+			}
 			pass = cmplx.Abs(coef[i]) <= binom*float64(i)*delta*math.Pow(normT, float64(i-1))
 		}
 		if pass {
 			cluster = m
+			if first {
+				break
+			}
 		}
 	}
-	count := cluster
-	for _, p := range evals[cluster:] {
-		re, im := real(p)*dt, imag(p)*dt
-		half := math.Sin(im / 2)
-		toOne := complex(math.Expm1(re)*math.Cos(im)-2*half*half, math.Exp(re)*math.Sin(im))
-		nearOne := !cmplx.IsInf(toOne) && cmplx.Abs(toOne) <= poleStabilityTolerance(1+toOne)
-		if p == 0 || nearOne {
-			count++
-		}
-	}
-	return count, true
+	return cluster, evals, true
 }
 
 func fitDiscreteIntegrators(target []complex128, order, integrators int, limit float64) ([]float64, []float64, error) {
