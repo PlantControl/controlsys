@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -64,6 +65,66 @@ func TestReduceResolvedGapPerSideCount(t *testing.T) {
 		}
 		if e := reducedResponseErr(t, sys, res.Sys, slowProbePoints); e > 1e-8 {
 			t.Errorf("%s: response error %g", tc.name, e)
+		}
+	}
+}
+
+// TestReduceResolvedGapSlowCountAtSlowScale checks the slow count of
+// frequencyAxisCutAcrossGap on rotfast 13 (both census corpora), a stiff
+// rotated model whose slow poles near 1 sit 1e11 below its fast one (its
+// ReduceUnobservable cut is 0.1% off the response at s = 0, where the
+// probes are below the model's own bound). The staircase cuts' verified
+// probes all lie at
+// |s| ≥ 1e6, where the slow dynamics show only at relative |λ_s|/|s| =
+// 1e-6, and meet the global count there; none lies at |s| ≤ ρ_s, the
+// slow scale, so the slow count refuses them and reduceStates keeps the
+// order in every mode.
+func TestReduceResolvedGapSlowCountAtSlowScale(t *testing.T) {
+	tol := math.Sqrt(eps())
+	for _, name := range []string{"rotfast/13", "rotfast/13@arm64"} {
+		sys := bandLiterals[name].system(t)
+		n, _, _ := sys.Dims()
+		_, cutoff, ok := resolvedGap(sys.A)
+		if !ok {
+			t.Fatalf("%s: no resolved gap", name)
+		}
+		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Mode: ReduceUnobservable}, {Equalize: true}} {
+			policy := newRealizationTransformPolicy(sys)
+			if res, err := reduceStates(sys, policy, opts, true, sys); err != nil || res.Order != n {
+				t.Errorf("%s %+v: order %v err %v, want %d", name, opts, res.Order, err, n)
+			}
+			cut, removed, err := reduceByStaircase(sys, policy, opts, true, -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs, _, _ := eigenRoundingBounds(sys.A)
+			evR, _, _ := eigenRoundingBounds(cut.Sys.A)
+			rho := 0.0
+			for _, ev := range append(evs, evR...) {
+				if a := cmplx.Abs(ev); a < cutoff {
+					rho = math.Max(rho, a)
+				}
+			}
+			pts, poles, _ := axisProbes(sys, removed)
+			win, _ := sharedPoleWindows(poles, cut.Sys, tol)
+			full, rc := newBoundedResponse(sys, pts), newBoundedResponse(cut.Sys, pts)
+			slow, other := 0, 0
+			for k, s := range pts {
+				if classifyProbe(&full, &rc, k, tol, win.contain(s)) != probeVerified {
+					continue
+				}
+				if cmplx.Abs(s) <= rho {
+					slow += probeWeight(s)
+				} else {
+					other += probeWeight(s)
+				}
+			}
+			if slow != 0 || other < n+cut.Order {
+				t.Errorf("%s %+v: verified weight %d at |s| ≤ ρ_s = %.4g and %d beyond, want 0 and ≥ %d", name, opts, slow, rho, other, n+cut.Order)
+			}
+			if frequencyAxisCutAcrossGap(sys, cut.Sys, removed, tol, cutoff) {
+				t.Errorf("%s %+v: band accepts the staircase cut", name, opts)
+			}
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"math"
 	"math/cmplx"
 	"testing"
 
@@ -57,9 +58,11 @@ func TestReduceEqualizeKeepsModelWithUndeterminedResponse(t *testing.T) {
 	assertReducedUnchanged(t, "fz2244", sys, res)
 }
 
-// Y5H2MH fz 17305: the Equalize cut to order 2 is off by 1.1e-4 relative,
-// so it is refused at the default tolerance and accepted when Tol admits
-// that change.
+// Y5H2MH fz 17305: the Equalize cut to order 2 is refused at the default
+// tolerance and accepted when Tol admits its change. Its exact deviation at
+// the probes main verified is 2.39·tol·scale at Tol 1e-4, off by 2.4e-4
+// relative (1.1e-4 was main's measure, which left the model's evaluation
+// error uncharged), so Tol 1e-3 admits it.
 func TestReduceTolAdmitsCutRefusedAtDefault(t *testing.T) {
 	sys := reduceVerifyLiterals(t)["fz17305"]
 	res, err := sys.Reduce(&ReduceOpts{Equalize: true})
@@ -67,12 +70,12 @@ func TestReduceTolAdmitsCutRefusedAtDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertReducedUnchanged(t, "fz17305 default", sys, res)
-	res, err = sys.Reduce(&ReduceOpts{Equalize: true, Tol: 1e-4})
+	res, err = sys.Reduce(&ReduceOpts{Equalize: true, Tol: 1e-3})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Order != 2 {
-		t.Fatalf("Tol 1e-4: order %d, want 2", res.Order)
+		t.Fatalf("Tol 1e-3: order %d, want 2", res.Order)
 	}
 }
 
@@ -90,7 +93,13 @@ func TestReduceReturnsModelWhenCutUnverifiable(t *testing.T) {
 
 // An exact axis pole, kept or removed, puts probes where both responses
 // are rounding noise (a kept integrator that the rotated cut carries only
-// to rounding); the correct cut must still be accepted.
+// to rounding); the correct cut must still be accepted. The rotated
+// continuous model with a removed integrator is the exception: rotation
+// leaves the integrator uncontrollable only to rounding, the stored model
+// carries a rounding-level residue on a pole within rounding of s = 0, and
+// the cut that drops it is off by O(1) of the response at s = 0 against
+// the stored model's exact response (Reduce's contract), so the order is
+// kept and the exact oracle refutes the cut there.
 func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 	q := mat.NewDense(3, 3, []float64{7.0 / 9, -4.0 / 9, -4.0 / 9, -4.0 / 9, 1.0 / 9, -8.0 / 9, -4.0 / 9, -8.0 / 9, 1.0 / 9})
 	for _, tc := range []struct {
@@ -130,6 +139,18 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 				res, err := sys.Reduce(opts)
 				if err != nil {
 					t.Fatalf("%s rot=%v: %v", tc.name, rot, err)
+				}
+				if rot && tc.dt == 0 && tc.d[2] == 0 {
+					if res.Order != 3 {
+						t.Errorf("%s rot=%v eq=%v: order %d, want 3", tc.name, rot, opts.Equalize, res.Order)
+					}
+					red, _ := bandStaircaseCut(t, sys, opts)
+					g, r, tg := oracleStrictlyProper(sys, 0), oracleStrictlyProper(red, 0), oracleTerms(sys, 0)
+					scale := math.Max(math.Max(oracleDist(g[0], oracleOf(0)), oracleDist(r[0], oracleOf(0))), tg[0])
+					if d := oracleDist(g[0], r[0]); !(d > math.Sqrt(eps())*scale) {
+						t.Errorf("%s rot=%v eq=%v: cut off by %.3g at s = 0, within tol·max(scale, terms)", tc.name, rot, opts.Equalize, d)
+					}
+					continue
 				}
 				if res.Order != 2 {
 					t.Fatalf("%s rot=%v eq=%v: order %d, want 2", tc.name, rot, opts.Equalize, res.Order)
@@ -474,22 +495,52 @@ func reduceVerifyLiterals(t *testing.T) map[string]*System {
 
 // Y5H2MH matched-hid 148, 221, 246 unc-false: the planted state is
 // structurally disconnected; the rotated staircase cut is verified at
-// nearly every probe but deviates at the matched-C2D zero z = -1 by more
-// than the model's own bound there (certified wrong by 3..737 on main).
-// The staircase stage returns the model unreduced in every mode; Reduce's
-// structural stage deletes the planted state exactly first, checked here
-// through the public API.
+// nearly every probe but deviates at the matched-C2D zero z = -1 by 3..737
+// times the model's own bound there. The staircase stage returns
+// 221-unc-false-amd64 unreduced in every mode; Reduce's structural stage
+// deletes the planted state exactly first, checked here through the
+// public API. 148-unc-false and 246-unc-false-amd64 are the exceptions on
+// the staircase stage: at z = -1 both responses are below their own terms'
+// rounding, and Reduce's contract measures the deviation there against
+// those terms Σ|C||X|, not against the vanishing response (0.3–0.4 and
+// 6e-6 of tol·terms at 320 bits), so their order-5 cuts may be accepted;
+// 148-unc-false's is, in some mode.
+// Where the band accepts one, the exact responses must agree to tol at
+// every probe it verified, and the contract must hold on the dense sweep.
 func TestReduceRefusesCutBeyondModelBoundAtNyquistZero(t *testing.T) {
 	lits := reduceVerifyLiterals(t)
+	tol := math.Sqrt(eps())
 	for _, name := range []string{"148-unc-false", "221-unc-false-amd64", "246-unc-false-amd64"} {
 		sys := lits[name]
 		assertReduceDeletesLastStateExactly(t, name, sys)
+		accepts, reduced := 0, 0
+		escape := name != "221-unc-false-amd64"
+		if escape {
+			strictBandRecheck(t, name)
+			hook := bandAcceptHook
+			bandAcceptHook = func(sys, red *System, tol, cutoff float64, pts []complex128, verified []bool, slow, fast int, full, cut *boundedResponse) {
+				accepts++
+				hook(sys, red, tol, cutoff, pts, verified, slow, fast, full, cut)
+			}
+		}
 		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Mode: ReduceUnobservable}, {Equalize: true}} {
+			before := accepts
 			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, sys)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
+			if escape && res.Order == 5 && accepts > before {
+				if c, at := contractSweep(sys, res.Sys, tol); !(c <= 1) {
+					t.Errorf("%s %+v: order-5 cut off by %.3g·tol·max(scale, terms) at %v", name, opts, c, at)
+				}
+				reduced++
+				continue
+			}
 			assertReducedUnchanged(t, name, sys, res)
+		}
+		bandAcceptHook = nil
+		if name == "148-unc-false" && reduced == 0 {
+			t.Errorf("%s: the contract-correct order-5 cut is refused in every mode", name)
 		}
 	}
 }

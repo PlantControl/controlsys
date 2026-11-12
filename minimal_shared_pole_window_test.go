@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -189,7 +190,7 @@ func TestReduceSharedPoleWindowKeyedPerPole(t *testing.T) {
 		t.Errorf("probe %v inside a window", pts[k])
 	}
 	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
-	if v := classifyProbe(full, cut, k, tol, win.contain(pts[k])); v != probeReject {
+	if v := classifyProbe(&full, &cut, k, tol, win.contain(pts[k])); v != probeReject {
 		t.Errorf("probe %v: verdict %d, want reject", pts[k], v)
 	}
 	if frequencyAxisCutInBand(sys, red, nil, tol) {
@@ -206,7 +207,11 @@ func TestReduceSharedPoleWindowKeyedPerPole(t *testing.T) {
 // ≈ −0.125 with β_R = 0.25 ≤ ρ₀ = 0.75, an uncapped radius of 1.7e7 that
 // would make −1's probes uninformative; capped at the distance to −1 it
 // leaves the corner 1j, where the cut is wrong by 3700·tol, to reject. The
-// result is the same on main.
+// result is the same on main. At Tol 1e-4 the spectral-gap split, which
+// main accepted, folds the −1 coupling into the integrator and moves it to
+// 5e-5: against the stored model's exact integrator it is off by 0.98 of
+// the response at s = 1.1e-5j (1e4·Tol), below every probe the slow count
+// takes, so no Tol below 1 admits it and Reduce keeps the order.
 func TestReduceWindowCapAtExactIntegrator(t *testing.T) {
 	const d = 1e-4
 	fast := math.Ldexp(1, 50)
@@ -256,10 +261,16 @@ func TestReduceWindowCapAtExactIntegrator(t *testing.T) {
 	if frequencyAxisCutInBand(sys, red, nil, tol) {
 		t.Error("cut that drops the −1 mode accepted")
 	}
+	_, cutoff, _ := resolvedGap(sys.A)
+	if split, ok := reduceAcrossSpectralGap(sys, newRealizationTransformPolicy(sys), &ReduceOpts{Tol: 1e-4}, cutoff); !ok || split.Order != 2 {
+		t.Errorf("Tol 1e-4 split: ok %v", ok)
+	} else if c, at := contractSweep(sys, split.Sys, 1e-4); !(c > 1) {
+		t.Errorf("Tol 1e-4 split off by %.3g·Tol·max(scale, terms) at %v, within the contract", c, at)
+	}
 	for _, tc := range []struct {
 		opts *ReduceOpts
 		want int
-	}{{nil, 3}, {&ReduceOpts{Tol: 1e-4}, 2}} {
+	}{{nil, 3}, {&ReduceOpts{Tol: 1e-4}, 3}} {
 		res, err := sys.Reduce(tc.opts)
 		if err != nil {
 			t.Fatal(err)
@@ -378,6 +389,58 @@ func TestReduceSharedPoleWindowNeedsEverySharedPole(t *testing.T) {
 		}
 		if res.Order != 4 {
 			t.Errorf("%s: order %d, want 4", tc.name, res.Order)
+		}
+	}
+}
+
+// TestReduceSharedPoleWindowGuardsOnStiffModels freezes the two guards of
+// sharedPoleWindows on stiff rotated census models (‖A‖ ≈ 1e15, slow poles
+// below 1, so ε‖A‖ is O(1) and the slow poles pass |λ_G| ≤ β_G), whose
+// ReduceUnobservable staircase cuts are off by 1e7·tol at s = 0 against the
+// stored model. nse-rot 1518 (amd64 corpus): its slow model poles are
+// known worse than their normwise resolution (β_G > ρ_G), so they are no
+// rounding-level zero and the cut's slow pole gets no window; without the
+// guard a window of radius 8.7e7 hid the error and the cut was accepted.
+// nse-rot 1197 (arm64 corpus): every window is capped at the nearest model
+// pole it does not share; uncapped, the slow window had radius 1.7e7. Reduce
+// keeps the order on every arch.
+func TestReduceSharedPoleWindowGuardsOnStiffModels(t *testing.T) {
+	tol := math.Sqrt(eps())
+	unobs := &ReduceOpts{Mode: ReduceUnobservable}
+	for _, name := range []string{"nse-rot/1518", "nse-rot/1197@arm64"} {
+		sys := bandLiterals[name].system(t)
+		n, _, _ := sys.Dims()
+		if res, err := sys.Reduce(unobs); err != nil || res.Order != n {
+			t.Errorf("%s: order %v err %v, want %d", name, res.Order, err, n)
+		}
+		red, removed := bandStaircaseCut(t, sys, unobs)
+		_, poles, ok := axisProbes(sys, removed)
+		if !ok {
+			t.Fatal("eigenvalues did not converge")
+		}
+		win, _ := sharedPoleWindows(poles, red, tol)
+		for i, c := range win.centre {
+			d := make([]float64, len(poles.evals))
+			for k, ev := range poles.evals {
+				d[k] = cmplx.Abs(c - ev)
+			}
+			slices.Sort(d)
+			if len(d) > 1 && win.radius[i] > d[1] {
+				t.Errorf("%s: window about %v, radius %g, reaches the model pole %g away", name, c, win.radius[i], d[1])
+			}
+			if name == "nse-rot/1518" && cmplx.Abs(c) < 1e3 {
+				t.Errorf("%s: window about the slow cut pole %v", name, c)
+			}
+		}
+		if name == "nse-rot/1518" {
+			for k, ev := range poles.evals {
+				if a := cmplx.Abs(ev); a < 1e3 && !(a <= poles.beta[k] && poles.beta[k] > poles.rho[k]) {
+					t.Errorf("%s: slow pole %v, β_G %g, ρ_G %g: not an ill-conditioned pole within β_G of 0", name, ev, poles.beta[k], poles.rho[k])
+				}
+			}
+		}
+		if c, at := contractSweep(sys, red, tol); !(c > 1) {
+			t.Errorf("%s: staircase cut off by %.3g·tol·max(scale, terms) at %v, within the contract", name, c, at)
 		}
 	}
 }

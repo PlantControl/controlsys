@@ -78,7 +78,7 @@ func determinedOracleMisfit(t *testing.T, sys, red *System) float64 {
 			continue
 		}
 		for i, v := range g {
-			worst = math.Max(worst, (cmplx.Abs(v-r[i])-bound.bound[k*p*m+i])/scale)
+			worst = math.Max(worst, (cmplx.Abs(v-r[i])-bound.data[k*p*m+i])/scale)
 		}
 	}
 	return worst

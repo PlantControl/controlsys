@@ -38,8 +38,8 @@ type ReduceOpts struct {
 	// coupled states that carry the response (a slow plant in a PI loop
 	// drops to order 1; the 10^±3 diagonally scaled Kalman sweep gives 174
 	// under-counts and 277 response errors). Reduce also accepts a cut only
-	// when its response matches the model's to max(√ε, Tol) (relative), so
-	// a larger Tol admits larger response changes; it can also return a
+	// when its response matches the model's to max(√ε, Tol) (relative; see
+	// Reduce for the scale), so a larger Tol admits larger response changes; it can also return a
 	// larger model, when the looser rank floor cuts more states and that
 	// cut fails the check while the default cut would pass.
 	Tol float64
@@ -84,16 +84,38 @@ type ReduceResult struct {
 // removes a state and passes the same check, else the model is returned
 // unreduced. A reduction is kept only when its response is verified to
 // match the model's to tol = max(√ε, Tol) on the frequency axis (the unit
-// circle or the imaginary axis): at points beside every eigenvalue, on a
-// fixed grid and on a decade grid, none may refute it, fail to verify it
-// where the model's own rounding bound determines its response, or deviate
-// from the model by more than that bound, and the points that verify it
-// within the rounding bounds of both responses must fix a difference of
-// degree n + nr (the orders of the model and the cut). Across a gap, a
-// point at the fast scale cannot see a slow pole to tol, so a continuous
-// model also needs n_f + nr_f + 1 verified points at or above the gap and
-// n_s + nr_s + 1 below both it and ε·‖A‖/tol (n_x, nr_x the eigenvalues of
-// the model and the cut on that side). Without a gap and without Equalize,
+// circle or the imaginary axis), relative to the larger of the response and
+// the entry's own terms: the stored model's exact response is the
+// reference, and its data resolution is not a tolerance. A nil error with
+// a reduced model R of the stored model G certifies, within the limits of
+// the sampled check below, at every axis point s outside the windows of the poles the two share (there a rounding-level
+// move of either realization's pole changes the response by more than tol,
+// so neither is determined to tol),
+//
+//	|G_ij(s) − R_ij(s)| ≤ tol·max(max|G(s)|, max|R(s)|, Σ_l |C_il||X_lj(s)|),
+//
+// G, R and X = (sI−A)⁻¹B exact for the stored data; the terms Σ|C||X| exceed
+// |G_ij| only where the response cancels, as at a transmission zero, below
+// which no cut computed in floating point places the zero. Consequences for
+// poles within rounding of the axis: a cut that keeps one, as a rotated
+// cut keeps a continuous integrator at s = 0 or a discrete one at z = 1
+// only to rounding, is judged outside the window of that shared pole and
+// accepted; a continuous cut that drops one is refused (a rotated
+// realization of an uncontrollable or unobservable integrator, which the
+// stored data leave with a rounding-level residue that is O(1) of the
+// response beside it, keeps that state: order 3 for a rotated third-order
+// model with one uncontrollable integrator); and a cut that moves an exact
+// integrator of the stored model off the axis (a spectral-gap split
+// folding a coupling into it) is refused at every Tol. It is checked at
+// points beside every eigenvalue, on a fixed grid and on a decade grid:
+// none may refute it or fail to verify it where the model's own rounding
+// bound determines its response, and the points that verify it within the
+// rounding bounds of both responses must fix a difference of degree n + nr
+// (the orders of the model and the cut). Across a gap, a point at the fast
+// scale cannot see a slow pole to tol, so a continuous model also needs
+// n_f + nr_f + 1 verified points at or above the gap and n_s + nr_s + 1 at
+// or below the slow scale, the largest eigenvalue magnitude below the gap
+// (n_x, nr_x the eigenvalues of the model and the cut on that side). Without a gap and without Equalize,
 // when the check refuses the staircase cut of a continuous model whose
 // equalizing scales span 2^16 or more, the staircase cut of the equalized
 // model is judged by the same check and kept if it passes: on a realization graded over decades
