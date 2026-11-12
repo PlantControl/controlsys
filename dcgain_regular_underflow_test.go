@@ -81,7 +81,7 @@ func TestDCGainRegularPathUnderflowedSolve(t *testing.T) {
 			if !dcGainRegularPath(sys) {
 				t.Fatal("model no longer reaches the regular DC path")
 			}
-			if r := solveDCRegular(sys.A, sys.B, sys.C, sys.D, 0, false); r.certified {
+			if r := solveDCRegular(nil, sys.A, sys.B, sys.C, sys.D, 0, false); r.certified {
 				t.Fatalf("solveDCRegular certified %v from an underflowed solve", mat.Formatted(r.g))
 			}
 			g, err := sys.DCGain()
