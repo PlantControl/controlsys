@@ -807,7 +807,8 @@ func mqRiccatiForwardErr(s *fzSpec, acl, x []float64, den float64) float64 {
 // ErrNotConverged and ErrSingularEquation are failures when
 // mqRiccatiExists proves a stabilizing solution exists, and the proved
 // ErrNoStabilizing (with ErrNotStabilizable) also when (A, B) is robustly
-// stabilizable (mqStabilizable).
+// stabilizable (mqStabilizable); the proved boundary eigenvalue
+// (ErrNoStabilizing alone) is a failure when mqRiccatiExists holds.
 func FuzzRiccati(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -855,6 +856,14 @@ func FuzzRiccati(f *testing.F) {
 		}
 		if err != nil {
 			switch {
+			case errors.Is(err, errAxisEigenvalue) || errors.Is(err, errUnitCircleEigenvalue):
+				if errors.Is(err, ErrNotStabilizable) {
+					t.Fatalf("%s: boundary-eigenvalue proof with ErrNotStabilizable: %v\n%s", op, err, s)
+				}
+				if mqRiccatiExists(s, q, r, sm) {
+					t.Fatalf("%s: boundary eigenvalue proved, but a stabilizing solution provably exists: %v\n%s", op, err, s)
+				}
+				fzSkip(t, op+": no stabilizing solution (eigenvalue on the boundary)")
 			case errors.Is(err, ErrNoStabilizing):
 				if !errors.Is(err, ErrNotStabilizable) {
 					t.Fatalf("%s: ErrNoStabilizing without ErrNotStabilizable: %v\n%s", op, err, s)
