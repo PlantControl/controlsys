@@ -36,8 +36,9 @@ func assertClosedLoopEigExact(t *testing.T, name string, A, B, K, E *mat.Dense, 
 // closedLoopEigOracleRatio returns the least over pairings of eig with the
 // exact eigenvalues of (A − BK, E) of the largest error over its bound, as
 // assertClosedLoopEigExact defines them, and those eigenvalues and bounds;
-// nil eigenvalues when the oracle fails.
-func closedLoopEigOracleRatio(A, B, K, E *mat.Dense, eig []complex128) (float64, []complex128, []float64) {
+// nil eigenvalues when the oracle fails. The extra seeds join those from F
+// and eig.
+func closedLoopEigOracleRatio(A, B, K, E *mat.Dense, eig []complex128, extra ...complex128) (float64, []complex128, []float64) {
 	Ah := hbAdd(hbFrom(A), hbMul(hbFrom(B), hbFrom(K)), -1)
 	Eh := hbFrom(E)
 	for i := range Ah.r {
@@ -60,7 +61,7 @@ func closedLoopEigOracleRatio(A, B, K, E *mat.Dense, eig []complex128) (float64,
 	}
 	coef := hbCharPoly(Fh)
 	var want []complex128
-	for _, z := range append(ed.Values(nil), eig...) {
+	for _, z := range append(append(ed.Values(nil), eig...), extra...) {
 		if !isFinite(real(z)) || !isFinite(imag(z)) {
 			continue
 		}

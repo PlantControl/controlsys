@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/cmplx"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -397,4 +398,67 @@ func TestCareDescriptorClosedLoopEigCrossTerm(t *testing.T) {
 	S := mat.NewDense(2, 1, []float64{0.0001527290971034706, -0.00020409952445133705})
 	res, err := Care(A, B, eyeDense(2), mat.NewDense(1, 1, []float64{1e-5}), &RiccatiOpts{E: E, S: S})
 	assertEigCertifiedOrUnverified(t, "z5a/3229", res, err, false, fixed(A), fixed(B), gain, fixed(E))
+}
+
+// Known base row, not recomputed: zw46 reg seed 1604 (dt 1, amd64 model,
+// Q = I to rounding, no cross term) solves by the extended-precision path
+// on amd64, whose Eig is kept, nil error, identical to base: 0.59954,
+// 0.03669±0.29348i, −0.31965, −0.20661 against the exact (rational
+// det(λE − (A − BK)), 400-bit roots) 0.59178, 0.02838±0.24674i,
+// −0.25093±0.05662i, 0.45× the bound, which is ~0.2 absolute (κ ~ 1e14).
+// The census oracle's real seeds never reached the complex pair, so seeds
+// on a circle about each Eig are added; zzEigRatio put it at 9.44×.
+// Native takes another path and returns ErrAccuracyUnverified.
+func TestDareDescriptorKnownBaseExtendedEig(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{
+		0.691179440083827, -0.3438514915580632, 1.4457762993101713, 1.6920110885411763, 2.013042396347564,
+		-1.261713335445748, -0.23088400621129956, -1.7678554110497966, -0.8024445669573673, -1.573818245787472,
+		1.0197917295331542, 0.11702165007857329, -0.11117752670705577, -0.25019604624687847, 0.5239940910445365,
+		0.25391582248767497, -0.9649931662646374, -0.12046970586636474, -0.8348276606918372, 0.03767396112978927,
+		1.4250856631624185, -0.17683368235228047, 0.3922844858374318, -0.7830187981431023, -1.334456862325766,
+	})
+	B := mat.NewDense(5, 2, []float64{
+		-0.7780014882705879, 1.2649584492849972,
+		2.163320630531371, -1.4843407408629283,
+		-0.43916988906907456, -0.9739076672389873,
+		1.1633565754813813, -1.2223031227625658,
+		-0.5599264879449934, 0.38807316981136536,
+	})
+	E := mat.NewDense(5, 5, []float64{
+		1.5861934817676495, -0.43414760867139945, 0.5431978460371042, -0.2357640525489473, -0.8841276954575028,
+		1.3127835335842235, -0.7211452437204312, 0.6339631286115923, 0.6026226647231661, -0.6262913978471358,
+		0.0926699126897913, -0.2399316614783217, 1.2406126395680641, -0.37309220046034275, -0.19336075283036955,
+		0.5292890617824172, -0.7581789494479302, -0.3544005612369567, 0.37890355677351717, 0.16905033307739145,
+		-0.6747085007738266, 0.3967806986025252, 0.5074109344798864, -0.2660213683024656, 1.0589357787410734,
+	})
+	Q := mat.NewDense(5, 5, []float64{
+		0.9999999999999996, 2.220446049250313e-16, 2.220446049250313e-16, 2.1510571102112408e-16, 2.220446049250313e-16,
+		2.220446049250313e-16, 1.0000000000000002, 5.551115123125783e-17, -9.020562075079397e-17, -1.942890293094024e-16,
+		2.220446049250313e-16, 5.551115123125783e-17, 1.0000000000000007, -1.942890293094024e-16, -4.579669976578771e-16,
+		2.1510571102112408e-16, -9.020562075079397e-17, -1.942890293094024e-16, 0.9999999999999998, 1.5612511283791264e-17,
+		2.220446049250313e-16, -1.942890293094024e-16, -4.579669976578771e-16, 1.5612511283791264e-17, 1,
+	})
+	for _, api := range []string{"Dare", "Dlqr"} {
+		solve := Dare
+		if api == "Dlqr" {
+			solve = Dlqr
+		}
+		res, err := solve(A, B, Q, eyeDense(2), &RiccatiOpts{E: E})
+		if err != nil {
+			if !errors.Is(err, ErrAccuracyUnverified) || res == nil {
+				t.Fatalf("%s: %v", api, err)
+			}
+			continue
+		}
+		var seeds []complex128
+		for _, z := range res.Eig {
+			for k := range 8 {
+				seeds = append(seeds, z+cmplx.Rect(0.1*max(cmplx.Abs(z), 0.1), float64(k)*math.Pi/4))
+			}
+		}
+		ratio, want, bound := closedLoopEigOracleRatio(A, B, res.K, E, res.Eig, seeds...)
+		if want == nil || !(ratio <= 8) {
+			t.Errorf("%s: Eig %v, exact closed loop %v (bounds %.3g): %.3g× the bound", api, res.Eig, want, bound, ratio)
+		}
+	}
 }
