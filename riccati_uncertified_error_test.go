@@ -162,10 +162,11 @@ func TestRiccatiProvedNoStabilizing(t *testing.T) {
 // TestRiccatiNotConvergedIsNotNoStabilizing: a solve that finds no
 // verified solution is ErrNotConverged with a nil result, not
 // ErrNoStabilizing, even where none exists but no certificate proves it
-// (ZOJBZX Q1; TestCare_HamiltonianAxisPairNoStabilizing for a Hamiltonian
-// pair on the axis, whose certificate is I4J6DP): a boundary mode
-// unreachable from the noise (TestKalman_BoundaryModeUnreachableFromNoise)
-// and its dual Dare.
+// (ZOJBZX Q1): a boundary mode unreachable from the noise
+// (TestKalman_BoundaryModeUnreachableFromNoise) for Kalman and Dlqr on its
+// dual (Dare proves that z = −1 eigenvalue since I4J6DP; JFLGVW for the
+// others), and the census near-unit-circle Dare, whose pencil has no
+// eigenvalue on the circle (TestDare_NearUnitCircleNotProved).
 func TestRiccatiNotConvergedIsNotNoStabilizing(t *testing.T) {
 	check := func(op string, res *RiccatiResult, err error) {
 		t.Helper()
@@ -184,7 +185,8 @@ func TestRiccatiNotConvergedIsNotNoStabilizing(t *testing.T) {
 	res, err := Kalman(sys, eyeDense(1), eyeDense(1), nil, nil)
 	check("Kalman", res, err)
 	At, Ct, Q, Et := dualDare(pA, pB, pC, pE)
-	res, err = Dare(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et})
+	nA, nB, nQ, nR, nE := dareNearUnitCircle()
+	res, err = Dare(nA, nB, nQ, nR, &RiccatiOpts{E: nE})
 	check("Dare", res, err)
 	res, err = Dlqr(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et})
 	check("Dlqr", res, err)
@@ -295,10 +297,11 @@ const (
 	contractUnverified
 	contractNotConverged
 	contractProved
+	contractBoundaryProved
 )
 
 func (c riccatiContractClass) String() string {
-	return [...]string{"certified", "unverified", "not converged", "proved"}[c]
+	return [...]string{"certified", "unverified", "not converged", "proved", "boundary eigenvalue proved"}[c]
 }
 
 // TestRiccatiContractByOperation checks each exported Riccati operation
@@ -308,13 +311,18 @@ func (c riccatiContractClass) String() string {
 //   - not proved: (nil, ErrNotConverged), never ErrNoStabilizing;
 //   - proved: (nil, ErrNoStabilizing) with ErrNotStabilizable for the
 //     control side (Care, Dare, Lqr, Dlqr, Lqi, Lqrd) and ErrNotDetectable
-//     for the estimator side (Lqe, Kalman, Kalmd), never the other.
+//     for the estimator side (Lqe, Kalman, Kalmd), never the other;
+//   - boundary eigenvalue proved (Care, Dare only, I4J6DP): (nil,
+//     ErrNoStabilizing) with neither ErrNotStabilizable nor ErrNotDetectable.
 //
 // Fixtures: a stabilizable well-conditioned plant (certified); weakBStall
 // and its dual, and the well-conditioned-E Dare
 // (TestRiccatiUnverifiedPartialResult; uncertified); the Hamiltonian axis
 // pair (TestCare_HamiltonianAxisPairNoStabilizing) and the noise-unreachable
-// boundary mode (TestKalman_BoundaryModeUnreachableFromNoise; not proved);
+// boundary mode (TestKalman_BoundaryModeUnreachableFromNoise; not proved,
+// except by Care and Dare, which prove their boundary eigenvalue; their
+// not-proved fixtures are the axis pair with Q one ulp off symmetric and
+// the census near-unit-circle Dare, TestDare_NearUnitCircleNotProved);
 // an exactly uncontrollable (unobservable) unstable mode, and K72KOR's
 // undetectable mode at z = 1 (proved).
 //
@@ -381,6 +389,10 @@ func TestRiccatiContractByOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pAt, pCt, pQ, pEt := dualDare(pA, pB, pC, pE)
+	xqa := slices.Clone(xq)
+	xqa[1] = math.Nextafter(xqa[1], 1)
+	xQa := mat.NewDense(4, 4, xqa)
+	nA, nB, nQ, nR, nE := dareNearUnitCircle()
 
 	type op = func() (*RiccatiResult, error)
 	cases := []struct {
@@ -390,7 +402,8 @@ func TestRiccatiContractByOperation(t *testing.T) {
 	}{
 		{"Care", contractCertified, func() (*RiccatiResult, error) { return Care(cA, cB, I2, I1, nil) }},
 		{"Care", contractUnverified, func() (*RiccatiResult, error) { return Care(wA, wB, wQ, wR, nil) }},
-		{"Care", contractNotConverged, func() (*RiccatiResult, error) { return Care(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
+		{"Care", contractNotConverged, func() (*RiccatiResult, error) { return Care(xA, xB, xQa, xR, &RiccatiOpts{S: xS}) }},
+		{"Care", contractBoundaryProved, func() (*RiccatiResult, error) { return Care(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
 		{"Care", contractProved, func() (*RiccatiResult, error) { return Care(uA, uB, I2, I1, nil) }},
 		{"Lqr", contractCertified, func() (*RiccatiResult, error) { return Lqr(cA, cB, I2, I1, nil) }},
 		{"Lqr", contractUnverified, func() (*RiccatiResult, error) { return Lqr(wA, wB, wQ, wR, nil) }},
@@ -398,7 +411,8 @@ func TestRiccatiContractByOperation(t *testing.T) {
 		{"Lqr", contractProved, func() (*RiccatiResult, error) { return Lqr(uA, uB, I2, I1, nil) }},
 		{"Dare", contractCertified, func() (*RiccatiResult, error) { return Dare(dA, dB, I2, I1, nil) }},
 		{"Dare", contractUnverified, func() (*RiccatiResult, error) { return Dare(eA, eB, I2, I2, eOpts) }},
-		{"Dare", contractNotConverged, func() (*RiccatiResult, error) { return Dare(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
+		{"Dare", contractNotConverged, func() (*RiccatiResult, error) { return Dare(nA, nB, nQ, nR, &RiccatiOpts{E: nE}) }},
+		{"Dare", contractBoundaryProved, func() (*RiccatiResult, error) { return Dare(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
 		{"Dare", contractProved, func() (*RiccatiResult, error) { return Dare(uDA, uB, I2, I1, nil) }},
 		{"Dlqr", contractCertified, func() (*RiccatiResult, error) { return Dlqr(dA, dB, I2, I1, nil) }},
 		{"Dlqr", contractUnverified, func() (*RiccatiResult, error) { return Dlqr(eA, eB, I2, I2, eOpts) }},
@@ -450,6 +464,10 @@ func TestRiccatiContractByOperation(t *testing.T) {
 			}
 			if !errors.Is(err, ErrNoStabilizing) || !errors.Is(err, want) || errors.Is(err, not) || errors.Is(err, ErrNotConverged) || res != nil {
 				t.Errorf("%s: result %v, err %v; want nil with ErrNoStabilizing and %v", what, res != nil, err, want)
+			}
+		case contractBoundaryProved:
+			if !errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrNotStabilizable) || errors.Is(err, ErrNotDetectable) || errors.Is(err, ErrNotConverged) || res != nil {
+				t.Errorf("%s: result %v, err %v; want nil with ErrNoStabilizing alone", what, res != nil, err)
 			}
 		}
 	}
