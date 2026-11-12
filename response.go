@@ -405,7 +405,12 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // ulp: a rigorous forward-error bound proves the solve, after double-double
 // refinement where needed, or the exact solve replaces it; above order 16 a
 // solve the bound cannot prove keeps its refined value with
-// ErrAccuracyUnverified. Where I−A (A) is singular to working precision, a nil error
+// ErrAccuracyUnverified. A 0 within that bound has no correct digit and
+// asserts a zero gain, so it is certified only where the bound is itself 0;
+// otherwise the solve refines on, and the exact solve decides a 0 that
+// persists, or above order 16 it keeps ErrAccuracyUnverified: D cancelling
+// C(I−A)⁻¹B to rounding returns the float model's gain, not 0.
+// Where I−A (A) is singular to working precision, a nil error
 // means the exact limit of the float model at DC, entry by entry (a signed
 // Inf at its poles), for models of order up to 16; beyond that, only where
 // the pole is exactly decoupled or structurally exact, or no computed pole
