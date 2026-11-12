@@ -66,9 +66,9 @@ func TestLqrDescriptorClosedLoopEigNearSingularE(t *testing.T) {
 		name string
 		f    *frozenDescriptor
 	}{
-		{"z5a/561", mod561},
-		{"rand/95", mod95},
-		{"z5a/689", mod689},
+		{"z5a/561", z5a561Model},
+		{"rand/95", rand95Model},
+		{"z5a/689", z5a689Model},
 	} {
 		sys := c.f.system(t)
 		n, m, _ := sys.Dims()
@@ -95,8 +95,8 @@ func TestLqiDescriptorClosedLoopEigNearSingularE(t *testing.T) {
 		f         *frozenDescriptor
 		certified bool
 	}{
-		{"rot/123", modrot123, false},
-		{"rand/108", mod108, true},
+		{"rot/123", rotated123Model, false},
+		{"rand/108", rand108Model, true},
 	} {
 		sys := c.f.system(t)
 		n, m, p := sys.Dims()
@@ -111,19 +111,30 @@ func TestLqiDescriptorClosedLoopEigNearSingularE(t *testing.T) {
 }
 
 // Lqr on Lqi's augmented pencil with the integrator rows scaled by 2^k
-// (amd64 models; native does not converge). Rotated seed 123, k = 0: as
+// (amd64 models; native does not converge; the singular-E gate may
+// reject a row-scaled pencil on one arch). Rotated seed 123, k = 0: as
 // TestLqiDescriptorClosedLoopEigNearSingularE. Rotated seed 176, k = −4:
 // old nil, −1.1861±0.346792i against −1.18637±0.394353i (3.8%, 5.8e12×);
 // two-stage rework Accuracy 1 (β = 0); now unbalanced, −1.18637±0.394353i
-// (0.12×).
+// (0.12×). Triangular seed 1081, k = 0, −1, 1, −2 (arm64 model, E[1][1] =
+// 3.4e-16, λ∞ = −4.18551e15, oracle −0.73823 and −1.16839): old nil, O(1)
+// modes up to 26% off (4.4e12–4.7e13× the bound; amd64 1.6–36%,
+// 2.9e12–1.2e14×); now β = 0 on the balanced and row-equilibrated stages
+// and the unbalanced one 8.8e5·n over, so Accuracy 1 with those modes
+// exact; k = −4 certifies −0.73823, −1.16839 (0.10×).
 func TestLqrAugmentedDescriptorClosedLoopEigRowScaled(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		f    *frozenDescriptor
 		k    int
 	}{
-		{"rot/123/k0", modrot123, 0},
-		{"rot/176/k-4", modrot176, -4},
+		{"rot/123/k0", rotated123Model, 0},
+		{"rot/176/k-4", rotated176Model, -4},
+		{"tri/1081/k0", triangular1081Model, 0},
+		{"tri/1081/k-1", triangular1081Model, -1},
+		{"tri/1081/k1", triangular1081Model, 1},
+		{"tri/1081/k-2", triangular1081Model, -2},
+		{"tri/1081/k-4", triangular1081Model, -4},
 	} {
 		sys := c.f.system(t)
 		n, m, p := sys.Dims()
@@ -138,7 +149,7 @@ func TestLqrAugmentedDescriptorClosedLoopEigRowScaled(t *testing.T) {
 			}
 		}
 		res, err := Lqr(Aa, Ba, eyeDense(n+p), eyeDense(m), &RiccatiOpts{E: Ea, plantE: sys.E, augmentedE: true})
-		if errors.Is(err, ErrNotConverged) {
+		if errors.Is(err, ErrNotConverged) || errors.Is(err, ErrDescriptorSingular) {
 			continue
 		}
 		assertEigCertifiedOrUnverified(t, c.name, res, err, false, fixed(Aa), fixed(Ba), gain, fixed(Ea))
@@ -152,9 +163,9 @@ func TestLqrAugmentedDescriptorClosedLoopEigRowScaled(t *testing.T) {
 // Now unbalanced primal: 5.35949e-6, 0.269424±0.256239i, 0.646439 native
 // (0.03×), 2.33827e-6 … amd64 (0.01×); old 0.01× / 0.006×.
 func TestKalmanDescriptorClosedLoopEigPrimalPencil(t *testing.T) {
-	sys := modzw.system(t)
+	sys := zw46Mid1879Model.system(t)
 	_, m, _ := sys.Dims()
-	R := rzw
+	R := zw46Mid1879R
 	res, err := Kalman(sys, eyeDense(m), R, nil, nil)
 	assertEigCertifiedOrUnverified(t, "zw46mid/1879/1", res, err, true, fixed(sys.A), gain, fixed(sys.C), fixed(sys.E))
 }
@@ -167,7 +178,7 @@ func TestKalmanDescriptorClosedLoopEigPrimalPencil(t *testing.T) {
 // stage certifies 0.025974, −0.147588 amd64 (0.004×); native keeps the
 // extended solve's Eig.
 func TestLqgDescriptorNearSingularEKalmanEig(t *testing.T) {
-	sys := mod689.system(t)
+	sys := z5a689Model.system(t)
 	n, m, p := sys.Dims()
 	if _, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil); err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatalf("Lqg: %v", err)
@@ -181,7 +192,7 @@ func TestLqgDescriptorNearSingularEKalmanEig(t *testing.T) {
 }
 
 var (
-	mod561 = &frozenDescriptor{
+	z5a561Model = &frozenDescriptor{
 		A: mat.NewDense(5, 5, []float64{
 			-0.9522843891900381, -0.42279674759203034, 0.9857024476352265, -1.9341957649682797, -0.4783124229796969,
 			-0.5097353553052281, -0.45135053683151827, 2.3091684742429353, 0.939748966928529, -0.17765990881242064,
@@ -211,7 +222,7 @@ var (
 		}),
 		dt: 0,
 	}
-	mod95 = &frozenDescriptor{
+	rand95Model = &frozenDescriptor{
 		A: mat.NewDense(3, 3, []float64{
 			-0.00018634393033704815, 0.00023302025584597422, -0.00022728307002223858,
 			0.0016862041118490816, -0.00031615007969770136, 0.001885753956330798,
@@ -235,7 +246,7 @@ var (
 		}),
 		dt: 1,
 	}
-	mod689 = &frozenDescriptor{
+	z5a689Model = &frozenDescriptor{
 		A: mat.NewDense(2, 2, []float64{
 			0.7291047655906884, -0.33541885843612806,
 			0.5020957065984277, -0.801902475718303,
@@ -256,7 +267,7 @@ var (
 		}),
 		dt: 1,
 	}
-	modrot123 = &frozenDescriptor{
+	rotated123Model = &frozenDescriptor{
 		A: mat.NewDense(2, 2, []float64{
 			-0.8516035809129043, -0.6372623746825746,
 			1.745971558139388, 0.23475937561828353,
@@ -277,7 +288,7 @@ var (
 		}),
 		dt: 0,
 	}
-	modrot176 = &frozenDescriptor{
+	rotated176Model = &frozenDescriptor{
 		A: mat.NewDense(2, 2, []float64{
 			0.595042694472534, 1.1081591138009375,
 			-0.1563077776512692, 1.027758503461913,
@@ -298,7 +309,7 @@ var (
 		}),
 		dt: 0,
 	}
-	mod108 = &frozenDescriptor{
+	rand108Model = &frozenDescriptor{
 		A: mat.NewDense(3, 3, []float64{
 			-2.53740033612679e-08, -6.46068356274542e-09, -1.658147647891154e-09,
 			6.767729903837605e-10, -2.5382457602390475e-09, 2.4185386422263756e-09,
@@ -322,7 +333,7 @@ var (
 		}),
 		dt: 0,
 	}
-	modzw = &frozenDescriptor{
+	zw46Mid1879Model = &frozenDescriptor{
 		A: mat.NewDense(4, 4, []float64{
 			0.6095818089334863, -0.715670297430663, -0.6664781517777136, -1.9857108422098215,
 			-0.5566957595712289, 1.6689537341172098, 0.3521774391087912, 0.6227340789709337,
@@ -349,7 +360,21 @@ var (
 		}),
 		dt: 1,
 	}
-	rzw = mat.NewDense(1, 1, []float64{
+	triangular1081Model = &frozenDescriptor{
+		A: mat.NewDense(2, 2, []float64{
+			-0.9783992964336168, 0.7821272032121951,
+			-0.2541597001129317, -0.9259582951979706,
+		}),
+		B: mat.NewDense(2, 1, []float64{-0.555503757394685, 1.008514082968425}),
+		C: mat.NewDense(1, 2, []float64{0.01001168911286196, -1.6031711190980862}),
+		D: mat.NewDense(1, 1, []float64{0}),
+		E: mat.NewDense(2, 2, []float64{
+			1.4911335584096272, -0.2258425514317118,
+			0, 3.353906406937982e-16,
+		}),
+		dt: 0,
+	}
+	zw46Mid1879R = mat.NewDense(1, 1, []float64{
 		2.4129949005810807,
 	})
 )
