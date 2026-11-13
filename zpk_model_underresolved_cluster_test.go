@@ -7,14 +7,11 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// TestZPKModelUnderResolvedClusterStaysStable checks ZPKModel of a stable
-// discrete model, a matched discretization with eight poles clustered near
-// z = 1 whose float64 transfer function resolves only five (ZAR4NK review,
-// rv4 gen50 seed 315). Sminreal keeps all eight states; Reduce at its
-// default tolerance cuts three genuine modes and moves a kept pole outside
-// the unit circle. Every pole of the result must stay inside it, as the
-// 320-bit eigenvalues of the stored matrices do.
-func TestZPKModelUnderResolvedClusterStaysStable(t *testing.T) {
+// underResolvedCluster315 is a stable discrete model, a matched
+// discretization with eight poles clustered near z = 1 whose float64
+// transfer function resolves only five (ZAR4NK review, rv4 gen50 seed 315).
+func underResolvedCluster315(t *testing.T) *System {
+	t.Helper()
 	a := []float64{
 		0.99927883380801308, -0.00066623442551771994, 1, 0, 0, 0, 0, 0,
 		0, 0.9988655983997069, 1, 0, 0, 0, 0, 0,
@@ -31,6 +28,16 @@ func TestZPKModelUnderResolvedClusterStaysStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sys
+}
+
+// TestZPKModelUnderResolvedClusterStaysStable checks ZPKModel of
+// underResolvedCluster315. Sminreal keeps all eight states; Reduce at its
+// default tolerance once cut three genuine modes and moved a kept pole
+// outside the unit circle. Every pole of the result must stay inside it,
+// as the 320-bit eigenvalues of the stored matrices do.
+func TestZPKModelUnderResolvedClusterStaysStable(t *testing.T) {
+	sys := underResolvedCluster315(t)
 
 	starts, err := sys.Poles()
 	if err != nil {
