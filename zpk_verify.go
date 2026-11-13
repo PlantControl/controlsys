@@ -461,7 +461,7 @@ func (c *zpkRowCheck) judge(cand *zpkCandidate, pts []complex128, structured boo
 	if len(pts) == 0 {
 		return out, false
 	}
-	full := boundedResponseOf(c.br, pts)
+	full := boundedResponseKeep(c.br, pts, true)
 	defer full.release()
 	m, n := c.m, c.n
 	zv := make([]complex128, m)
@@ -519,12 +519,7 @@ func (c *zpkRowCheck) judge(cand *zpkCandidate, pts []complex128, structured boo
 		build(nil, nil)
 		v := c.zpkJudgeEntries(cand, s, e, zv, zb)
 		if v != zpkPointVerified {
-			if !pf.factor(&full.ev.br, s) {
-				if r, refuted, stop := pivotZero(); stop {
-					return r, refuted
-				}
-				continue
-			}
+			pf.factorFrom(full.ev.factorsAt(k))
 			if !(pf.eta < 1) {
 				out[k] = zpkPointUndetermined
 				continue
@@ -592,20 +587,40 @@ type zpkPointFactors struct {
 // factor forms the factors, W and η at s; false at an exactly zero pivot.
 func (pf *zpkPointFactors) factor(br *balancedRealization, s complex128) bool {
 	n := br.n
+	pf.reset(n)
+	for i, a := range br.a {
+		pf.x[i] = complex(-a, 0)
+	}
+	for i := range n {
+		pf.x[i*n+i] += s
+	}
+	if !cgeppFactor(pf.x, n, pf.piv) {
+		return false
+	}
+	pf.inverse()
+	return true
+}
+
+// factorFrom forms W and η from the GEPP factors lu and pivots piv of a
+// point (responseEvaluator.factorsAt), as factor would form them.
+func (pf *zpkPointFactors) factorFrom(lu []complex128, piv []int) {
+	pf.reset(len(piv))
+	copy(pf.x, lu)
+	copy(pf.piv, piv)
+	pf.inverse()
+}
+
+func (pf *zpkPointFactors) reset(n int) {
 	pf.n = n
 	pf.x, pf.w = zeroed(pf.x, n*n), zeroed(pf.w, n*n)
 	pf.piv, pf.absLU = zeroed(pf.piv, n), zeroed(pf.absLU, n*n)
 	pf.v1, pf.v2, pf.v3 = zeroed(pf.v1, n), zeroed(pf.v2, n), zeroed(pf.v3, n)
+}
+
+// inverse forms W and η from the factors in pf.x.
+func (pf *zpkPointFactors) inverse() {
+	n := pf.n
 	x, w := pf.x, pf.w
-	for i, a := range br.a {
-		x[i] = complex(-a, 0)
-	}
-	for i := range n {
-		x[i*n+i] += s
-	}
-	if !cgeppFactor(x, n, pf.piv) {
-		return false
-	}
 	for col := range n {
 		for i := col; i < n; i++ {
 			v := complex(0, 0)
@@ -647,7 +662,6 @@ func (pf *zpkPointFactors) factor(br *balancedRealization, s complex128) bool {
 	if math.IsNaN(pf.eta) {
 		pf.eta = math.Inf(1)
 	}
-	return true
 }
 
 // inverseTerms returns Σ_l |ĉ_l|·(|W|v)_l for the single-output br.
