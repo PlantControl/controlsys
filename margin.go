@@ -1274,15 +1274,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 		return nil, err
 	}
 	lg := math.Log(gamma)
-	f := func(w float64) float64 {
-		h := r.eval.at(w)
-		if cmplx.IsInf(h) && r.offDCPole(w) {
-			if g, ok := r.eval.resolve(w); ok {
-				h = g
-			}
-		}
-		return math.Log(cmplx.Abs(h)) - lg
-	}
+	f := r.gainLog(lg)
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
 	out := r.polish(cands, f, 1e-9, false)
@@ -1295,10 +1287,24 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 			r.eval.extended, r.eval.exact = true, exact
 		}
 	}
-	return r.endCrossings(out, f, 1e-9), nil
+	return r.endCrossings(out, lg, 1e-9)
 }
 
-// endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
+// gainLog is log|L(ω)| − lg, taking the resolved response at a snapped pole
+// off DC.
+func (r *rationalLoop) gainLog(lg float64) func(float64) float64 {
+	return func(w float64) float64 {
+		h := r.eval.at(w)
+		if cmplx.IsInf(h) && r.offDCPole(w) {
+			if g, ok := r.eval.resolve(w); ok {
+				h = g
+			}
+		}
+		return math.Log(cmplx.Abs(h)) - lg
+	}
+}
+
+// endCrossings adds a crossing of f = log|L| − lg that the pencil missed
 // below the first crossing ws[0], or above the last: |L| → ∞ at a pole, and
 // else |L| at ω = 0, at Nyquist or, continuous, at highFrequency, fixes the
 // sign of f there, and a differing sign next to the outer crossing brackets
@@ -1311,68 +1317,19 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 // bracket is a crossing. Next to the cluster the response carries relative
 // rounding of order eps/θⁿ, so a root is accepted on its bisected finite
 // sign bracket rather than on |f| at the root; a bracket closing on an
-// unevaluable ω is rejected.
-func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
-	ft := func(w float64) float64 {
-		v, ok := tryEval(r.eval, func() float64 { return f(w) })
-		if !ok {
-			return math.NaN()
-		}
-		return v
-	}
-	sgn := func(v float64) int {
-		if math.IsNaN(v) || math.Abs(v) <= tol {
-			return 0
-		}
-		if v > 0 {
-			return 1
-		}
-		return -1
-	}
+// unevaluable ω is rejected. A crossing below DC's bracket that the scan
+// does not reach before its floor is searched on the frequency-scaled loop
+// (belowFloorCrossing).
+func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, error) {
+	cs := crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol}
 	endSign := func(w float64) int {
 		h, ok := r.eval.try(w)
 		if !ok || cmplx.IsInf(h) {
 			return 1
 		}
-		return sgn(f(w))
+		return cs.sgn(cs.f(w))
 	}
-	find := func(a, b float64) (float64, bool) {
-		fa, fb := ft(a), ft(b)
-		for range 64 {
-			m := geoMean(a, b)
-			if m <= a || m >= b {
-				break
-			}
-			if fm := ft(m); fa*fm <= 0 {
-				b, fb = m, fm
-			} else {
-				a, fa = m, fm
-			}
-		}
-		finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
-		return geoMean(a, b), finite && fa*fb <= 0
-	}
-	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
-		step := 10.0
-		for range 2000 {
-			tn := t / step
-			w, wn := at(t), at(tn)
-			if tn < 1e-300 || wn == w {
-				break
-			}
-			switch v := ft(wn); {
-			case sgn(v) == want:
-				return find(min(w, wn), max(w, wn))
-			case !math.IsNaN(v):
-				t = tn
-			default:
-				if step = math.Sqrt(step); step < 1+1e-9 {
-					return 0, false
-				}
-			}
-		}
-		return 0, false
-	}
+	ident := func(t float64) float64 { return t }
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
@@ -1385,27 +1342,170 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
 	}
 	if !math.IsInf(pLo, 0) {
-		if s0, s := endSign(0), sgn(ft(pLo)); s0 != 0 && s != 0 && s != s0 {
-			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
+		if s0, s := endSign(0), cs.sgn(cs.ft(pLo)); s0 != 0 && s != 0 && s != s0 {
+			c, ok, floor := cs.scan(pLo, ident, s0)
+			if !ok && floor > 0 {
+				var err error
+				if c, err = r.belowFloorCrossing(floor, s0, lg, tol); err != nil {
+					return nil, err
+				}
+				ok = true
+			}
+			if ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
 				ws = append([]float64{c}, ws...)
 			}
 		}
 	}
 	if r.discrete() && pHi < wTop {
-		if sTop, s := endSign(wTop), sgn(ft(pHi)); sTop != 0 && s != 0 && s != sTop {
-			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
+		if sTop, s := endSign(wTop), cs.sgn(cs.ft(pHi)); sTop != 0 && s != 0 && s != sTop {
+			if c, ok, _ := cs.scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
 				ws = append(ws, c)
 			}
 		}
 	}
 	if wInf := r.highFrequency(); !r.discrete() && len(ws) > 0 && pHi < wInf {
-		if sInf, s := sgn(ft(wInf)), sgn(ft(pHi)); sInf != 0 && s != 0 && s != sInf {
-			if c, ok := scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
+		if sInf, s := cs.sgn(cs.ft(wInf)), cs.sgn(cs.ft(pHi)); sInf != 0 && s != 0 && s != sInf {
+			if c, ok, _ := cs.scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
 				ws = append(ws, c)
 			}
 		}
 	}
-	return ws
+	return ws, nil
+}
+
+// endScanFloor is the smallest step endCrossings' scan takes; below it
+// belowFloorCrossing rescales the loop's frequency.
+const endScanFloor = 1e-300
+
+// crossingScan is the bracketing scan of endCrossings on f, which evaluates
+// through eval.
+type crossingScan struct {
+	eval *sisoEval
+	f    func(float64) float64
+	tol  float64
+}
+
+func (cs crossingScan) ft(w float64) float64 {
+	v, ok := tryEval(cs.eval, func() float64 { return cs.f(w) })
+	if !ok {
+		return math.NaN()
+	}
+	return v
+}
+
+func (cs crossingScan) sgn(v float64) int {
+	if math.IsNaN(v) || math.Abs(v) <= cs.tol {
+		return 0
+	}
+	if v > 0 {
+		return 1
+	}
+	return -1
+}
+
+func (cs crossingScan) find(a, b float64) (float64, bool) {
+	fa, fb := cs.ft(a), cs.ft(b)
+	for range 64 {
+		m := geoMean(a, b)
+		if m <= a || m >= b {
+			break
+		}
+		if fm := cs.ft(m); fa*fm <= 0 {
+			b, fb = m, fm
+		} else {
+			a, fa = m, fm
+		}
+	}
+	finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
+	return geoMean(a, b), finite && fa*fb <= 0
+}
+
+// scan steps t down by decades until f at at(t) has sign want, and bisects
+// that bracket. floor is the last t when the next step falls below
+// endScanFloor, else 0.
+func (cs crossingScan) scan(t float64, at func(float64) float64, want int) (c float64, ok bool, floor float64) {
+	step := 10.0
+	for range 2000 {
+		tn := t / step
+		w, wn := at(t), at(tn)
+		if tn < endScanFloor {
+			return 0, false, t
+		}
+		if wn == w {
+			break
+		}
+		switch v := cs.ft(wn); {
+		case cs.sgn(v) == want:
+			c, ok = cs.find(min(w, wn), max(w, wn))
+			return c, ok, 0
+		case !math.IsNaN(v):
+			t = tn
+		default:
+			if step = math.Sqrt(step); step < 1+1e-9 {
+				return 0, false, 0
+			}
+		}
+	}
+	return 0, false, 0
+}
+
+// belowFloorCrossing is the crossing in (0, t) of f = log|L| − lg, whose sign
+// is want at DC and differs at t, which endCrossings' scan could not reach.
+// It scans the loop with frequency scaled by an exact power of two 2ᵏ that
+// puts t near 1: continuous A and B times 2ᵏ, so L'(jω) = L(jω/2ᵏ), discrete
+// Dt over 2ᵏ, so ω'·Dt' = ω·Dt exactly. One pass reaches below the float64
+// range. Where the scaled data overflow, the scaled scan fails, or the
+// crossing is subnormal (in ω·Dt/2 when
+// discrete), it returns ErrAccuracyUnverified: the crossing exists but is
+// not resolved in float64.
+func (r *rationalLoop) belowFloorCrossing(t float64, want int, lg, tol float64) (float64, error) {
+	unverified := func() (float64, error) {
+		return 0, fmt.Errorf("gain crossing below ω=%g not resolved in float64: %w", t, ErrAccuracyUnverified)
+	}
+	k := -math.Ilogb(t)
+	e, ok := r.frequencyScaledEval(k)
+	if !ok {
+		return unverified()
+	}
+	e.exact, e.extended, e.exactFallback = r.eval.exact, true, r.eval.exactFallback
+	rs := &rationalLoop{dt: e.sys.Dt, eval: e}
+	cs := crossingScan{eval: e, f: rs.gainLog(lg), tol: tol}
+	c, ok, _ := cs.scan(math.Ldexp(t, k), func(u float64) float64 { return u }, want)
+	w := math.Ldexp(c, -k)
+	// 0x1p-1022 is float64's normal limit, not a search floor: a subnormal
+	// crossing is not representable to working precision, so it is unverified.
+	if !ok || w < 0x1p-1022 || r.discrete() && w*r.dt/2 < 0x1p-1022 {
+		return unverified()
+	}
+	return w, nil
+}
+
+// frequencyScaledEval is the evaluator of the loop with frequency scaled by
+// 2ᵏ; ok is false where the scaled data leave the finite range.
+func (r *rationalLoop) frequencyScaledEval(k int) (*sisoEval, bool) {
+	s := r.eval.sys.Copy()
+	if s.IsDiscrete() {
+		s.Dt = math.Ldexp(s.Dt, -k)
+		// 0x1p-1022 and 0x1p1000 below are float64 representability limits,
+		// not search floors; leaving them makes the caller unverified.
+		if !(s.Dt > 0x1p-1022) {
+			return nil, false
+		}
+	} else {
+		for _, m := range []*mat.Dense{s.A, s.B} {
+			raw := m.RawMatrix()
+			for i := range raw.Rows {
+				row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+				for j, v := range row {
+					if row[j] = math.Ldexp(v, k); math.Abs(row[j]) > 0x1p1000 {
+						return nil, false
+					}
+				}
+			}
+		}
+	}
+	e, err := newSISOEval(s)
+	return e, err == nil
 }
 
 // geoMean is √(a·b), from √a·√b where a·b leaves the normal range: an
