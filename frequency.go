@@ -153,7 +153,14 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // magnitude of the frequency. At DC (s = 0, z = 1) of a delay-free model
 // it is instead a pole when a computed
 // pole lies within 1e-3 relative and a 1e-5 fraction of the next pole's
-// distance (at s = 0 also within 1e-6 of the largest pole magnitude). A
+// distance (at s = 0 also within 1e-6 of the largest pole magnitude). For
+// an explicit delay-free model of order up to 16 with poles inside their
+// own rounding disk of DC that samples cannot tell from DC, the response at
+// DC is Inf only where the entry's pole is exact, I − A (A) exactly
+// singular; where that is exactly nonsingular it is the float model's
+// exact value, as DCGain certifies it, and a frequency off DC inside the
+// disk is its resolved double-double response or ErrAccuracyUnverified,
+// never a pole. Outside that scope the rule above holds. A
 // frequency merely near a pole, as beside a lightly damped pair, gives large
 // finite values. ErrSingularTransform remains for models singular at every
 // frequency near omega, such as det(sE-A) ≡ 0.
