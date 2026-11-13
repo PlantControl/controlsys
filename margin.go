@@ -108,6 +108,13 @@ type sisoEval struct {
 	// double solve's phase is off by up to ~1e-5°, beyond the crossing
 	// tolerance; see resonanceCrossings.
 	exact bool
+	// exactFallback, with exact, repeats a failed double-double solve on
+	// ddFallbackSystem of sys, formed once into fallback: Bandwidth beside
+	// a pole within rounding of DC, where the snap of the double solve
+	// covers the crossing.
+	exactFallback bool
+	fallback      *System
+	fallbackDone  bool
 	// ddSolves counts double-double solves.
 	ddSolves int
 	// atPole records that at's last evaluation found the double-double
@@ -200,7 +207,17 @@ func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
 		return 0, false
 	}
 	e.ddSolves++
-	return ddSISOResponse(e.sys, pt)
+	if h, ok := ddSISOResponse(e.sys, pt); ok || !e.exactFallback {
+		return h, ok
+	}
+	if !e.fallbackDone {
+		e.fallback, e.fallbackDone = ddFallbackSystem(e.sys), true
+	}
+	if e.fallback == nil {
+		return 0, false
+	}
+	e.ddSolves++
+	return ddSISOResponse(e.fallback, pt)
 }
 
 // try evaluates L(jω) without recording a failure, for candidates that may
@@ -746,8 +763,10 @@ func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error)
 		// reads the response in double-double, where it agrees with DCGain.
 		// So does a response read below the threshold at DC itself: the DC
 		// gain cancels below the double evaluation's rounding (HUUZRO).
+		// Where that solve fails, as beside poles within 1e-14 of DC in a
+		// permuted-triangular A, it is repeated on ddFallbackSystem (HKBAQT).
 		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) || cmplx.Abs(h) < gamma {
-			loop.eval.exact = true
+			loop.eval.exact, loop.eval.exactFallback = true, true
 		}
 		ws, err := loop.gainCrossings(gamma)
 		if err != nil {
