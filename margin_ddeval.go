@@ -3,6 +3,10 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
+
+	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // dd is an unevaluated double-double sum hi + lo, |lo| ≤ ulp(hi)/2.
@@ -241,4 +245,54 @@ func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, 
 		return 0, 0, 0, false
 	}
 	return h, solve, coeffs, true
+}
+
+// ddFallbackSystem is sys with its states permuted so that the pattern of A
+// and E is block upper triangular, then balanced by powers of two, for
+// ddSISOSolve where it fails on sys; nil with internal delays, or where
+// balancing rounds an entry. GEPP then pivots within the diagonal blocks:
+// on the original order a large entry below a pivot within rounding of DC
+// becomes the pivot, and its fill swamps the double-double pivots that
+// follow. Balancing keeps the products of entries 1e184 and states 1e156
+// from overflowing double-double. Both are exact, so the response is that
+// of sys.
+func ddFallbackSystem(sys *System) *System {
+	n, m, p := sys.Dims()
+	if n == 0 || m != 1 || p != 1 || sys.internalDelayCount() > 0 {
+		return nil
+	}
+	pat := blas64.General{Rows: n, Cols: n, Stride: n, Data: make([]float64, n*n)}
+	for i := range n {
+		for j := range n {
+			if sys.A.At(i, j) != 0 || sys.E != nil && sys.E.At(i, j) != 0 {
+				pat.Data[i*n+j] = 1
+			}
+		}
+	}
+	blocks := tarjanBlocks(pat, n)
+	perm := make([]int, 0, n)
+	for _, block := range slices.Backward(blocks) {
+		perm = append(perm, block...)
+	}
+	ps := &System{A: mat.NewDense(n, n, nil), B: mat.NewDense(n, m, nil), C: mat.NewDense(p, n, nil), D: sys.D, Dt: sys.Dt}
+	permuteSquare(ps.A, sys.A, perm)
+	permuteRows(ps.B, sys.B, perm)
+	permuteCols(ps.C, sys.C, perm)
+	if sys.E != nil {
+		ps.E = mat.NewDense(n, n, nil)
+		permuteSquare(ps.E, sys.E, perm)
+	}
+	br := newBalancedRealization(ps, n, m, p)
+	for _, v := range [][]float64{br.a, br.b, br.c, br.e} {
+		for _, x := range v {
+			if x != 0 && !(math.Abs(x) >= 0x1p-1022 && math.Abs(x) <= math.MaxFloat64) {
+				return nil
+			}
+		}
+	}
+	ps.A, ps.B, ps.C = mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c)
+	if br.e != nil {
+		ps.E = mat.NewDense(n, n, br.e)
+	}
+	return ps
 }
