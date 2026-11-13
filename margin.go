@@ -1339,7 +1339,7 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 	find := func(a, b float64) (float64, bool) {
 		fa, fb := ft(a), ft(b)
 		for range 64 {
-			m := math.Sqrt(a * b)
+			m := geoMean(a, b)
 			if m <= a || m >= b {
 				break
 			}
@@ -1350,7 +1350,7 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 			}
 		}
 		finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
-		return math.Sqrt(a * b), finite && fa*fb <= 0
+		return geoMean(a, b), finite && fa*fb <= 0
 	}
 	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
 		step := 10.0
@@ -1406,6 +1406,18 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 		}
 	}
 	return ws
+}
+
+// geoMean is √(a·b), from √a·√b where a·b leaves the normal range: an
+// underflowed or subnormal product, as for a crossing below about 1e-154,
+// lost the midpoint to 0 or to its few remaining digits (RLCKVA).
+// 0x1p-1022 and +Inf are float64 representability limits, not tolerances;
+// within them the midpoint is base's √(a·b) bit for bit.
+func geoMean(a, b float64) float64 {
+	if p := a * b; p >= 0x1p-1022 && !math.IsInf(p, 0) {
+		return math.Sqrt(p)
+	}
+	return math.Sqrt(a) * math.Sqrt(b)
 }
 
 // offDCPole reports whether the computed pole nearest ω is within 1e-3 of
