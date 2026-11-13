@@ -39,7 +39,10 @@ const (
 // rounding bounds β (eigenRoundingBounds) and the per-pole resolutions
 // ρ_k = min(ρ₀, 2n_r·β_k) of the poles resolved from zero (modelPoles) are
 // formed only when a point lies within n_r·ε·|s| + ρ₀ of an eigenvalue, a
-// shared-pole window is needed or a spectral gap is found.
+// shared-pole window is needed or a spectral gap is found. br is that
+// balanced realization, shared by every solve of the row; the
+// double-double and exact responses at a point depend on ref alone, so
+// they are formed once per point across the candidates (ddMemo, exMemo).
 type zpkRowCheck struct {
 	ref      *System
 	n, m     int
@@ -54,6 +57,23 @@ type zpkRowCheck struct {
 	cutoff   float64
 	gapOK    bool
 	pf       zpkPointFactors
+	br       balancedRealization
+	ddMemo   map[[2]uint64]zpkResponseMemo
+	exMemo   map[[2]uint64]zpkResponseMemo
+	zv       []complex128
+	zb       []float64
+	ddw      zpkDDWork
+}
+
+// zpkResponseMemo is the candidate-independent outcome of a response
+// evaluation at one point, D included.
+type zpkResponseMemo struct {
+	e        []zpkEntryBounds
+	zero, ok bool
+}
+
+func zpkPointKey(s complex128) [2]uint64 {
+	return [2]uint64{math.Float64bits(real(s)), math.Float64bits(imag(s))}
 }
 
 func newZPKRowCheck(ref *System) (*zpkRowCheck, bool) {
@@ -67,8 +87,9 @@ func newZPKRowCheck(ref *System) (*zpkRowCheck, bool) {
 		return c, false
 	}
 	c.evals = eig.Values(nil)
+	c.br = newBalancedRealization(ref, n, m, 1)
 	norm := 0.0
-	for _, a := range newBalancedRealization(ref, n, m, 1).a {
+	for _, a := range c.br.a {
 		norm = math.Hypot(norm, a)
 	}
 	c.rho0 = float64(n) * eps() * norm
@@ -440,7 +461,7 @@ func (c *zpkRowCheck) judge(cand *zpkCandidate, pts []complex128, structured boo
 	if len(pts) == 0 {
 		return out, false
 	}
-	full := newBoundedResponse(c.ref, pts)
+	full := boundedResponseOf(c.br, pts)
 	defer full.release()
 	m, n := c.m, c.n
 	zv := make([]complex128, m)
@@ -709,8 +730,8 @@ func (pf *zpkPointFactors) refinedTermsBounds(ev *responseEvaluator, s complex12
 // double-double left it.
 func (c *zpkRowCheck) ddPoint(cand *zpkCandidate, s complex128, structured bool) (zpkPointVerdict, bool) {
 	m := c.m
-	zv := make([]complex128, m)
-	zb := make([]float64, m)
+	c.zv, c.zb = zeroed(c.zv, m), zeroed(c.zb, m)
+	zv, zb := c.zv, c.zb
 	for j := range m {
 		var ok bool
 		zv[j], zb[j], ok = zpkEvalBounded(cand.zeros[j], cand.poles[j], cand.gains[j], s)
@@ -718,15 +739,25 @@ func (c *zpkRowCheck) ddPoint(cand *zpkCandidate, s complex128, structured bool)
 			return zpkPointOpen, false
 		}
 	}
-	br := newBalancedRealization(c.ref, c.n, m, 1)
-	e, zero, ok := zpkDDResponse(&br, s)
-	if zero {
+	key := zpkPointKey(s)
+	r, seen := c.ddMemo[key]
+	if !seen {
+		r.e, r.zero, r.ok = zpkDDResponseWork(&c.br, s, &c.ddw)
+		if r.ok {
+			c.addD(r.e)
+		}
+		if c.ddMemo == nil {
+			c.ddMemo = map[[2]uint64]zpkResponseMemo{}
+		}
+		c.ddMemo[key] = r
+	}
+	e := r.e
+	if r.zero {
 		return zpkPointConceded, true
 	}
-	if !ok {
+	if !r.ok {
 		return zpkPointOpen, false
 	}
-	c.addD(e)
 	v := c.zpkJudgeEntries(cand, s, e, zv, zb)
 	if !structured || (v != zpkPointOpen && v != zpkPointUndetermined) || !c.unresolved(e, zv) {
 		return v, true
@@ -734,18 +765,27 @@ func (c *zpkRowCheck) ddPoint(cand *zpkCandidate, s complex128, structured bool)
 	if zpkExactHook != nil {
 		zpkExactHook()
 	}
-	x, zero, ok := zpkExactResponse(c.ref, s)
-	if zero {
+	x, seen := c.exMemo[key]
+	if !seen {
+		x.e, x.zero, x.ok = zpkExactResponse(c.ref, s)
+		if x.ok {
+			c.addD(x.e)
+		}
+		if c.exMemo == nil {
+			c.exMemo = map[[2]uint64]zpkResponseMemo{}
+		}
+		c.exMemo[key] = x
+	}
+	if x.zero {
 		return zpkPointConceded, true
 	}
-	if !ok {
+	if !x.ok {
 		if zpkExactCapHook != nil {
 			zpkExactCapHook()
 		}
 		return v, true
 	}
-	c.addD(x)
-	return c.zpkJudgeEntries(cand, s, x, zv, zb), true
+	return c.zpkJudgeEntries(cand, s, x.e, zv, zb), true
 }
 
 // addD adds the feedthrough D of ref to the entry bounds e.
@@ -927,8 +967,16 @@ func zpkExactResponse(ref *System, s complex128) (e []zpkEntryBounds, zero, ok b
 // the exact ones. zero reports an exactly zero pivot; ok is false when
 // η ≥ 1 or a value is not finite.
 func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, zero, ok bool) {
+	return zpkDDResponseWork(br, s, &zpkDDWork{})
+}
+
+// zpkDDResponseWork is zpkDDResponse with the buffers of w.
+func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e []zpkEntryBounds, zero, ok bool) {
 	n, m := br.n, br.m
-	a := make([]ddComplex, n*n)
+	w.a, w.inv, w.x = zeroed(w.a, n*n), zeroed(w.inv, n*n), zeroed(w.x, n*m)
+	w.perm, w.absLU = zeroed(w.perm, n), zeroed(w.absLU, n*n)
+	w.v, w.w = zeroed(w.v, n), zeroed(w.w, n)
+	a := w.a
 	for i := range n {
 		for j := range n {
 			if i == j {
@@ -939,7 +987,7 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 			}
 		}
 	}
-	perm := make([]int, n)
+	perm := w.perm
 	for k := range n {
 		p, best := k, a[k*n+k].abs1()
 		for i := k + 1; i < n; i++ {
@@ -970,12 +1018,12 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 			}
 		}
 	}
-	inv := make([]ddComplex, n*n)
+	inv := w.inv
 	for i := range n {
 		inv[i*n+i] = ddComplex{re: dd{1, 0}}
 	}
 	ddLUSolve(a, perm, inv, n, n)
-	x := make([]ddComplex, n*m)
+	x := w.x
 	for i := range n {
 		for j := range m {
 			x[i*m+j] = ddComplex{re: dd{br.b[i*m+j], 0}}
@@ -985,7 +1033,7 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 	u := ddOpErr
 	g := zpkGEPPConstant(n, u)
 	nInv, nLU := 0.0, 0.0
-	absLU := make([]float64, n*n)
+	absLU := w.absLU
 	for i := range n {
 		ri, rl := 0.0, 0.0
 		for j := range n {
@@ -1008,8 +1056,7 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 		return nil, false, false
 	}
 	f := 1 / (1 - eta)
-	v := make([]float64, n)
-	w := make([]float64, n)
+	v, wb := w.v, w.w
 	e = make([]zpkEntryBounds, m)
 	for j := range m {
 		for i := range n {
@@ -1030,11 +1077,11 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 			for q := range n {
 				wl += inv[l*n+q].abs() * v[q]
 			}
-			w[l] = f * g * wl
+			wb[l] = f * g * wl
 			c := math.Abs(br.c[l])
 			gs = gs.add(ddComplex{re: dd{br.c[l], 0}}.mul(x[l*m+j]))
 			cu += c * x[l*m+j].abs()
-			du += c * w[l]
+			du += c * wb[l]
 			t += c * cabs(x[l*m+j].complex128())
 		}
 		gv := gs.complex128()
@@ -1046,6 +1093,13 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 		e[j] = zpkEntryBounds{g: gv, ver: vb, comp: vb, lo: t - dT, hi: t + dT, determined: true}
 	}
 	return e, false, true
+}
+
+// zpkDDWork holds the buffers zpkDDResponse reuses across points.
+type zpkDDWork struct {
+	a, inv, x   []ddComplex
+	perm        []int
+	absLU, v, w []float64
 }
 
 // gammaDD is γ_k at the double-double unit ddOpErr.
@@ -1157,8 +1211,8 @@ func zpkEvalBounded(zs, ps []complex128, k float64, s complex128) (complex128, f
 		if mx == 0 || math.IsInf(mx, 0) || math.IsNaN(mx) {
 			return
 		}
-		_, e := math.Frexp(mx)
-		acc = complex(math.Ldexp(real(acc), -e), math.Ldexp(imag(acc), -e))
+		e := frexpExp(mx)
+		acc = complex(ldexpNeg(real(acc), e), ldexpNeg(imag(acc), e))
 		ex += e
 	}
 	for i := 0; i < len(zs) || i < len(ps); i++ {
@@ -1173,8 +1227,8 @@ func zpkEvalBounded(zs, ps []complex128, k float64, s complex128) (complex128, f
 			if mx == 0 || math.IsInf(mx, 0) || math.IsNaN(mx) {
 				return 0, 0, false
 			}
-			_, e := math.Frexp(mx)
-			a, b = math.Ldexp(a, -e), math.Ldexp(b, -e)
+			e := frexpExp(mx)
+			a, b = ldexpNeg(a, e), ldexpNeg(b, e)
 			q := a*a + b*b
 			acc *= complex(a/q, -b/q)
 			ex -= e
@@ -1187,4 +1241,25 @@ func zpkEvalBounded(zs, ps []complex128, k float64, s complex128) (complex128, f
 	}
 	g := gammaN(4*len(zs) + 7*len(ps))
 	return v, g*cmplx.Abs(v)/(1-g) + 2*math.SmallestNonzeroFloat64, true
+}
+
+// frexpExp is the exponent math.Frexp returns for the finite x > 0.
+func frexpExp(x float64) int {
+	if be := int(math.Float64bits(x) >> 52 & 0x7ff); be != 0 {
+		return be - 1022
+	}
+	_, e := math.Frexp(x)
+	return e
+}
+
+// ldexpNeg is math.Ldexp(x, −e): both are the correctly rounded product of
+// x and 2^−e, here formed as one multiplication where 2^−e is normal.
+func ldexpNeg(x float64, e int) float64 {
+	if e == 0 {
+		return x
+	}
+	if e >= -1022 && e <= 1022 {
+		return x * math.Float64frombits(uint64(1023-e)<<52)
+	}
+	return math.Ldexp(x, -e)
 }
