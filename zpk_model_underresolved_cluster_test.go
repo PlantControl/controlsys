@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math/cmplx"
 	"testing"
 
@@ -54,8 +55,10 @@ func TestZPKModelUnderResolvedClusterStaysStable(t *testing.T) {
 	}
 
 	res, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	// The kept polynomial roots stay stable but miss the stored model's
+	// response beyond √ε (X5OSBB census oracle 9.1e24·√ε): unverified.
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("err %v, want ErrAccuracyUnverified", err)
 	}
 	if res.MinimalOrder != 5 || len(res.RowDegrees) != 1 || res.RowDegrees[0] != 5 {
 		t.Fatalf("MinimalOrder %d RowDegrees %v, want 5 [5]", res.MinimalOrder, res.RowDegrees)

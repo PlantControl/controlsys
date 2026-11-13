@@ -257,11 +257,47 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 }
 
 // ZPKModel returns the zero-pole-gain form of sys, as MATLAB zpk(ss). The
-// orders are those of TransferFunction; for explicit delay-free models each
-// row takes its poles from eig(A), each channel its zeros from the system
-// pencil and its gain from the leading Markov parameter, when they fit the
-// response at least as well as the roots of the transfer-function
-// polynomials, which lose tight root clusters.
+// orders are those of TransferFunction. For an explicit, delay-free model
+// each output row takes the first of its candidates (zpkModelRows) that
+// verifies against the stored model's response: the poles eig(A) and
+// invariant zeros of the row's structurally minimal part, reduced or with
+// certified pole-zero cancellations, the transfer-function zeros with
+// eig(A), or the roots of the transfer-function polynomials.
+//
+// A nil error certifies, for every output row i of such a model, within
+// the limits of the sampled check (zpkRowCheck), at every axis point s
+// outside the windows of the poles the row shares with the model
+// (zpkSharedPoleWindows),
+//
+//	|G_ij(s) − Z_ij(s)| ≤ tol·max(max_j |G_ij(s)|, max_j |Z_ij(s)|, Σ_l |C_il||X_lj(s)| + |D_ij|), tol = √ε,
+//
+// G and X = (sI−A)⁻¹B exact for the stored data and Z the returned roots
+// and gains evaluated exactly. The terms exceed |G_ij| only where the
+// response cancels, as at a transmission zero, below which no roots
+// computed in floating point place the zero; a row whose response lies
+// below its terms at every axis point is not determined by its data in
+// floating point, and any Z within tol of those terms certifies it, as
+// TransferFunction's rank floor already resolves it. The row is verified
+// where the data determine the terms: at points where the first-order
+// bound on the computed terms reaches the terms themselves, as beside a
+// tight cluster of poles, a point verifies only against the larger
+// response, and otherwise neither verifies nor refutes. The check uses
+// points beside every pole and zero of Z and every eigenvalue of the row's
+// structurally minimal part, the static point (and z = −1 for a discrete
+// model), each verified or conceded, and a geometric fill, with
+// n_r + d_i + 1 verified points (n_r the order of that part, d_i the row
+// degree), counted on each side of a resolved spectral gap; agreement there
+// fixes a rational difference of that degree in exact arithmetic but does
+// not bound it between the points. No location accuracy of individual
+// roots is certified: a k-fold root is determined only to ε^{1/k} and a
+// pole in a shared window only to its rounding bound. A row no candidate
+// verifies is returned with the roots tried first, the pencil roots (poles
+// eig(A), zeros of the system pencil, as MATLAB zpk(ss)) where they fit the
+// response as well as the polynomial roots, else the polynomial roots,
+// and an error wrapping ErrAccuracyUnverified.
+//
+// Descriptor, delayed and LFT models keep the transfer-function roots with
+// no such certificate.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
 	if err != nil {
@@ -271,14 +307,18 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
-	sys.zpkPencilRows(zpk, tfResult.RowDegrees)
+	bad := sys.zpkModelRows(zpk, tfResult.RowDegrees)
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
-	return &ZPKResult{
+	res := &ZPKResult{
 		ZPK:          zpk,
 		MinimalOrder: tfResult.MinimalOrder,
 		RowDegrees:   tfResult.RowDegrees,
-	}, nil
+	}
+	if bad >= 0 {
+		return res, fmt.Errorf("ZPKModel: output %d: zero-pole-gain form not verified against the model's response: %w", bad, ErrAccuracyUnverified)
+	}
+	return res, nil
 }
 
 // ZPKResult is the result of (*System).ZPKModel.

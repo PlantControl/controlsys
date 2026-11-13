@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -36,12 +37,17 @@ func zpkClusteredDiscreteMatched(t *testing.T) *System {
 // discrete model whose poles cluster at z = 1 against a 320-bit oracle of
 // the stored matrices: roots of the transfer-function polynomials put four
 // poles outside the unit circle and the zeros O(1) off (HP3RZO), while
-// MATLAB zpk(ss) takes poles from eig(A) and zeros from tzero.
+// MATLAB zpk(ss) takes poles from eig(A) and zeros from tzero. Neither
+// meets the within-terms contract at z = −1: there the stored model's
+// response and terms vanish (oracle |G| 7e-70, terms 1e-52) while the
+// pencil roots give |Z| = 1.1e-29, 6.7e7·√ε beyond them (the five-fold zero
+// is placed only to ε^{1/5}), so ZPKModel returns the pencil roots with
+// ErrAccuracyUnverified.
 func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 	sys := zpkClusteredDiscreteMatched(t)
 	res, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("err %v, want ErrAccuracyUnverified", err)
 	}
 	if res.MinimalOrder != 8 || len(res.RowDegrees) != 1 || res.RowDegrees[0] != 8 {
 		t.Fatalf("MinimalOrder %d RowDegrees %v, want 8 [8]", res.MinimalOrder, res.RowDegrees)
@@ -115,7 +121,9 @@ func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 
 // TestZPKModelClusteredDiscreteTwoOutputs adds a second output to the
 // clustered model: each row takes eig(A) and its own pencil zeros, and every
-// channel matches the 320-bit oracle response.
+// channel matches the 320-bit oracle response away from z = −1, where row
+// 0 misses its vanishing terms (TestZPKModelClusteredDiscretePolesStayStable)
+// and the result is unverified.
 func TestZPKModelClusteredDiscreteTwoOutputs(t *testing.T) {
 	siso := zpkClusteredDiscreteMatched(t)
 	C := mat.NewDense(2, 8, nil)
@@ -127,8 +135,8 @@ func TestZPKModelClusteredDiscreteTwoOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("err %v, want ErrAccuracyUnverified", err)
 	}
 	o := newStepOraclePencil(sys)
 	for i := range 2 {
