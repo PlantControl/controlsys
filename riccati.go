@@ -176,12 +176,14 @@ type RiccatiOpts struct {
 //   - ErrNoStabilizing, with ErrNotStabilizable (ErrNotDetectable for
 //     Kalman, Lqe and Kalmd): a mode of (A, B) on or beyond the boundary,
 //     within a first-order band of the data, fails the PBH rank test, so
-//     no stabilizing solution exists (Report 3). From Care and Dare,
+//     no stabilizing solution exists (Report 3). From Care, Dare, Lqr,
+//     Dlqr (Lqi and Lqrd, which return them, included), Lqe and Kalman,
 //     ErrNoStabilizing alone: a solve that would end in ErrNotConverged
-//     whose Hamiltonian (symplectic) pencil is proved, in exact arithmetic
-//     on the stored data, to have an eigenvalue on the imaginary axis
-//     (unit circle); a stabilizing X would leave none there
-//     (icare/idare: no stabilizing solution).
+//     whose Hamiltonian (symplectic) pencil, for Lqe and Kalman that of
+//     the dual problem they solve, is proved, in exact arithmetic on the
+//     stored data, to have an eigenvalue on the imaginary axis (unit
+//     circle); a stabilizing X would leave none there (icare/idare: no
+//     stabilizing solution).
 //   - ErrNotConverged: no candidate X passed verification (a float64 stable
 //     count other than n, a Newton or Hewer breakdown, an exhausted search).
 //     It does not prove that no stabilizing solution exists.
@@ -363,13 +365,7 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
 	descriptorClosedLoopEig(true, A, B, opts, res, err)
-	res, err = certify("Care", ErrNotStabilizable, res, err)
-	if errors.Is(err, ErrNotConverged) {
-		if perr := boundaryProof("Care", true, A, B, Q, R, opts); perr != nil {
-			return nil, perr
-		}
-	}
-	return res, err
+	return certifyBoundary("Care", ErrNotStabilizable, true, A, B, Q, R, opts, res, err)
 }
 
 // careCore is Care before certify: an uncertified X has accuracy 1 and a
@@ -1058,13 +1054,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
-	res, err = certify("Dare", ErrNotStabilizable, res, err)
-	if errors.Is(err, ErrNotConverged) {
-		if perr := boundaryProof("Dare", false, A, B, Q, R, opts); perr != nil {
-			return nil, perr
-		}
-	}
-	return res, err
+	return certifyBoundary("Dare", ErrNotStabilizable, false, A, B, Q, R, opts, res, err)
 }
 
 // dareFor is Dare before certify, as careCore is Care; explicit is set by callers that return EᵀXE

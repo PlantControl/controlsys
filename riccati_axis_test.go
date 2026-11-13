@@ -32,7 +32,25 @@ func hamiltonianAxisPair() (a, b, q, r, s []float64) {
 func TestCare_HamiltonianAxisPairNoStabilizing(t *testing.T) {
 	const n, m = 4, 3
 	a, b, q, r, s := hamiltonianAxisPair()
+	if !hamiltonianAxisRoot(t, n, m, a, b, q, r, s) {
+		t.Fatal("oracle: no exact Hamiltonian root on the imaginary axis")
+	}
 
+	for _, ns := range []bool{false, true} {
+		_, err := Care(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(n, n, q), mat.NewDense(m, m, r),
+			&RiccatiOpts{S: mat.NewDense(n, m, s), NoScaling: ns})
+		if !errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrNotStabilizable) || errors.Is(err, ErrNotConverged) {
+			t.Errorf("NoScaling %v: %v, want ErrNoStabilizing alone", ns, err)
+		}
+	}
+}
+
+// hamiltonianAxisRoot reports whether the exact Hamiltonian
+// [Ā −G; −Q̄ −Āᵀ] of Ā = A − BR⁻¹Sᵀ, G = BR⁻¹Bᵀ, Q̄ = Q − SR⁻¹Sᵀ (reduced,
+// unlike the extended pencil of Care's proof) has a root on the imaginary
+// axis (evenPolyAxisRoot).
+func hamiltonianAxisRoot(t *testing.T, n, m int, a, b, q, r, s []float64) bool {
+	t.Helper()
 	A, B, Q, S := fzRatPoly(a), fzRatPoly(b), fzRatPoly(q), fzRatPoly(s)
 	Ri := mqRatInv(fzRatPoly(r), m)
 	if Ri == nil {
@@ -41,7 +59,7 @@ func TestCare_HamiltonianAxisPairNoStabilizing(t *testing.T) {
 	G := mqRatMul(mqRatMul(B, Ri, n, m, m), mqRatT(B, n, m), n, m, n)
 	F := mqRatMul(Ri, mqRatT(S, n, m), m, m, n)
 	BF, SF := mqRatMul(B, F, n, m, n), mqRatMul(S, F, n, m, n)
-	const d = 2 * n
+	d := 2 * n
 	L, H := make([]*big.Rat, d*d), make([]*big.Rat, d*d)
 	for i := range L {
 		L[i], H[i] = new(big.Rat), new(big.Rat)
@@ -57,17 +75,7 @@ func TestCare_HamiltonianAxisPairNoStabilizing(t *testing.T) {
 		L[i*d+i].SetInt64(1)
 		L[(n+i)*d+n+i].SetInt64(1)
 	}
-	if !evenPolyAxisRoot(t, fzTrimRat(mqDetPoly(L, H, d)), d) {
-		t.Fatal("oracle: no exact Hamiltonian root on the imaginary axis")
-	}
-
-	for _, ns := range []bool{false, true} {
-		_, err := Care(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(n, n, q), mat.NewDense(m, m, r),
-			&RiccatiOpts{S: mat.NewDense(n, m, s), NoScaling: ns})
-		if !errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrNotStabilizable) || errors.Is(err, ErrNotConverged) {
-			t.Errorf("NoScaling %v: %v, want ErrNoStabilizing alone", ns, err)
-		}
-	}
+	return evenPolyAxisRoot(t, fzTrimRat(mqDetPoly(L, H, d)), d)
 }
 
 // evenPolyAxisRoot reports whether the descending exact polynomial p of

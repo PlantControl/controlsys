@@ -31,20 +31,17 @@ func dualDare(A, B, C, E *mat.Dense) (At, Ct, Q, Et *mat.Dense) {
 }
 
 // wantNoStabilizing reports a result other than the failure of a Riccati
-// equation with no stabilizing solution that no certificate proves: none
-// fails the PBH test (errBoundaryUnstabilizable), so it is ErrNotConverged
-// (or, where the stable basis is singular, ErrSingularEquation: D=0.5 on
-// amd64) with a nil result, not ErrNoStabilizing (ZOJBZX).
+// equation with no stabilizing solution: no mode fails the PBH test
+// (errBoundaryUnstabilizable), so it is the exact boundary eigenvalue of
+// the dual pencil, ErrNoStabilizing alone (JFLGVW; ErrNotConverged before),
+// or, where the stable basis is singular before any proof is tried,
+// ErrSingularEquation (D=0.5 on amd64), with a nil result.
 func wantNoStabilizing(t *testing.T, what string, res *RiccatiResult, err error) {
 	t.Helper()
-	switch {
-	case err == nil:
-		t.Errorf("%s: Accuracy %d, Eig %v, want ErrNotConverged", what, res.accuracy, res.Eig)
-	case !errors.Is(err, ErrNotConverged) && !errors.Is(err, ErrSingularEquation) || errors.Is(err, ErrNoStabilizing):
-		t.Errorf("%s: %v, want ErrNotConverged or ErrSingularEquation", what, err)
-	case res != nil:
-		t.Errorf("%s: non-nil result with %v", what, err)
+	if errors.Is(err, ErrSingularEquation) && !errors.Is(err, ErrNoStabilizing) && res == nil {
+		return
 	}
+	wantBoundaryProved(t, what, res, err)
 }
 
 // TestKalman_BoundaryModeUnreachableFromNoise (DBOVA4): the mode at z = −1
@@ -52,14 +49,22 @@ func wantNoStabilizing(t *testing.T, what string, res *RiccatiResult, err error)
 // equation has no stabilizing solution (MATLAB kalman/idare). Base
 // returned Accuracy 0 with Eig −0.9999999999999999; the 320-bit closed
 // loop of its gain has spectral radius 1 (not Schur stable), and Kalman
-// fails as idare does (HF5PTS ruling 2), with ErrNotConverged: no
-// certificate proves that verdict (ZOJBZX).
+// fails as idare does (HF5PTS ruling 2), with ErrNotConverged (ZOJBZX)
+// until its dual Dare, (Aᵀ, Cᵀ, B·Bᵀ, I, Eᵀ) exactly, proves the z = −1
+// eigenvalue of its pencil, p(−1) = 0 (TestDare_BoundaryModeUnobservableToCost):
+// ErrNoStabilizing alone (JFLGVW).
 func TestKalman_BoundaryModeUnreachableFromNoise(t *testing.T) {
 	A, B, C, E := boundaryUnreachablePlant(0)
 	sys, err := NewDescriptor(A, B, C, mat.NewDense(1, 1, nil), E, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	At, Ct, Q, Et := dualDare(A, B, C, E)
+	raw := func(m *mat.Dense) []float64 { return mat.DenseCopyOf(m).RawMatrix().Data }
+	if !symplecticUnitCircleRoot(t, 4, 1, raw(At), raw(Ct), raw(Q), []float64{1}, nil, raw(Et)) {
+		t.Fatal("oracle: no exact symplectic root on the unit circle")
+	}
+	wantDualData(t, newEstimatorDual(A, E, B, C, nil, eyeDense(1), eyeDense(1), nil, nil), raw(At), raw(Ct), raw(Q), []float64{1}, nil, raw(Et))
 	for _, ns := range []bool{false, true} {
 		res, err := acceptUnverified(Kalman(sys, eyeDense(1), eyeDense(1), nil, &RiccatiOpts{NoScaling: ns}))
 		wantNoStabilizing(t, fmt.Sprintf("NoScaling %v", ns), res, err)
@@ -70,8 +75,8 @@ func TestKalman_BoundaryModeUnreachableFromNoise(t *testing.T) {
 // solved directly, (Aᵀ, Cᵀ, B·Bᵀ, I, Eᵀ): the z = −1 mode is unobservable
 // to the cost Q = B·Bᵀ, so z = −1 is an exact eigenvalue of the symplectic
 // pencil of the stored data. Dare returned ErrNotConverged; it now proves
-// that eigenvalue and returns ErrNoStabilizing alone (I4J6DP). Kalman
-// keeps ErrNotConverged (JFLGVW).
+// that eigenvalue and returns ErrNoStabilizing alone (I4J6DP), as Kalman
+// does since JFLGVW.
 func TestDare_BoundaryModeUnobservableToCost(t *testing.T) {
 	At, Ct, Q, Et := dualDare(boundaryUnreachablePlant(0))
 	raw := func(m *mat.Dense) []float64 { return mat.DenseCopyOf(m).RawMatrix().Data }
@@ -133,11 +138,12 @@ var correlatedNoiseCases = []struct {
 // S = G·(Qn·Hᵀ + Nn) that inherits G's zero row at the z = −1 mode, which
 // stays unreachable, so no stabilizing solution exists. Base returned
 // Accuracy 0; the 320-bit closed loop of its gain has spectral radius
-// 1.0000000000000002. Kalman returns ErrNotConverged (JFLGVW); the dual
-// Dare proves the exact z = −1 eigenvalue of its pencil (independent
-// reduced-pencil oracle here) and returns ErrNoStabilizing alone (I4J6DP),
-// or, where the stable basis is singular before any proof is tried (D=0.5
-// on amd64), ErrSingularEquation as before.
+// 1.0000000000000002. The dual Dare, and Kalman, which solves it exactly,
+// prove the exact z = −1 eigenvalue of its pencil (independent
+// reduced-pencil oracle here) and return ErrNoStabilizing alone (I4J6DP,
+// JFLGVW; Kalman returned ErrNotConverged), or, where the stable basis is
+// singular before any proof is tried (D=0.5 on amd64), ErrSingularEquation
+// as before.
 func TestKalman_BoundaryModeUnreachableWithCorrelatedNoise(t *testing.T) {
 	A, B, C, E := boundaryUnreachablePlant(0)
 	At, Ct, Q, Et := dualDare(A, B, C, E)
@@ -155,6 +161,7 @@ func TestKalman_BoundaryModeUnreachableWithCorrelatedNoise(t *testing.T) {
 		if !symplecticUnitCircleRoot(t, 4, 1, raw(At), raw(Ct), raw(Q), raw(Rbar), raw(S), raw(Et)) {
 			t.Fatalf("%s: oracle: no exact symplectic root on the unit circle", tc.name)
 		}
+		wantDualData(t, newEstimatorDual(sys.A, sys.E, sys.B, sys.C, sys.D, eyeDense(1), eyeDense(1), Nn, nil), raw(At), raw(Ct), raw(Q), raw(Rbar), raw(S), raw(Et))
 		for _, ns := range []bool{false, true} {
 			res, err := acceptUnverified(Kalman(sys, eyeDense(1), eyeDense(1), Nn, &RiccatiOpts{NoScaling: ns}))
 			wantNoStabilizing(t, fmt.Sprintf("%s NoScaling %v: Kalman", tc.name, ns), res, err)

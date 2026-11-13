@@ -518,7 +518,8 @@ func syMul(a, b []float64, r, k, c int) []float64 {
 // problem solvable and (A, B) is robustly stabilizable (no nearly
 // noise-uncontrollable modes on the boundary); the proved ErrNoStabilizing
 // (with ErrNotDetectable) also when the dual pair (Aᵀ, Cᵀ) is robustly
-// stabilizable.
+// stabilizable, and the proved boundary eigenvalue of the dual pencil
+// (ErrNoStabilizing alone) when mqRiccatiExists holds.
 func FuzzKalman(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -563,6 +564,14 @@ func FuzzKalman(f *testing.F) {
 			}
 			if err != nil {
 				switch {
+				case errors.Is(err, errAxisEigenvalue) || errors.Is(err, errUnitCircleEigenvalue):
+					if errors.Is(err, ErrNotDetectable) {
+						t.Fatalf("%s: boundary-eigenvalue proof with ErrNotDetectable: %v\n%s", op, err, s)
+					}
+					if mqRiccatiExists(ds, qb, rb, sb) {
+						t.Fatalf("%s: dual boundary eigenvalue proved, but a stabilizing solution provably exists: %v\n%s", op, err, s)
+					}
+					fzSkip(t, op+": no stabilizing solution (dual eigenvalue on the boundary)")
 				case errors.Is(err, ErrNoStabilizing):
 					if !errors.Is(err, ErrNotDetectable) {
 						t.Fatalf("%s: ErrNoStabilizing without ErrNotDetectable: %v\n%s", op, err, s)

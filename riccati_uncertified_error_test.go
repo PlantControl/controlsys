@@ -161,12 +161,14 @@ func TestRiccatiProvedNoStabilizing(t *testing.T) {
 
 // TestRiccatiNotConvergedIsNotNoStabilizing: a solve that finds no
 // verified solution is ErrNotConverged with a nil result, not
-// ErrNoStabilizing, even where none exists but no certificate proves it
-// (ZOJBZX Q1): a boundary mode unreachable from the noise
-// (TestKalman_BoundaryModeUnreachableFromNoise) for Kalman and Dlqr on its
-// dual (Dare proves that z = −1 eigenvalue since I4J6DP; JFLGVW for the
-// others), and the census near-unit-circle Dare, whose pencil has no
-// eigenvalue on the circle (TestDare_NearUnitCircleNotProved).
+// ErrNoStabilizing, where no certificate proves that none exists (ZOJBZX
+// Q1): the census near-unit-circle Dare, whose pencil has no eigenvalue on
+// the circle (TestDare_NearUnitCircleNotProved), for Dare, Dlqr and
+// Kalman on its dual (descriptor Eᵀ), and the Hamiltonian axis pair with
+// Q one ulp off symmetric (TestCare_AxisPairInexactSymmetryNotProved) for
+// Lqr and Lqe on its dual. The boundary mode unreachable from the noise
+// (TestKalman_BoundaryModeUnreachableFromNoise), not proved before,
+// is proved since I4J6DP (Dare) and JFLGVW (Dlqr, Kalman).
 func TestRiccatiNotConvergedIsNotNoStabilizing(t *testing.T) {
 	check := func(op string, res *RiccatiResult, err error) {
 		t.Helper()
@@ -177,19 +179,24 @@ func TestRiccatiNotConvergedIsNotNoStabilizing(t *testing.T) {
 			t.Errorf("%s: %s", op, msg)
 		}
 	}
-	pA, pB, pC, pE := boundaryUnreachablePlant(0)
-	sys, err := NewDescriptor(pA, pB, pC, mat.NewDense(1, 1, nil), pE, 1)
+	nA, nB, nQ, nR, nE := dareNearUnitCircle()
+	res, err := Dare(nA, nB, nQ, nR, &RiccatiOpts{E: nE})
+	check("Dare", res, err)
+	res, err = Dlqr(nA, nB, nQ, nR, &RiccatiOpts{E: nE})
+	check("Dlqr", res, err)
+	sys, err := NewDescriptor(mat.DenseCopyOf(nA.T()), eyeDense(2), mat.DenseCopyOf(nB.T()), mat.NewDense(1, 2, nil), mat.DenseCopyOf(nE.T()), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := Kalman(sys, eyeDense(1), eyeDense(1), nil, nil)
+	res, err = Kalman(sys, nQ, nR, nil, nil)
 	check("Kalman", res, err)
-	At, Ct, Q, Et := dualDare(pA, pB, pC, pE)
-	nA, nB, nQ, nR, nE := dareNearUnitCircle()
-	res, err = Dare(nA, nB, nQ, nR, &RiccatiOpts{E: nE})
-	check("Dare", res, err)
-	res, err = Dlqr(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et})
-	check("Dlqr", res, err)
+	a, b, q, r, s := hamiltonianAxisPair()
+	q[1] = math.Nextafter(q[1], 1)
+	A, B, Q, R, S := mat.NewDense(4, 4, a), mat.NewDense(4, 3, b), mat.NewDense(4, 4, q), mat.NewDense(3, 3, r), mat.NewDense(4, 3, s)
+	res, err = Lqr(A, B, Q, R, &RiccatiOpts{S: S})
+	check("Lqr", res, err)
+	res, err = Lqe(mat.DenseCopyOf(A.T()), eyeDense(4), mat.DenseCopyOf(B.T()), Q, R, S, nil)
+	check("Lqe", res, err)
 }
 
 // TestRiccatiCertifyMapping: certify, the one exit of the exported
@@ -312,17 +319,18 @@ func (c riccatiContractClass) String() string {
 //   - proved: (nil, ErrNoStabilizing) with ErrNotStabilizable for the
 //     control side (Care, Dare, Lqr, Dlqr, Lqi, Lqrd) and ErrNotDetectable
 //     for the estimator side (Lqe, Kalman, Kalmd), never the other;
-//   - boundary eigenvalue proved (Care, Dare only, I4J6DP): (nil,
+//   - boundary eigenvalue proved (Care, Dare since I4J6DP; Lqr, Dlqr, Lqe
+//     and Kalman, the last two on their dual, since JFLGVW): (nil,
 //     ErrNoStabilizing) with neither ErrNotStabilizable nor ErrNotDetectable.
 //
 // Fixtures: a stabilizable well-conditioned plant (certified); weakBStall
 // and its dual, and the well-conditioned-E Dare
 // (TestRiccatiUnverifiedPartialResult; uncertified); the Hamiltonian axis
 // pair (TestCare_HamiltonianAxisPairNoStabilizing) and the noise-unreachable
-// boundary mode (TestKalman_BoundaryModeUnreachableFromNoise; not proved,
-// except by Care and Dare, which prove their boundary eigenvalue; their
-// not-proved fixtures are the axis pair with Q one ulp off symmetric and
-// the census near-unit-circle Dare, TestDare_NearUnitCircleNotProved);
+// boundary mode (TestKalman_BoundaryModeUnreachableFromNoise), whose
+// boundary eigenvalue is proved; not proved, the axis pair with Q one ulp
+// off symmetric (Care, Lqr, Lqe) and the census near-unit-circle Dare
+// (TestDare_NearUnitCircleNotProved; Dare, Dlqr, Kalman on its dual);
 // an exactly uncontrollable (unobservable) unstable mode, and K72KOR's
 // undetectable mode at z = 1 (proved).
 //
@@ -393,6 +401,10 @@ func TestRiccatiContractByOperation(t *testing.T) {
 	xqa[1] = math.Nextafter(xqa[1], 1)
 	xQa := mat.NewDense(4, 4, xqa)
 	nA, nB, nQ, nR, nE := dareNearUnitCircle()
+	nSys, err := NewDescriptor(mat.DenseCopyOf(nA.T()), I2, mat.DenseCopyOf(nB.T()), mat.NewDense(1, 2, nil), mat.DenseCopyOf(nE.T()), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	type op = func() (*RiccatiResult, error)
 	cases := []struct {
@@ -407,7 +419,8 @@ func TestRiccatiContractByOperation(t *testing.T) {
 		{"Care", contractProved, func() (*RiccatiResult, error) { return Care(uA, uB, I2, I1, nil) }},
 		{"Lqr", contractCertified, func() (*RiccatiResult, error) { return Lqr(cA, cB, I2, I1, nil) }},
 		{"Lqr", contractUnverified, func() (*RiccatiResult, error) { return Lqr(wA, wB, wQ, wR, nil) }},
-		{"Lqr", contractNotConverged, func() (*RiccatiResult, error) { return Lqr(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
+		{"Lqr", contractNotConverged, func() (*RiccatiResult, error) { return Lqr(xA, xB, xQa, xR, &RiccatiOpts{S: xS}) }},
+		{"Lqr", contractBoundaryProved, func() (*RiccatiResult, error) { return Lqr(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
 		{"Lqr", contractProved, func() (*RiccatiResult, error) { return Lqr(uA, uB, I2, I1, nil) }},
 		{"Dare", contractCertified, func() (*RiccatiResult, error) { return Dare(dA, dB, I2, I1, nil) }},
 		{"Dare", contractUnverified, func() (*RiccatiResult, error) { return Dare(eA, eB, I2, I2, eOpts) }},
@@ -416,7 +429,8 @@ func TestRiccatiContractByOperation(t *testing.T) {
 		{"Dare", contractProved, func() (*RiccatiResult, error) { return Dare(uDA, uB, I2, I1, nil) }},
 		{"Dlqr", contractCertified, func() (*RiccatiResult, error) { return Dlqr(dA, dB, I2, I1, nil) }},
 		{"Dlqr", contractUnverified, func() (*RiccatiResult, error) { return Dlqr(eA, eB, I2, I2, eOpts) }},
-		{"Dlqr", contractNotConverged, func() (*RiccatiResult, error) { return Dlqr(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
+		{"Dlqr", contractNotConverged, func() (*RiccatiResult, error) { return Dlqr(nA, nB, nQ, nR, &RiccatiOpts{E: nE}) }},
+		{"Dlqr", contractBoundaryProved, func() (*RiccatiResult, error) { return Dlqr(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
 		{"Dlqr", contractProved, func() (*RiccatiResult, error) { return Dlqr(uDA, uB, I2, I1, nil) }},
 		{"Lqi", contractCertified, func() (*RiccatiResult, error) { return Lqi(cSys, eyeDense(3), I1, nil) }},
 		{"Lqi", contractProved, func() (*RiccatiResult, error) { return Lqi(ctlSys, eyeDense(3), I1, nil) }},
@@ -425,12 +439,16 @@ func TestRiccatiContractByOperation(t *testing.T) {
 		{"Lqe", contractCertified, func() (*RiccatiResult, error) { return Lqe(cA, I2, cC, I2, I1, nil, nil) }},
 		{"Lqe", contractUnverified, func() (*RiccatiResult, error) { return Lqe(wAt, eyeDense(wn), wBt, wQ, wR, nil, nil) }},
 		{"Lqe", contractNotConverged, func() (*RiccatiResult, error) {
+			return Lqe(mat.DenseCopyOf(xA.T()), eyeDense(4), mat.DenseCopyOf(xB.T()), xQa, xR, xS, nil)
+		}},
+		{"Lqe", contractBoundaryProved, func() (*RiccatiResult, error) {
 			return Lqe(mat.DenseCopyOf(xA.T()), eyeDense(4), mat.DenseCopyOf(xB.T()), xQ, xR, xS, nil)
 		}},
 		{"Lqe", contractProved, func() (*RiccatiResult, error) { return Lqe(uA, I2, uC, I2, I1, nil, nil) }},
 		{"Kalman", contractCertified, func() (*RiccatiResult, error) { return Kalman(dSys, I1, I1, nil, nil) }},
 		{"Kalman", contractUnverified, func() (*RiccatiResult, error) { return Kalman(wSys, wQ, wR, nil, nil) }},
-		{"Kalman", contractNotConverged, func() (*RiccatiResult, error) { return Kalman(pSys, I1, I1, nil, nil) }},
+		{"Kalman", contractNotConverged, func() (*RiccatiResult, error) { return Kalman(nSys, nQ, nR, nil, nil) }},
+		{"Kalman", contractBoundaryProved, func() (*RiccatiResult, error) { return Kalman(pSys, I1, I1, nil, nil) }},
 		{"Kalman", contractProved, func() (*RiccatiResult, error) {
 			return Kalman(k72Sys, mqDense(k72.M, k72.M, k72qn), mqDense(k72.P, k72.P, k72rn), k72N, nil)
 		}},
