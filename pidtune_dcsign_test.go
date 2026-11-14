@@ -120,7 +120,10 @@ func pidDCSignCheckRobust(t *testing.T, name string, pid *PID, num, den Poly, dt
 // both in extended precision from the coefficients. TunePID's designs keep
 // their reported margin at every crossover; its other failures on these
 // plants, such as PI and (on amd64) PID at the phase walk's start wc·1e-6,
-// lie past pidTuningDCSign.
+// lie past pidTuningDCSign. A sample inside the dc rounding disk that the
+// exact in-disk response solves (diskResponseResolved, A2OX65 Q1 ruling
+// (c)), as the second plant's on amd64, no longer fails; the DC sign and
+// designs are checked as before.
 func TestPidtuneDCSignFailedSample(t *testing.T) {
 	t.Parallel()
 	skipSlowUnderRace(t)
@@ -142,7 +145,7 @@ func TestPidtuneDCSignFailedSample(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := eval.try(wc / 1000); ok {
+		if _, ok := eval.try(wc / 1000); ok && !diskResponseResolved(p, eval.td.frequencyPoint(wc/1000).value()) {
 			t.Fatalf("%v/%v: precondition: sample at wc/1000 = %g resolves", c.num, c.den, wc/1000)
 		}
 		if s := pidTuningDCSign(p, eval.try, wc); s != 1 {
