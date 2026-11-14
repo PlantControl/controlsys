@@ -2621,11 +2621,21 @@ func Damp(sys *System) ([]DampInfo, error) {
 // tFinal = 0 selects the horizon automatically from the poles and delays, as
 // MATLAB step(sys); a negative or non-finite tFinal returns
 // ErrInvalidArgument. A model without inputs or outputs returns
-// ErrDimensionMismatch.
+// ErrDimensionMismatch. A proper singular-E descriptor whose reduction
+// TransferFunction does not verify returns its response with an error
+// wrapping ErrAccuracyUnverified.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
+	resp, err := step(sys, tFinal)
+	if err == nil && sys.reductionUnverified() {
+		err = fmt.Errorf("Step: descriptor reduction: %w", ErrAccuracyUnverified)
+	}
+	return resp, err
+}
+
+func step(sys *System, tFinal float64) (*TimeResponse, error) {
 	var zs *System
 	var zsErr error
 	if ex, _, ok := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {

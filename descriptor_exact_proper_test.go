@@ -24,7 +24,7 @@ func TestIsProper_ImproperTFSmallLeadExactE(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.label, err)
 		}
-		if pr, err := res.Sys.IsProper(); err != nil || pr {
+		if pr, err := res.Sys.IsProper(); valueErr(err) != nil || pr {
 			t.Errorf("%s: IsProper = %v, %v; want false", c.label, pr, err)
 		}
 		p := len(c.tf.Den)
@@ -34,14 +34,14 @@ func TestIsProper_ImproperTFSmallLeadExactE(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := p == 1 && len(c.tf.Num[0][0])-len(c.tf.Den[0]) == 1
-		if pr, err := ser.IsProper(); err != nil || pr != want {
+		if pr, err := ser.IsProper(); valueErr(err) != nil || pr != want {
 			t.Errorf("%s: Series IsProper = %v, %v; want %v", c.label, pr, err, want)
 		}
 		fb, err := Feedback(P, res.Sys, -1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pr, err := fb.IsProper(); err != nil || !pr {
+		if pr, err := fb.IsProper(); valueErr(err) != nil || !pr {
 			t.Errorf("%s: Feedback IsProper = %v, %v; want true", c.label, pr, err)
 		}
 	}

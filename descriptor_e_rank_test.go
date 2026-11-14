@@ -136,15 +136,15 @@ func checkERankAgreement(t *testing.T, label string, sys, oracle *System) {
 	if !full && !errors.Is(xerr, ErrDescriptorSingular) {
 		t.Errorf("%s: ToExplicit of rank-deficient E: err %v, want ErrDescriptorSingular", label, xerr)
 	}
-	if pr, err := sys.IsProper(); err != nil || !pr {
+	if pr, err := sys.IsProper(); valueErr(err) != nil || !pr {
 		t.Errorf("%s: IsProper = %v, %v; want true", label, pr, err)
 	}
-	if _, err := Step(sys, 5); err != nil {
+	if _, err := Step(sys, 5); valueErr(err) != nil {
 		t.Errorf("%s: Step: %v", label, err)
 	}
 	pts := []complex128{0.05i, 0.37i, complex(0.5, 3), 10i}
 	res, err := sys.TransferFunction(nil)
-	if err != nil {
+	if valueErr(err) != nil {
 		t.Errorf("%s: TransferFunction: %v", label, err)
 	} else if rel := maxPencilRel(t, oracle, pts, func(s complex128) [][]complex128 {
 		g, err := res.TF.Eval(s)
@@ -256,15 +256,20 @@ func TestTransferFunctionNearSingularEModelMatchesPencil(t *testing.T) {
 
 func checkERankAgreementTF(t *testing.T, sys, twin *System) {
 	t.Helper()
-	if pr, err := sys.IsProper(); err != nil || !pr {
-		t.Errorf("IsProper = %v, %v; want true", pr, err)
+	pr, perr := sys.IsProper()
+	if valueErr(perr) != nil || !pr {
+		t.Errorf("IsProper = %v, %v; want true", pr, perr)
 	}
-	if _, err := Step(sys, 5); err != nil {
-		t.Errorf("Step: %v", err)
+	_, serr := Step(sys, 5)
+	if valueErr(serr) != nil {
+		t.Errorf("Step: %v", serr)
 	}
 	res, err := sys.TransferFunction(nil)
-	if err != nil {
+	if valueErr(err) != nil {
 		t.Fatalf("TransferFunction: %v", err)
+	}
+	if !errors.Is(err, ErrAccuracyUnverified) && (errors.Is(perr, ErrAccuracyUnverified) || errors.Is(serr, ErrAccuracyUnverified)) {
+		t.Errorf("verdicts differ: TF %v, IsProper %v, Step %v", err, perr, serr)
 	}
 	if rel := maxPencilRel(t, twin, []complex128{0.05i, 0.37i, complex(0.5, 3), 10i}, func(s complex128) [][]complex128 {
 		g, err := res.TF.Eval(s)
@@ -331,7 +336,7 @@ func TestTransferFunctionStiffModeDeflatedByQZKeepsSlowPoles(t *testing.T) {
 				t.Fatal(err)
 			}
 			res, err := sys.TransferFunction(nil)
-			if err != nil {
+			if valueErr(err) != nil {
 				t.Fatal(err)
 			}
 			if _, m, p := sys.Dims(); m == 1 && p == 1 {

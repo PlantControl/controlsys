@@ -605,11 +605,11 @@ func TestDescriptorChainPerturbedA(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pr, err := sys.IsProper(); err != nil || pr {
+		if pr, err := sys.IsProper(); valueErr(err) != nil || pr {
 			t.Fatalf("run %d: IsProper = %v, %v; want false", k, pr, err)
 		}
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
+		if valueErr(err) != nil {
 			t.Fatalf("run %d: TransferFunction: %v", k, err)
 		}
 		if !fzTFImproper(res.TF) {

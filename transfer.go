@@ -191,46 +191,62 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // nilpotent block (rounding-level ones dropped, as IsProper decides) are
 // added to the transfer function of the explicit part, so the numerator
 // degree exceeds the denominator's. MinimalOrder and RowDegrees then
-// describe that explicit part.
+// describe that explicit part. A transfer function from that reduction is
+// verified against the pencil within the response's terms at points where
+// the stored data determine it (descriptorTFVerified); one that does not
+// verify is returned with an error wrapping ErrAccuracyUnverified, and
+// IsProper and Step share that verdict.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	if err := requireFiniteSystem("TransferFunction", sys); err != nil {
 		return nil, err
 	}
-	res, err := sys.transferRational(opts)
+	res, reduced, err := sys.transferRationalReduced(opts)
 	if err != nil {
 		return nil, err
+	}
+	if reduced && !descriptorTFVerified(sys, res.TF) {
+		err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
 	}
 	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
 	}
-	return res, nil
+	return res, err
 }
 
 func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	res, _, err := sys.transferRationalReduced(opts)
+	return res, err
+}
+
+// transferRationalReduced is transferRational also reporting whether the
+// result came from the Weierstrass reduction of a singular-E descriptor
+// (weierstrassReduceParts), which TransferFunction verifies against the
+// pencil (descriptorTFVerified).
+func (sys *System) transferRationalReduced(opts *TransferFuncOpts) (*TransferFuncResult, bool, error) {
 	if sys.IsDescriptor() {
 		if parts, deflated, ok := stiffExplicitParts(sys); ok {
 			if deflated {
 				if res, err := sys.reducedTransferFunction(opts); err == nil {
-					return res, nil
+					return res, true, nil
 				}
 			}
 			if res, err := sumTransferFunction(parts, opts); err == nil {
 				res.TF.InputName = copyStringSlice(sys.InputName)
 				res.TF.OutputName = copyStringSlice(sys.OutputName)
-				return res, nil
+				return res, false, nil
 			}
 		}
 	}
-	std, poly, err := transferStandardForm(sys)
+	std, poly, reduced, err := transferStandardForm(sys)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	res, err := std.rationalTransferFunction(opts)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	addPolynomialPart(res.TF, poly)
-	return res, nil
+	return res, reduced, nil
 }
 
 // reducedTransferFunction is the transfer function of the descriptor sys
@@ -252,17 +268,18 @@ func (sys *System) reducedTransferFunction(opts *TransferFuncOpts) (*TransferFun
 }
 
 // transferStandardForm is conversionStandardForm keeping the polynomial part
-// of an improper descriptor (see weierstrassReduceParts).
-func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
+// of an improper descriptor (see weierstrassReduceParts); reduced reports
+// that the Weierstrass reduction, not E⁻¹, gave it.
+func transferStandardForm(sys *System) (_ *System, _ []*mat.Dense, reduced bool, _ error) {
 	if !sys.IsDescriptor() {
-		return sys, nil, nil
+		return sys, nil, false, nil
 	}
 	explicit, err := sys.ToExplicit()
 	if err == nil {
-		return explicit, nil, nil
+		return explicit, nil, false, nil
 	}
 	if !errors.Is(err, ErrDescriptorSingular) {
-		return nil, nil, fmt.Errorf("TransferFunction: %w", err)
+		return nil, nil, false, fmt.Errorf("TransferFunction: %w", err)
 	}
 	out, poly, err := sys.weierstrassReduceParts()
 	if err == nil {
@@ -271,9 +288,9 @@ func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
 		}
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("TransferFunction: %w: %w", ErrDescriptorUnsupported, err)
+		return nil, nil, false, fmt.Errorf("TransferFunction: %w: %w", ErrDescriptorUnsupported, err)
 	}
-	return out, poly, nil
+	return out, poly, true, nil
 }
 
 // illConditionedECond is the 1-norm condition estimate of a full-rank E
@@ -2671,7 +2688,9 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 // (exactProperness), while Step and TransferFunction still fail closed. A
 // singular pencil (A, E), for which properness is undefined, returns
 // ErrDescriptorSingular, and a numerical failure deciding it returns an
-// error rather than false. See
+// error rather than false. When TransferFunction would return the
+// reduction with ErrAccuracyUnverified, IsProper returns its decision with
+// that error as well. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.isproper.html.
 func (sys *System) IsProper() (bool, error) {
 	if err := requireFiniteSystem("IsProper", sys); err != nil {
@@ -2679,6 +2698,9 @@ func (sys *System) IsProper() (bool, error) {
 	}
 	ok, err := sys.isProper()
 	if err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return ok, fmt.Errorf("IsProper: %w", err)
+		}
 		return false, fmt.Errorf("IsProper: %w", err)
 	}
 	return ok, nil
@@ -2703,6 +2725,9 @@ func (sys *System) isProper() (bool, error) {
 	}
 	if _, err := sys.weierstrassReduce(); err != nil {
 		if errors.Is(err, ErrImproperModel) {
+			if N == 0 && !sys.reductionPartsVerified() {
+				return false, fmt.Errorf("descriptor reduction: %w", ErrAccuracyUnverified)
+			}
 			return false, nil
 		}
 		if errors.Is(err, errReductionRefuted) && N == 0 && hasExactZeroLine(sys.E) {
@@ -2712,7 +2737,47 @@ func (sys *System) isProper() (bool, error) {
 		}
 		return false, err
 	}
+	if N == 0 && !sys.reductionPartsVerified() {
+		return true, fmt.Errorf("descriptor reduction: %w", ErrAccuracyUnverified)
+	}
 	return true, nil
+}
+
+// reductionPartsVerified reports whether the Weierstrass reduction of sys
+// stands and passes reductionVerified; false when it fails.
+func (sys *System) reductionPartsVerified() bool {
+	out, poly, err := sys.weierstrassReduceParts()
+	return err == nil && sys.reductionVerified(out, poly)
+}
+
+// reductionVerified reports whether the Weierstrass reduction (out, poly)
+// of the singular-E descriptor sys (no internal delays), as the transfer
+// function TransferFunction forms from it, passes descriptorTFVerified:
+// the verdict TransferFunction, IsProper and Step share.
+func (sys *System) reductionVerified(out *System, poly []*mat.Dense) bool {
+	res, err := out.rationalTransferFunction(nil)
+	if err != nil {
+		return false
+	}
+	addPolynomialPart(res.TF, poly)
+	return descriptorTFVerified(sys, res.TF)
+}
+
+// reductionUnverified reports whether sys is a proper singular-E
+// descriptor (no internal delays) whose Weierstrass reduction stands but
+// is not verified (reductionVerified): Step returns its response with
+// ErrAccuracyUnverified.
+func (sys *System) reductionUnverified() bool {
+	if !sys.IsDescriptor() || sys.internalDelayCount() > 0 {
+		return false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if !eRankDeficient(sys.E, &lu) {
+		return false
+	}
+	out, poly, err := sys.weierstrassReduceParts()
+	return err == nil && poly == nil && !sys.reductionVerified(out, nil)
 }
 
 func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {

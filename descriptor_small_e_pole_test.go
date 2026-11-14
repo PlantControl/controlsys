@@ -143,11 +143,11 @@ func TestDescriptorSmallImpulsiveTermKept(t *testing.T) {
 				a, e, b, c = fzPertULP(rng, a), fzPertULP(rng, e), fzPertULP(rng, b), fzPertULP(rng, c)
 			}
 			sys := fzSISODescriptor(t, tc.n, a, e, b, c)
-			if pr, err := sys.IsProper(); err != nil || pr {
+			if pr, err := sys.IsProper(); valueErr(err) != nil || pr {
 				t.Fatalf("%s run %d: IsProper = %v, %v; want false", tc.name, run, pr, err)
 			}
 			res, err := sys.TransferFunction(nil)
-			if err != nil || !fzTFImproper(res.TF) {
+			if valueErr(err) != nil || !fzTFImproper(res.TF) {
 				t.Fatalf("%s run %d: TransferFunction err %v, want improper TF", tc.name, run, err)
 			}
 			if run%10 != 0 {

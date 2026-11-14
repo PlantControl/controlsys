@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"runtime"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -344,6 +345,16 @@ func TestTransferFunctionImproperRoundTripExactOracle(t *testing.T) {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
 		res, err := ss.Sys.TransferFunction(nil)
+		// Listed residue (OXJGBU, user decision): on amd64 trial 287
+		// (discrete) the reduction places row 3's exact zero at z = 1 at
+		// 1 + 5.3e-15, ~18ε of its coefficients, outside the zero window
+		// the reduced TF's (d+1)ε coefficient bound gives (radius 9.9e-8),
+		// so the TF comes with ErrAccuracyUnverified; the value is checked
+		// as every other trial's. Follow-up: "EDGE: a-posteriori coefficient
+		// bound for reduced descriptor TF".
+		if runtime.GOARCH == "amd64" && trial == 287 {
+			err = valueErr(err)
+		}
 		if err != nil {
 			t.Fatalf("trial %d: TransferFunction: %v (tf %v / %v)", trial, err, tf.Num, tf.Den)
 		}
