@@ -646,7 +646,7 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 	if !ok || !(cmplx.Abs(s-dc) <= cl.disk) {
 		return false, nil
 	}
-	if gain, overflow, singular := ps.exactDC(dc); cl.q0 > 0 && !singular && ps.dcGainCertified(sys) {
+	if gain, overflow, _ := ps.exactDC(dc); exactDCScope(ps, cl, sys) {
 		if s != dc {
 			if err := ddResponse(sys, pointAt(s), dst); err != nil {
 				return true, fmt.Errorf("%w (%w)", errPoleLimitDisk, singularErr)
@@ -721,6 +721,28 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 		dcPoleLimitCheck(sys, s, b3, pole, dst)
 	}
 	return true, nil
+}
+
+// exactDCScope reports whether certifiedPoleLimit takes the stored
+// model's exact response at DC, and the double-double response off DC
+// within the disk: the core of cl is nonempty, dc·I − A exactly
+// nonsingular and DCGain certifies the exact value.
+func exactDCScope(ps *poleSchurData, cl *poleCluster, sys *System) bool {
+	_, _, singular := ps.exactDC(dcPoint(sys))
+	return cl.q0 > 0 && !singular && ps.dcGainCertified(sys)
+}
+
+// diskResponseResolved reports whether certifiedPoleLimit's value at s,
+// off DC inside the dc rounding disk of the explicit delay-free sys, is
+// its double-double response (exactDCScope) rather than a pole limit.
+func diskResponseResolved(sys *System, s complex128) bool {
+	ps, ok := cachedPoleSchur(sys)
+	if !ok || ps.n > exactDetMaxOrder {
+		return false
+	}
+	dc := dcPoint(sys)
+	cl, ok := ps.dcCluster(dc)
+	return ok && s != dc && cmplx.Abs(s-dc) <= cl.disk && exactDCScope(ps, cl, sys)
 }
 
 // legacyPoleLimit is the pole limit by the legacy residue test (tag
