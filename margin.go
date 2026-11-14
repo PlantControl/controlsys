@@ -781,6 +781,7 @@ func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error)
 		return 0, err
 	}
 	if err == nil {
+		loop.firstCrossing = true
 		if certified && loop.eval.sys == sys && !newDescriptorPolicy(sys).isDescriptor() {
 			loop.dcGain, loop.dcDone, loop.dcOK = dcMag, true, true
 		}
@@ -1038,6 +1039,10 @@ type rationalLoop struct {
 	// gainRejected records that the last gainCrossings rejected a pencil
 	// root in polish, for Bandwidth's scan below its first crossing.
 	gainRejected bool
+	// firstCrossing marks Bandwidth's search, which reports only the first
+	// crossing from DC, so endCrossings may skip unresolved responses
+	// above the dc rounding disk to reach one inside it (diskScan).
+	firstCrossing bool
 	// dcGain caches certifiedDC.
 	dcGain       float64
 	dcDone, dcOK bool
@@ -1383,7 +1388,7 @@ func (r *rationalLoop) exactVetoed(w float64, h complex128) bool {
 // crossing below pLo is then claimed either way. Discrete, a crossing between fl(π)/Dt and
 // the exact Nyquist frequency is nyquistGapCrossing's.
 func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, error) {
-	cs := crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol}
+	cs := crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol, split: r.diskSplit}
 	dcEnd, dcSnap := false, false
 	endSign := func(w float64) int {
 		h, ok := r.eval.try(w)
@@ -1420,7 +1425,7 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	if !math.IsInf(pLo, 0) {
 		if s0, s := endSign(0), cs.sgn(cs.ft(pLo)); s0 != 0 && s != 0 && s != s0 {
 			c, ok, floor := cs.scan(pLo, ident, s0)
-			if !ok && floor == 0 {
+			if !ok && floor == 0 && r.firstCrossing {
 				c, ok = r.diskScan(cs, s0, s)
 			}
 			if !ok && floor > 0 {
@@ -1465,12 +1470,24 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	return ws, nil
 }
 
+// diskSplit reports whether exactly one of ω = a, b lies in
+// exactResponseAt's scope (diskResponseResolved).
+func (r *rationalLoop) diskSplit(a, b float64) bool {
+	in := func(w float64) bool {
+		return diskResponseResolved(r.eval.sys, r.eval.td.frequencyPoint(w).value())
+	}
+	return in(a) != in(b)
+}
+
 // diskScan is the scan of endCrossings restarted at the edge of the dc
 // rounding disk, where the scan from above stopped on unsolved responses
 // between the disk and its start: off DC within the disk, in
 // exactResponseAt's scope, the responses are exactly solved (Q1 ruling
 // (c)). It applies where f at the edge already has sign s, the side away
-// from DC; ok is false otherwise or where the scan does not close.
+// from DC; ok is false otherwise or where the scan does not close. Only
+// Bandwidth's search takes it (firstCrossing): the skipped interval lies
+// above the crossing it finds, so it cannot hide the first crossing from
+// DC, while AllMargin, reporting every crossing, stays unverified there.
 func (r *rationalLoop) diskScan(cs crossingScan, s0, s int) (float64, bool) {
 	sys := r.eval.sys
 	rad, inside := r.eval.disk.get(sys)
@@ -1541,6 +1558,12 @@ type crossingScan struct {
 	eval *sisoEval
 	f    func(float64) float64
 	tol  float64
+	// split, when set, rejects a bracket whose ends straddle the edge of
+	// exactResponseAt's scope: an exact end inside the dc rounding disk
+	// beside a double one outside it, which is not resolved there, its
+	// rounding unbounded beside the disk's poles (OXOAL6). Bisecting such a
+	// bracket closes on that noise.
+	split func(a, b float64) bool
 }
 
 func (cs crossingScan) ft(w float64) float64 {
@@ -1562,6 +1585,9 @@ func (cs crossingScan) sgn(v float64) int {
 }
 
 func (cs crossingScan) find(a, b float64) (float64, bool) {
+	if cs.split != nil && cs.split(a, b) {
+		return geoMean(a, b), false
+	}
 	fa, fb := cs.ft(a), cs.ft(b)
 	for range 64 {
 		m := geoMean(a, b)
@@ -1627,7 +1653,7 @@ func (r *rationalLoop) belowFloorCrossing(t float64, want int, lg, tol float64) 
 	}
 	e.exact, e.extended, e.exactFallback = r.eval.exact, true, r.eval.exactFallback
 	rs := &rationalLoop{dt: e.sys.Dt, eval: e}
-	cs := crossingScan{eval: e, f: rs.gainLog(lg), tol: tol}
+	cs := crossingScan{eval: e, f: rs.gainLog(lg), tol: tol, split: rs.diskSplit}
 	c, ok, _ := cs.scan(math.Ldexp(t, k), func(u float64) float64 { return u }, want)
 	w := math.Ldexp(c, -k)
 	// 0x1p-1022 is float64's normal limit, not a search floor: a subnormal
