@@ -101,6 +101,10 @@ func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 		pr, err := sys.IsProper()
 		_, serr := Step(sys, 1)
 		res, terr := sys.TransferFunction(nil)
+		if errors.Is(err, ErrAccuracyUnverified) != errors.Is(terr, ErrAccuracyUnverified) {
+			t.Errorf("%s: IsProper %v, TF %v: verdicts differ", label, err, terr)
+		}
+		err, serr, terr = valueErr(err), valueErr(serr), valueErr(terr)
 		if errors.Is(err, ErrDescriptorSingular) {
 			if !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
 				t.Errorf("%s: IsProper %v, Step %v, TF %v disagree", label, err, serr, terr)

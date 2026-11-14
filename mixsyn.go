@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -56,7 +57,7 @@ func augw(op string, G, W1, W2, W3 *System) (*System, error) {
 	}
 	if P.IsDescriptor() {
 		proper, err := P.isProper()
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		if !proper {
