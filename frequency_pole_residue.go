@@ -45,6 +45,10 @@ type poleSchurData struct {
 	b, c, d       []float64
 	normA         float64
 	rowC, colB    []float64
+	// dcCheck memoizes dcCheckValue.
+	dcCheckOnce sync.Once
+	dcCheck     []complex128
+	dcCheckOK   bool
 	// exactAt memoizes exactResponseAt per frequency point.
 	exactAt map[frequencyPoint]exactPointResponse
 }

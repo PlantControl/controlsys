@@ -781,6 +781,9 @@ func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error)
 		return 0, err
 	}
 	if err == nil {
+		if certified && loop.eval.sys == sys && !newDescriptorPolicy(sys).isDescriptor() {
+			loop.dcGain, loop.dcDone, loop.dcOK = dcMag, true, true
+		}
 		gamma := math.Pow(10, threshold/20)
 		if bw, err, ok := loop.coarsePencilBandwidth(dc, dbDrop, certified); ok {
 			return bw, err

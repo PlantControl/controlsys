@@ -741,7 +741,7 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 		dst[j] = v
 	}
 	if slices.Contains(pole, false) {
-		dcPoleLimitCheck(sys, s, b3, pole, dst)
+		dcPoleLimitCheck(ps, sys, s, b3, pole, dst)
 	}
 	return true, nil
 }
@@ -833,30 +833,15 @@ func legacyPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System,
 // otherwise. v is the double-double response, or where that is singular
 // or underflows the exact one; an exactly singular sE − A leaves the
 // entries.
-func dcPoleLimitCheck(sys *System, s complex128, b3 []float64, pole []bool, dst []complex128) {
-	n, m, p := sys.Dims()
+func dcPoleLimitCheck(ps *poleSchurData, sys *System, s complex128, b3 []float64, pole []bool, dst []complex128) {
+	n, _, _ := sys.Dims()
 	dc := s == 0 && sys.IsContinuous() || s == 1 && !sys.IsContinuous()
 	if !dc || n > exactDetMaxOrder {
 		return
 	}
-	if _, inside := dcRoundingDisk(sys); !inside {
+	v, ok := ps.dcCheckValue(sys, s)
+	if !ok {
 		return
-	}
-	v := make([]complex128, p*m)
-	if ddResponse(sys, pointAt(s), v) != nil {
-		gain, overflow, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, real(s))
-		if !ok {
-			return
-		}
-		raw := gain.RawMatrix()
-		for i := range p {
-			for j := range m {
-				v[i*m+j] = complex(raw.Data[i*raw.Stride+j], 0)
-				if overflow {
-					v[i*m+j] = poleResponse
-				}
-			}
-		}
 	}
 	for j := range dst {
 		if pole[j] {
@@ -868,6 +853,36 @@ func dcPoleLimitCheck(sys *System, s complex128, b3 []float64, pole []bool, dst 
 			dst[j] = poleResponse
 		}
 	}
+}
+
+// dcCheckValue is dcPoleLimitCheck's response v of the stored model at DC
+// s, computed once per model: ok is false where no pole lies inside its
+// own rounding disk of DC or the exact solve finds dc·I − A singular.
+func (ps *poleSchurData) dcCheckValue(sys *System, s complex128) (v []complex128, ok bool) {
+	ps.dcCheckOnce.Do(func() {
+		_, m, p := sys.Dims()
+		if _, inside := dcRoundingDisk(sys); !inside {
+			return
+		}
+		v := make([]complex128, p*m)
+		if ddResponse(sys, pointAt(s), v) != nil {
+			gain, overflow, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, real(s))
+			if !ok {
+				return
+			}
+			raw := gain.RawMatrix()
+			for i := range p {
+				for j := range m {
+					v[i*m+j] = complex(raw.Data[i*raw.Stride+j], 0)
+					if overflow {
+						v[i*m+j] = poleResponse
+					}
+				}
+			}
+		}
+		ps.dcCheck, ps.dcCheckOK = v, true
+	})
+	return ps.dcCheck, ps.dcCheckOK
 }
 
 // dcDiskCache memoizes dcRoundingDisk for one system.
