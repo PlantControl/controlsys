@@ -18,11 +18,10 @@ type scanFloorCase struct {
 // scanFloorBandwidthCases cross 3 dB below DC under endCrossings' 1e-300
 // scan floor (CWMCXC, found with RLCKVA). Expected values are a 320-bit
 // big.Float scan from 1e-320 at 30 points per decade, bisected
-// geometrically; want 0 marks ErrAccuracyUnverified: a subnormal crossing,
-// or one inside the dc rounding disk 2.2e-16 of the discrete rows' poles at
-// 1 ± p (A2OX65), where only the stored data's double-double response,
-// with no certificate, supported CWMCXC's values; the oracle crossings are
-// 9.9762834511098376e-303, 9.976283451109837e-306 and 9.976283451109836e-308.
+// geometrically; want 0 marks a subnormal crossing, ErrAccuracyUnverified.
+// The discrete rows cross inside the dc rounding disk 2.2e-16 of their
+// poles at 1 ± p, where the responses are the stored model's exact ones
+// (exactResponseAt, A2OX65 Q1 ruling (c)).
 var scanFloorBandwidthCases = []scanFloorCase{
 	{"continuous1e-302", 0, []float64{-1e-294, 9.9999999999999996e-303, 0, -9.9999999999999996e-303},
 		[]float64{1.6699999999999999, -0.38}, []float64{5.8999999999999998e-301, -9.3999999999999993e-301}, 1.04, 9.9842592800998249e-303},
@@ -35,11 +34,11 @@ var scanFloorBandwidthCases = []scanFloorCase{
 	{"continuousSubnormal", 0, []float64{-9.9999999999999698e-303, 9.9999999999999694e-311, 0, -9.9999999999999694e-311},
 		[]float64{1.6699999999999999, -0.38}, []float64{5.8999999999999998e-301, -9.3999999999999993e-301}, 1.04, 0},
 	{"discrete1e-302", 1, []float64{1, 1.9999999999999999e-302, 4.9999999999999998e-303, 1},
-		[]float64{1, 0.5}, []float64{6.9999999999941985e-13, -1.9999999999771683e-13}, 0.01, 0},
+		[]float64{1, 0.5}, []float64{6.9999999999941985e-13, -1.9999999999771683e-13}, 0.01, 9.9762834511098376e-303},
 	{"discrete1e-305", 1, []float64{1, 2e-305, 5e-306, 1},
-		[]float64{1, 0.5}, []float64{6.9999999844311303e-16, -2.0000000167259936e-16}, 0.01, 0},
+		[]float64{1, 0.5}, []float64{6.9999999844311303e-16, -2.0000000167259936e-16}, 0.01, 9.976283451109837e-306},
 	{"discrete1e-307", 1, []float64{1, 1.9999999999999998e-307, 4.9999999999999995e-308, 1},
-		[]float64{1, 0.5}, []float64{7.0000011207821165e-18, -2.0000024376476584e-18}, 0.01, 0},
+		[]float64{1, 0.5}, []float64{7.0000011207821165e-18, -2.0000024376476584e-18}, 0.01, 9.976283451109836e-308},
 }
 
 func TestBandwidthBelowScanFloor(t *testing.T) {

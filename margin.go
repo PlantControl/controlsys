@@ -152,12 +152,19 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
 	e.atPole, e.limited, e.exactHit = false, false, false
-	if h, ok := e.exactAt(pt); ok {
+	ps, inDisk := e.diskScope(pt)
+	if inDisk && e.exact {
+		g, _, ok := exactResponseAt(ps, pt)
+		if !ok {
+			return e.fail(w, errPoleLimitDisk)
+		}
+		e.dst[0] = g[0]
+	} else if h, ok := e.exactAt(pt); ok {
 		e.dst[0] = h
 		e.exactHit = true
 	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w, atPole: &e.atPole, disk: &e.disk, limited: &e.limited}); err != nil {
 		h, ok := complex(0, 0), false
-		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) && !errors.Is(err, errPoleUnresolved) {
+		if !inDisk && e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) && !errors.Is(err, errPoleUnresolved) {
 			h, ok = ddSISOResponse(e.sys, pt)
 			e.ddSolves++
 		}
@@ -210,6 +217,16 @@ func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
 	}
 	e.limited, e.exactHit = false, false
 	return g[0], true
+}
+
+// diskScope reports whether pt lies off DC within the dc rounding disk of
+// e.sys in exactResponseAt's scope (inExactDiskScope), where at takes the
+// exact response in place of exactAt's and ddSISOResponse's.
+func (e *sisoEval) diskScope(pt frequencyPoint) (*poleSchurData, bool) {
+	if e.sys.internalDelayCount() > 0 || !e.disk.inside(e.sys, pt.value()) {
+		return nil, false
+	}
+	return inExactDiskScope(e.sys, pt.value())
 }
 
 func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
@@ -1305,10 +1322,11 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 
 // gainLog is log|L(ω)| − lg, taking the resolved response at a snapped pole
 // off DC. It is NaN, no bracket end, where L(ω) is not a solved response
-// (A2OX65): a pole limit or snap, also where resolve keeps it, or a
-// double-double response within the dc rounding disk (dcRoundingDisk),
-// exactAt's or the certified pole limit's (diskResponseResolved), that
-// ddAtPole places at a pole.
+// (A2OX65): a pole limit or snap, also where resolve keeps it, or exactAt's
+// double-double response within the dc rounding disk (dcRoundingDisk) that
+// ddAtPole places at a pole. Off DC within the disk in exactResponseAt's
+// scope the response is exactly solved (diskResponseResolved), a plain
+// end (Q1 ruling (c)).
 func (r *rationalLoop) gainLog(lg float64) func(float64) float64 {
 	return func(w float64) float64 {
 		h := r.eval.at(w)
@@ -1319,7 +1337,7 @@ func (r *rationalLoop) gainLog(lg float64) func(float64) float64 {
 			}
 		}
 		if limited && diskResponseResolved(r.eval.sys, r.eval.td.frequencyPoint(w).value()) {
-			limited, exact = false, true
+			limited, exact = false, false
 		}
 		if limited || exact && r.exactVetoed(w, h) {
 			return math.NaN()
@@ -1399,6 +1417,9 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	if !math.IsInf(pLo, 0) {
 		if s0, s := endSign(0), cs.sgn(cs.ft(pLo)); s0 != 0 && s != 0 && s != s0 {
 			c, ok, floor := cs.scan(pLo, ident, s0)
+			if !ok && floor == 0 {
+				c, ok = r.diskScan(cs, s0, s)
+			}
 			if !ok && floor > 0 {
 				var err error
 				if c, err = r.belowFloorCrossing(floor, s0, lg, tol); err != nil {
@@ -1439,6 +1460,35 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 		}
 	}
 	return ws, nil
+}
+
+// diskScan is the scan of endCrossings restarted at the edge of the dc
+// rounding disk, where the scan from above stopped on unsolved responses
+// between the disk and its start: off DC within the disk, in
+// exactResponseAt's scope, the responses are exactly solved (Q1 ruling
+// (c)). It applies where f at the edge already has sign s, the side away
+// from DC; ok is false otherwise or where the scan does not close.
+func (r *rationalLoop) diskScan(cs crossingScan, s0, s int) (float64, bool) {
+	sys := r.eval.sys
+	rad, inside := r.eval.disk.get(sys)
+	if !inside || rad <= 0 {
+		return 0, false
+	}
+	t := rad
+	if r.discrete() {
+		t = 2 * math.Asin(min(rad/2, 1)) / r.dt
+	}
+	for range 4 {
+		t *= 1 - 1e-6
+		if _, ok := inExactDiskScope(sys, r.eval.td.frequencyPoint(t).value()); ok {
+			break
+		}
+	}
+	if _, ok := inExactDiskScope(sys, r.eval.td.frequencyPoint(t).value()); !ok || cs.sgn(cs.ft(t)) != s {
+		return 0, false
+	}
+	c, ok, _ := cs.scan(t, func(u float64) float64 { return u }, s0)
+	return c, ok
 }
 
 // certifiedDC is |L| at DC as DCGain certifies it (nil error), finite:

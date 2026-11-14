@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/cmplx"
 	"testing"
 )
 
@@ -33,13 +34,15 @@ func sameCrossings(got, want []float64, rel float64) bool {
 	return true
 }
 
-// A discrete model with a pole within the dc rounding disk whose exact DC
-// gain DCGain certifies (A2OX65 census, x-dplant-pcg 63.0): the gain
-// search reads DC as that certified gain, not as no sign at all. The
-// −3 dB crossing (320-bit oracle 4.593653946133242e-16) lies where
-// ddAtPole vetoes the double-double response, so Bandwidth returns
-// ErrAccuracyUnverified; +Inf with nil, which claims no crossing, was the
-// defect.
+// Discrete models with a pole within the dc rounding disk whose exact DC
+// gain DCGain certifies (A2OX65 census): the gain search reads DC as that
+// certified gain, and the −3 dB crossing, inside the disk, closes on the
+// stored model's exact responses there (exactResponseAt, Q1 ruling (c)):
+// nil and the 320-bit oracle bandwidth. +Inf with nil, a false claim of no
+// crossing, and later ErrAccuracyUnverified under the ddAtPole veto were
+// the defects. x-dplant-pcg 63.0 is exactly −3 dB at 4.593653946133242e-16
+// (Fable, big.Rat); the F5 rows put a stiff block beside the disk, whose
+// snapped responses the scan steps over to the disk edge (diskScan).
 func TestBandwidthCertifiedDCBesideDiskPole(t *testing.T) {
 	for _, tc := range []struct {
 		row    dcEndRow
@@ -49,6 +52,34 @@ func TestBandwidthCertifiedDCBesideDiskPole(t *testing.T) {
 			[]float64{0.1222395759887928, 0, 0, 1, 0, -0.16369789843386065, 0, 1, 1.1636978984338606},
 			[]float64{-0.15181541674771168, 0.17295769163747726, 0},
 			[]float64{0, 0, 1}, 0}, 4.593653946133242e-16},
+		{dcEndRow{"F5illCondBlockBesideStiff/1153",
+			[]float64{1.6047273271825544, 0.011557314468999233, 0.33764257328723901, -1.6672380779179998, 0.44222904703767885, 1.8450843712564799,
+				0.79620332791320148, 1.0152167296371886, -0.78988407264605431, -0.23584642219195984, 0.35773176321460376, -0.13012063671865282,
+				0, 0, -2990.0471424811426, -0.81636192711873745, -0.5606837624217067, -0.90735798986995908,
+				0, 0, 0, -35227.16915542425, -0.45014899719054963, -0.27101159076258707,
+				0, 0, 0, 0, -1458.202847708204, 1.0446044724074832,
+				0, 0, 0, 0, 0, -3797330.1974188583},
+			[]float64{0.85022087961274417, 0.55098165264345766, 0.23764371146879237, -0.86401793032592211, 0.16598809038627202, 1.2677387988387023},
+			[]float64{-0.5854712849769611, -1.5314164143798918, 1.453054601124079, -0.54505085925890562, -0.22494677576004041, -1.7345954209318781},
+			0.64768970089697575}, 2.7443693792881339e-16},
+		{dcEndRow{"F5illCondBlockBesideStiff/1247",
+			[]float64{1.0814873722372307, -0.36359838445478371, -1.1432719629011732, 0.20294002630687921, 0.094477295309330467, -0.62913263974126488, 0, 0, -43682.370037232271},
+			[]float64{0.08309229483413616, 0.25488454514509673, -0.082889472256297836},
+			[]float64{1.1147821766727759, 0.43943754373356042, 0.0292435661761411},
+			-1.9675371545937157}, 1.0319742088215906e-15},
+		{dcEndRow{"F5illCondBlockBesideStiff/1451",
+			[]float64{1.0202772955301354, -0.099726361452630474, -0.42379452766092851, -0.17124391520770199,
+				-0.19821776631274307, 1.9748606060537013, -1.0287620745100745, 0.7079277761981122,
+				0, 0, -56.489030449549084, 0.68077591464673581,
+				0, 0, 0, -14337235.65274117},
+			[]float64{0.070094069706672646, 0.247278202096129, -2.0621198456192573, 1.0914670784624292},
+			[]float64{-0.18273878471815808, -0.50609503542266987, -0.96740847071126812, -0.91348414940165934},
+			-0.015322836081546276}, 1.02588222212745e-15},
+		{dcEndRow{"F8rotatedIntegrator/1912",
+			[]float64{0.84256297171049266, -0.033884630535426633, -0.033884630535426612, 0.99270712742106004},
+			[]float64{-0.035337132193933793, 0.42273462585819843},
+			[]float64{-0.26562500647029985, 0.73676120216240215},
+			0.42639565184676087}, 1.4429677368741009e-15},
 	} {
 		t.Run(tc.row.name, func(t *testing.T) {
 			sys := tc.row.sys(t)
@@ -56,13 +87,51 @@ func TestBandwidthCertifiedDCBesideDiskPole(t *testing.T) {
 				t.Fatalf("DCGain error %v; want a certified gain", err)
 			}
 			bw, err := Bandwidth(sys, -3)
-			switch {
-			case err == nil && !(math.Abs(bw-tc.oracle) <= 1e-6*tc.oracle):
-				t.Fatalf("Bandwidth = %g with nil error; oracle %g", bw, tc.oracle)
-			case err != nil && !errors.Is(err, ErrAccuracyUnverified):
-				t.Fatalf("Bandwidth error %v; want ErrAccuracyUnverified or %g", err, tc.oracle)
+			if err != nil || !(math.Abs(bw-tc.oracle) <= 1e-12*tc.oracle) {
+				t.Fatalf("Bandwidth = %g, %v; want %g, nil", bw, err, tc.oracle)
 			}
 		})
+	}
+}
+
+// FreqResponse off DC inside the dc rounding disk of a discrete model with
+// an exact pole at z = 1 (A2OX65 census; dseries 0.0, x-d2-pcg 0.1): the
+// point is no pole of the stored model, so the response is its exact value
+// (exactResponseAt), oracle |G| from a 6000-bit solve, never Inf with nil.
+// At 1e-300 the x-d2-pcg double pole puts |G| near 3.65e584: the exact real
+// part overflows float64, the one place Inf stands off DC.
+func TestFreqResponseOffDCInDiskExact(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		a, b, c []float64
+		w       float64
+		oracle  float64
+	}{
+		{"dseries/0.0", []float64{0.59039115052557856, 0, 1, 1}, []float64{-21.148952980220074, 51.632070467610212}, []float64{0, 1}, 1e-16, 321.27826653843408},
+		{"dseries/0.0", []float64{0.59039115052557856, 0, 1, 1}, []float64{-21.148952980220074, 51.632070467610212}, []float64{0, 1}, 1e-300, 2.9551748428583678e+286},
+		{"x-d2-pcg/0.1", []float64{0, -1, 0, 0, 1, 2, 0, 0, 0, 0.042981864298618298, 0, -0.065197226619843326, 0, -0.065858764449553867, 1, 0.56765273764980684},
+			[]float64{1, 0, 0, 0}, []float64{0, 0.045979607166974933, 0, 1}, 1e-14, 3650720762530.4204},
+		{"x-d2-pcg/0.1", []float64{0, -1, 0, 0, 1, 2, 0, 0, 0, 0.042981864298618298, 0, -0.065197226619843326, 0, -0.065858764449553867, 1, 0.56765273764980684},
+			[]float64{1, 0, 0, 0}, []float64{0, 0.045979607166974933, 0, 1}, 1e-300, math.Inf(1)},
+	} {
+		sys, err := NewFromSlices(len(tc.b), 1, 1, tc.a, tc.b, tc.c, []float64{0}, 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fr, err := sys.FreqResponse([]float64{tc.w})
+		if err != nil {
+			t.Fatalf("%s ω=%g: FreqResponse error %v; want |G| %g", tc.name, tc.w, err, tc.oracle)
+		}
+		g := cmplx.Abs(fr.At(0, 0, 0))
+		if math.IsInf(tc.oracle, 1) {
+			if !math.IsInf(real(fr.At(0, 0, 0)), 0) || math.IsInf(imag(fr.At(0, 0, 0)), 0) {
+				t.Fatalf("%s ω=%g: G = %v; want an overflowed real part beside a finite imaginary one", tc.name, tc.w, fr.At(0, 0, 0))
+			}
+			continue
+		}
+		if !(math.Abs(g-tc.oracle) <= 1e-12*tc.oracle) {
+			t.Fatalf("%s ω=%g: |G| = %g; oracle %g", tc.name, tc.w, g, tc.oracle)
+		}
 	}
 }
 

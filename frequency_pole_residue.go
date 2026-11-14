@@ -45,6 +45,8 @@ type poleSchurData struct {
 	b, c, d       []float64
 	normA         float64
 	rowC, colB    []float64
+	// exactAt memoizes exactResponseAt per frequency point.
+	exactAt map[frequencyPoint]exactPointResponse
 }
 
 var poleSchurCache struct {

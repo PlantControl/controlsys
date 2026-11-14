@@ -89,16 +89,22 @@ func TestFreqResponseDCPoleLimitZeroResidue(t *testing.T) {
 
 // TestAllMarginDCPoleClusterUnverified: the gain crossover of dcPairModel
 // lies at 6.0003e-16 (p = 1e-305) and 6.0003e-18 (p = 1e-307), where
-// AllMargin returned no crossing with a nil error. The bracket from the
-// certified DC gain does not close on solved responses, the double-double
-// response next to the pair being no bracket end, so both are
-// ErrAccuracyUnverified (A2OX65).
+// AllMargin returned no crossing with a nil error. At p = 1e-307 it lies
+// inside the dc rounding disk 2.2e-16, where the stored model's exact
+// responses close the bracket from the certified DC gain (A2OX65 Q1 ruling
+// (c)); 320-bit oracle 6.0002999244552604e-18. At p = 1e-305 it lies
+// outside the disk among snapped responses, so the bracket does not close:
+// ErrAccuracyUnverified.
 func TestAllMarginDCPoleClusterUnverified(t *testing.T) {
-	for _, p := range []float64{1e-305, 1e-307} {
-		sys, _ := dcPairModel(t, p)
-		if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
-			t.Errorf("p=%g AllMargin = %v, %v; want ErrAccuracyUnverified", p, res, err)
-		}
+	sys, _ := dcPairModel(t, 1e-305)
+	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
+		t.Errorf("p=1e-305 AllMargin = %v, %v; want ErrAccuracyUnverified", res, err)
+	}
+	sys, _ = dcPairModel(t, 1e-307)
+	const want = 6.0002999244552604e-18
+	res, err := AllMargin(sys)
+	if err != nil || len(res.GainCrossFreqs) != 1 || !(math.Abs(res.GainCrossFreqs[0]-want) <= 1e-9*want) {
+		t.Errorf("p=1e-307 AllMargin = %v, %v; want GainCrossFreqs [%g]", res, err, want)
 	}
 }
 
