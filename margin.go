@@ -1536,7 +1536,12 @@ func (r *rationalLoop) diskScan(cs crossingScan, s0, s int) (float64, bool) {
 
 // certifiedDC is |L| at DC as DCGain certifies it (nil error), finite:
 // solveDCRegular's certified solve or, up to exactDetMaxOrder, the exact
-// one, computed once per loop.
+// one, computed once per loop. Where DCGain keeps a convention instead, as
+// the signed Inf of a pole within rounding of DC whose exact limit is
+// finite, an explicit delay-free loop of order up to exactDetMaxOrder with
+// dc·I − A exactly nonsingular takes the stored model's exact G(dc)
+// (poleSchurData.exactDC), the certified value CORE-CONFLICT ruling (A)
+// sets above any convention.
 func (r *rationalLoop) certifiedDC() (float64, bool) {
 	if !r.dcDone {
 		r.dcDone = true
@@ -1545,6 +1550,10 @@ func (r *rationalLoop) certifiedDC() (float64, bool) {
 			if g, err := sys.DCGain(); err == nil {
 				v := math.Abs(g.At(0, 0))
 				r.dcGain, r.dcOK = v, !math.IsInf(v, 0)
+			} else if ps, ok := cachedPoleSchur(sys); ok && ps.n <= exactDetMaxOrder {
+				if g, overflow, singular := ps.exactDC(dcPoint(sys)); !singular && !overflow {
+					r.dcGain, r.dcOK = math.Abs(g.At(0, 0)), true
+				}
 			}
 		}
 	}

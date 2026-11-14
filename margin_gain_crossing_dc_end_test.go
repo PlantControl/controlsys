@@ -235,3 +235,31 @@ func TestAllMarginDiskEdgeBracketUnresolved(t *testing.T) {
 		t.Errorf("AllMargin = %v, %v; want ErrAccuracyUnverified (oracle [2.2814893160620932e-15 6.1918520189186754 21.394554459320492])", res, err)
 	}
 }
+
+// A discrete plant whose rounded-zero DC numerator sits beside a pole
+// within rounding of z = 1 (the pidtune repro of
+// TestPidtuneRoundedZeroDCIntegrator, dt 0.01): DCGain keeps the rounded
+// integrator's signed Inf with ErrAccuracyUnverified, while dc·I − A is
+// exactly nonsingular and the stored model's exact |G(1)| is 0.1597. That
+// exact value is the DC end of the gain search (CORE-CONFLICT ruling (A)),
+// so |L| < 1 from DC up: no crossing, as the 320-bit scan finds (|L| =
+// 0.15972 from 1e-300 to 1e-20, then falling). A snapped DC end had sent
+// the search below the scan floor and returned ErrAccuracyUnverified;
+// plantCrossoverFreq then failed where its fallback gives
+// ½·ln(1/0.98813)/0.01.
+func TestAllMarginExactDCEndBesideRoundedIntegrator(t *testing.T) {
+	num := []float64{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}
+	den := []float64{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}
+	res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: 0.01}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	am, err := AllMargin(res.Sys)
+	if err != nil || len(am.GainCrossFreqs) != 0 {
+		t.Fatalf("AllMargin = %v, %v; want no gain crossing, nil", am, err)
+	}
+	want := 0.5 * math.Log(1/0.9881300295446963) / 0.01
+	if wc, err := plantCrossoverFreq(res.Sys); err != nil || math.Abs(wc-want) > 1e-3*want {
+		t.Fatalf("plantCrossoverFreq = %g, %v; want %g", wc, err, want)
+	}
+}
