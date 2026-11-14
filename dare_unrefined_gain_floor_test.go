@@ -18,8 +18,8 @@ import (
 // of the sweeps that found it). KBand, which adds the gain's
 // move under rounding of Y or X (KofY 7.5e-6), would not tell the pencil
 // K from the exact one. Under gonum 30740af (HF5PTS) the race build of the
-// generating arch exits at the gainTol accept with gainMissIn 5.0e-8 for
-// a K 4.49e-7 off: held there to the band only (owner BBN22I).
+// generating arch exited at the gainTol accept with gainMissIn 5.0e-8 for
+// a K 4.49e-7 off; gainResolved now withholds that accept (BBN22I).
 func TestDareUnrefinedGainWithinFloorTakesHewerGain(t *testing.T) {
 	for _, tc := range []struct {
 		name, arch       string
@@ -54,7 +54,7 @@ func TestDareUnrefinedGainWithinFloorTakesHewerGain(t *testing.T) {
 				t.Fatal("reference not certified")
 			}
 			kTol := max(gainFloor, 4*sens.K)
-			native := runtime.GOARCH == tc.arch && !raceEnabled
+			native := runtime.GOARCH == tc.arch
 			for _, solve := range []struct {
 				name string
 				f    func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error)

@@ -1040,7 +1040,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // refinement; a K off the gain of X by more than 1e-6 is replaced by the
 // gain of X taken on by Hewer steps in extended precision (gainOfX): with
 // X exact to 1e-16 the pencil K was 6.1e-6 off the 320-bit gain and the
-// gain of the rounded X 1.4e-6, that one 1e-10.
+// gain of the rounded X 1.4e-6, that one 1e-10. So is, where BᵀXB swamps
+// R (rLost), a K of the given inputs whose gain the rounding of X to float64 may move, by
+// ‖W⁻¹‖‖Bᵀ‖‖A − BK‖·eps‖X‖ with W = R + BᵀXB, beyond 1e-6 of ‖K‖
+// together with its distance from the gain of X (gainResolved), else it
+// is returned with ErrAccuracyUnverified.
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare). With E better
@@ -1814,7 +1818,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			return nil, d.units(gainFloor), false
 		}
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
-			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
+			if r, ok := gainSubstituted(A, B, R, opts, res); ok && gainResolved(A, B, R, r, 0) {
 				return r, 0, true
 			}
 		}
@@ -1844,7 +1848,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		if red != nil {
 			return unprovenReduced(A, B, Q, R, opts, red, res, d)
 		}
-		return res, 0, true
+		return resolvedGain(A, B, Q, R, opts, res, d)
 	}
 	if rot && math.IsInf(d.d, 1) {
 		return nil, math.Inf(1), false
@@ -1871,6 +1875,9 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 				return h, 0, true
 			}
 			return c, cd.units(gainFloor), false
+		}
+		if red == nil && c.xe == nil {
+			return resolvedGain(A, B, Q, R, opts, c, cd)
 		}
 		return c, 0, true
 	}
@@ -1909,6 +1916,63 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		}
 	}
 	return nil, d.units(gainFloor), false
+}
+
+// resolvedGain returns res, of the given inputs, once gainResolved
+// certifies its K, d from the gain of its X, within gainFloor; else K
+// replaced by hewerGainSubstituted, X kept, should that pass; else res
+// with ok false (Accuracy 1).
+func resolvedGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, d gainDist) (*RiccatiResult, float64, bool) {
+	if gainResolved(A, B, R, res, d.d) {
+		return res, 0, true
+	}
+	if h, ok := hewerGainSubstituted(A, B, Q, R, opts, nil, res); ok {
+		return h, 0, true
+	}
+	return res, d.units(gainFloor), false
+}
+
+// gainResolved reports K within gainFloor of the gain of the solution X*,
+// K at distance miss from the gain K̂ = Ŵ⁻¹(BᵀX̂A + Sᵀ), Ŵ = R + BᵀX̂B,
+// of its X̂ (gainMissOf), counting with miss the move of the gain under
+// the rounding of X* to float64 alone, |δX| ≤ eps·|X̂|. Exactly
+// W*(K̂ − K*) = BᵀδX(A − BK̂) with W* = Ŵ − BᵀδXB, so with G = Ŵ⁻¹Bᵀ,
+// K̂ − K* = (I − GδXB)⁻¹GδX(A − BK̂) and, componentwise and in the 1-norm,
+// ‖K̂ − K*‖ ≤ ‖|G|·eps|X̂|·|A − BK̂|‖/(1 − q), q = ‖|G|·eps|X̂|·|B|‖; that
+// is never above the normwise ‖Ŵ⁻¹‖‖Bᵀ‖‖δX‖‖A − BK̂‖/(1 − ‖Ŵ⁻¹‖‖Bᵀ‖‖δX‖‖B‖),
+// which was 1e3 times too loose at ‖X‖ 8e12 (1.8e-4 with K 5e-8 off the
+// 320-bit gain). The X certificate does not enter: at the Newton noise
+// floor it certifies no step (BN4LWB), and the bound only withholds
+// Accuracy 0. gainMissOf's eps perturbations of X in two fixed directions
+// missed that move: on zw46 reg 1515 with cross term and E (‖X‖ 2e11)
+// they gave 7.9e-8 while the gain of the 320-bit X rounded to float64 was
+// 9.4e-7 off the 320-bit gain, and Dare returned K 1.16e-6 off at
+// Accuracy 0 where the Hewer gain was exact (BBN22I).
+func gainResolved(A, B, R *mat.Dense, res *RiccatiResult, miss float64) bool {
+	nk := mat.Norm(res.K, 1)
+	if nk == 0 {
+		return miss == 0
+	}
+	var bx, w, wi, g, ak mat.Dense
+	bx.Mul(B.T(), res.X)
+	w.Mul(&bx, B)
+	w.Add(&w, R)
+	if wi.Inverse(&w) != nil {
+		return false
+	}
+	g.Mul(&wi, B.T())
+	ak.Mul(B, res.K)
+	ak.Sub(A, &ak)
+	var p, t, u mat.Dense
+	p.Mul(absDense(&g), absDense(res.X))
+	p.Scale(eps(), &p)
+	t.Mul(&p, absDense(&ak))
+	u.Mul(&p, absDense(B))
+	q := mat.Norm(&u, 1)
+	if !(q < 1) {
+		return false
+	}
+	return miss+(mat.Norm(&t, 1)+q*miss*nk)/((1-q)*nk) <= gainFloor
 }
 
 // rotatedHewer returns c, a rotated-input K gainOfX refined from p at
