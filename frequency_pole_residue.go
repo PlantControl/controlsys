@@ -49,22 +49,35 @@ type poleSchurData struct {
 	dcCheckOnce sync.Once
 	dcCheck     []complex128
 	dcCheckOK   bool
+	// dcLimit memoizes certifiedDCLimit per dcLimitKey.
+	dcLimit map[string]dcLimitResult
 	// exactAt memoizes exactResponseAt per frequency point.
 	exactAt map[frequencyPoint]exactPointResponse
 }
 
-var poleSchurCache struct {
-	mu   sync.Mutex
+type poleSchurEntry struct {
 	key  []float64
 	dims [4]int
 	data *poleSchurData
 	ok   bool
 }
 
+// poleSchurCacheSize is how many models poleSchurCache keeps, most recent
+// first: a margin search alternates between its loop and the
+// frequency-scaled copy belowFloorCrossing builds, which a single entry
+// would refactor, with its memoized exact responses, on every switch. It
+// bounds memory only; values do not depend on it.
+const poleSchurCacheSize = 8
+
+var poleSchurCache struct {
+	mu      sync.Mutex
+	entries []poleSchurEntry
+}
+
 // cachedPoleSchur returns poleSchurData of sys, factorized once per model:
-// a model whose A, E, B, C, D and Dt match the last one reuses its Schur
-// form. ok is false for an internal-delay or descriptor model, or where
-// the factorization fails.
+// a model whose A, E, B, C, D and Dt match one of the poleSchurCacheSize
+// most recent reuses its Schur form. ok is false for an internal-delay or
+// descriptor model, or where the factorization fails.
 func cachedPoleSchur(sys *System) (*poleSchurData, bool) {
 	if sys == nil || sys.internalDelayCount() > 0 {
 		return nil, false
@@ -96,12 +109,21 @@ func cachedPoleSchur(sys *System) (*poleSchurData, bool) {
 	c := &poleSchurCache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.dims == dims && slices.EqualFunc(c.key, key, func(a, b float64) bool { return a == b || math.IsNaN(a) && math.IsNaN(b) }) {
-		return c.data, c.ok
+	for i, e := range c.entries {
+		if e.dims == dims && slices.EqualFunc(e.key, key, func(a, b float64) bool { return a == b || math.IsNaN(a) && math.IsNaN(b) }) {
+			copy(c.entries[1:i+1], c.entries[:i])
+			c.entries[0] = e
+			return e.data, e.ok
+		}
 	}
-	c.data, c.ok = newPoleSchurData(sys, n, m, p)
-	c.key, c.dims = key, dims
-	return c.data, c.ok
+	e := poleSchurEntry{key: key, dims: dims}
+	e.data, e.ok = newPoleSchurData(sys, n, m, p)
+	if len(c.entries) < poleSchurCacheSize {
+		c.entries = append(c.entries, poleSchurEntry{})
+	}
+	copy(c.entries[1:], c.entries[:len(c.entries)-1])
+	c.entries[0] = e
+	return e.data, e.ok
 }
 
 func newPoleSchurData(sys *System, n, m, p int) (*poleSchurData, bool) {

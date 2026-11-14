@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -697,9 +698,26 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 			return false, nil
 		}
 	}
+	key := dcLimitKey(s, delta, g)
+	if r, hit := ps.dcLimitMemo(key); hit {
+		if r.done {
+			copy(dst, r.dst)
+		}
+		return r.done, nil
+	}
+	done = certifiedDCLimit(ps, cl, sys, s, delta, tau, g, dst)
+	ps.storeDCLimit(key, done, dst)
+	return done, nil
+}
+
+// certifiedDCLimit is certifiedPoleLimit at DC from its double samples g,
+// a function of the model, s, δ and g alone, which ps memoizes
+// (dcLimitMemo); done is false where an entry stays undecided.
+func certifiedDCLimit(ps *poleSchurData, cl *poleCluster, sys *System, s complex128, delta, tau float64, g, dst []complex128) bool {
+	k := len(dst)
 	rt := structuredResidue(ps, cl, s, delta, g, unitRoundoff, tau)
 	if rt == nil {
-		return false, nil
+		return false
 	}
 	b3 := slices.Clone(rt.b3)
 	pole := make([]bool, k)
@@ -713,15 +731,15 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 			gd = make([]complex128, 5*k)
 			for i := range 5 {
 				if ddResponse(sys, pointAt(s+complex(float64(i+1)*delta, 0)), gd[i*k:(i+1)*k]) != nil {
-					return false, nil
+					return false
 				}
 			}
 			if rt = structuredResidue(ps, cl, s, delta, gd, ddUnitRoundoff, tau); rt == nil {
-				return false, nil
+				return false
 			}
 		}
 		if !rt.pole[j] && !rt.finite[j] {
-			return false, nil
+			return false
 		}
 		pole[j] = rt.pole[j]
 		b3[j] = rt.b3[j]
@@ -743,7 +761,43 @@ func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syst
 	if slices.Contains(pole, false) {
 		dcPoleLimitCheck(ps, sys, s, b3, pole, dst)
 	}
-	return true, nil
+	return true
+}
+
+// dcLimitKey is certifiedDCLimit's memo key: the bits of s, δ and the
+// samples.
+func dcLimitKey(s complex128, delta float64, g []complex128) string {
+	b := make([]byte, 0, 8*(3+2*len(g)))
+	put := func(v float64) { b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v)) }
+	put(real(s))
+	put(imag(s))
+	put(delta)
+	for _, v := range g {
+		put(real(v))
+		put(imag(v))
+	}
+	return string(b)
+}
+
+type dcLimitResult struct {
+	done bool
+	dst  []complex128
+}
+
+func (ps *poleSchurData) dcLimitMemo(key string) (dcLimitResult, bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	r, ok := ps.dcLimit[key]
+	return r, ok
+}
+
+func (ps *poleSchurData) storeDCLimit(key string, done bool, dst []complex128) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.dcLimit == nil {
+		ps.dcLimit = make(map[string]dcLimitResult)
+	}
+	ps.dcLimit[key] = dcLimitResult{done: done, dst: slices.Clone(dst)}
 }
 
 // exactDCScope reports whether certifiedPoleLimit takes the stored
