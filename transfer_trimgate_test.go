@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -111,9 +112,12 @@ func TestTransferFunctionTrimRelativeDegreeFiveDegree(t *testing.T) {
 	if tfErr > 1e-3 || zpkErr > 1e-3 {
 		t.Errorf("low-frequency rel err TF %.3g ZPK %.3g vs exact", tfErr, zpkErr)
 	}
+	// The polynomial roots miss the stored model's response at s = 0 by
+	// 3.98·√ε of its terms (320-bit oracle), and no pencil candidate exists:
+	// ZPKModel returns them with ErrAccuracyUnverified.
 	zpk, err := sys.ZPKModel(nil)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("ZPKModel err %v, want ErrAccuracyUnverified", err)
 	}
 	z := zpk.ZPK.Zeros[0][0]
 	if len(z) != 1 || cmplx.Abs(z[0]-complex(-want[1]/want[0], 0)) > 1e-5 {

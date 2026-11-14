@@ -64,6 +64,8 @@ type responseEvaluator struct {
 	absV     []float64
 	x        []complex128
 	piv      []int
+	lu       []complex128
+	lupiv    []int
 	chi, clo []float64
 	scratch  []float64
 	cscratch []complex128
@@ -78,6 +80,8 @@ type responseBuffers struct {
 	f, fs []float64
 	c, cs []complex128
 	flags []bool
+	lu    []complex128
+	lupiv []int
 	ev    responseEvaluator
 }
 
@@ -117,6 +121,12 @@ func newBoundedResponse(sys *System, pts []complex128) boundedResponse {
 // boundedResponseOf is newBoundedResponse for the explicit realization br,
 // taken as is.
 func boundedResponseOf(rz balancedRealization, pts []complex128) boundedResponse {
+	return boundedResponseKeep(rz, pts, false)
+}
+
+// boundedResponseKeep is boundedResponseOf keeping, with keep, the GEPP
+// factors of every point for factorsAt and sharpenAt.
+func boundedResponseKeep(rz balancedRealization, pts []complex128, keep bool) boundedResponse {
 	n, m, p := rz.n, rz.m, rz.p
 	np, pm := len(pts), p*m
 	buf := responseBufferPool.Get().(*responseBuffers)
@@ -165,10 +175,18 @@ func boundedResponseOf(rz balancedRealization, pts []complex128) boundedResponse
 	w := buf.c[np*pm:]
 	ev.u, ev.x = w[:np*n*m], w[np*n*m:np*n*m+n*n]
 	v := w[np*n*m+n*n:]
+	if keep {
+		buf.lu, buf.lupiv = zeroed(buf.lu, np*n*n), zeroed(buf.lupiv, np*n)
+		ev.lu, ev.lupiv = buf.lu, buf.lupiv
+	}
 	safety, gn := 1+2*float64(n+4)*eps(), gammaN(n)
 	for k, s := range pts {
 		if !ev.factor(s) {
 			continue
+		}
+		if keep {
+			copy(ev.lu[k*n*n:(k+1)*n*n], ev.x)
+			copy(ev.lupiv[k*n:(k+1)*n], ev.piv)
 		}
 		u, absV := ev.u[k*n*m:(k+1)*n*m], ev.absV[k*n*p:(k+1)*n*p]
 		for i, b := range br.b {
@@ -238,6 +256,18 @@ func (ev *responseEvaluator) factor(s complex128) bool {
 		x[i*ev.n+i] += s
 	}
 	return cgeppFactor(x, ev.n, ev.piv)
+}
+
+// factorsAt returns the GEPP factors and pivots of point k, which factored
+// without a zero pivot, as factor forms them: the kept ones, else factor's
+// own in ev.x and ev.piv.
+func (ev *responseEvaluator) factorsAt(k int) ([]complex128, []int) {
+	n := ev.n
+	if ev.lu != nil {
+		return ev.lu[k*n*n : (k+1)*n*n], ev.lupiv[k*n : (k+1)*n]
+	}
+	ev.factor(ev.pts[k])
+	return ev.x, ev.piv
 }
 
 // prepareSharpen forms the splits, row constants and scratch of sharpen.
@@ -315,8 +345,7 @@ func (b *boundedResponse) sharpenAt(k int, refinement bool) {
 	comp, ver, data := sc[9*nm:9*nm+pm], sc[9*nm+pm:9*nm+2*pm], sc[9*nm+2*pm:9*nm+3*pm]
 	absX := sc[9*nm+3*pm+2*p*n:]
 	r, del, g := ev.cscratch[:nm], ev.cscratch[nm:2*nm], ev.cscratch[2*nm:]
-	ev.factor(s)
-	x, piv := ev.x, ev.piv
+	x, piv := ev.factorsAt(k)
 	haveAbsX := false
 	u, absV := ev.u[k*nm:(k+1)*nm], ev.absV[k*n*p:(k+1)*n*p]
 	e := eps()
