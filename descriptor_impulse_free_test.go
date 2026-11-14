@@ -68,11 +68,11 @@ func TestDescriptorProperClosedLoopIdealPD(t *testing.T) {
 		return (complex(kd, 0)*s + complex(kp, 0)) / (s*s + complex(kd-1, 0)*s + complex(kp, 0))
 	}
 	for name, sys := range map[string]*System{"cl": cl, "transpose": transposeDescriptor(t, cl)} {
-		if proper, err := sys.IsProper(); err != nil || !proper {
+		if proper, err := sys.IsProper(); valueErr(err) != nil || !proper {
 			t.Fatalf("%s: IsProper = %v, %v, want true", name, proper, err)
 		}
 		got, err := Step(sys, 3)
-		if err != nil {
+		if valueErr(err) != nil {
 			t.Fatalf("%s: Step: %v", name, err)
 		}
 		if len(got.T) != len(want.T) {
@@ -84,7 +84,7 @@ func TestDescriptorProperClosedLoopIdealPD(t *testing.T) {
 			}
 		}
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
+		if valueErr(err) != nil {
 			t.Fatalf("%s: TransferFunction: %v", name, err)
 		}
 		for _, w := range []float64{0, 0.3, 1, 7} {
@@ -164,7 +164,7 @@ func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
 		for name, s := range map[string]*System{"sys": sys, "transpose": transposeDescriptor(t, sys)} {
 			label := tc.name + " " + name
 			proper, err := s.IsProper()
-			if err != nil {
+			if valueErr(err) != nil {
 				t.Fatalf("%s: IsProper: %v", label, err)
 			}
 			if proper != tc.proper {
@@ -172,6 +172,7 @@ func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
 			}
 			_, stepErr := Step(s, 1)
 			res, tfErr := s.TransferFunction(nil)
+			stepErr, tfErr = valueErr(stepErr), valueErr(tfErr)
 			if (stepErr == nil) != proper || tfErr != nil {
 				t.Errorf("%s: IsProper %v but Step err %v, TransferFunction err %v", label, proper, stepErr, tfErr)
 			}
@@ -234,18 +235,18 @@ func TestDescriptorIndexOneSplitMatchesPoles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if proper, err := sys.IsProper(); err != nil || !proper {
+		if proper, err := sys.IsProper(); valueErr(err) != nil || !proper {
 			t.Fatalf("%s: IsProper = %v, %v, want true", tc.name, proper, err)
 		}
 		poles, err := sys.Poles()
 		if err != nil || len(poles) != tc.poles {
 			t.Fatalf("%s: Poles = %v, %v, want %d", tc.name, poles, err, tc.poles)
 		}
-		if _, err := Step(sys, 2); err != nil {
+		if _, err := Step(sys, 2); valueErr(err) != nil {
 			t.Fatalf("%s: Step: %v", tc.name, err)
 		}
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
+		if valueErr(err) != nil {
 			t.Fatalf("%s: TransferFunction: %v", tc.name, err)
 		}
 		if got := len(res.TF.Den[0]) - 1; got != tc.poles {
