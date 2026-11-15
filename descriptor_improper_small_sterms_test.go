@@ -123,6 +123,21 @@ func TestIsProperSmallSTermsBesideLargePole(t *testing.T) {
 			}
 			continue
 		}
+		if errors.Is(err, ErrAccuracyUnverified) {
+			// The float reduction fails closed and the exact tier's least-degree
+			// search ends uncertified (real x86 -race: seed 215): IsProper
+			// returns false with ErrAccuracyUnverified, TF the same improper
+			// model with it, and Step, without a certified model, the float
+			// path's fail-closed error.
+			if pr || !errors.Is(terr, ErrAccuracyUnverified) || res == nil || !fzTFImproper(res.TF) {
+				t.Errorf("%s: IsProper %v, %v, TF %v (improper %v): want false and an improper value, both unverified", label, pr, err, terr, res != nil && fzTFImproper(res.TF))
+			}
+			if !errors.Is(serr, ErrImproperModel) && !errors.Is(serr, ErrAccuracyUnverified) && !errors.Is(serr, ErrDescriptorSingular) {
+				t.Errorf("%s: Step: %v, want ErrImproperModel, ErrAccuracyUnverified or ErrDescriptorSingular", label, serr)
+			}
+			t.Logf("%s: unverified reading: %s", label, regimeDiag(sys))
+			continue
+		}
 		if err != nil || pr {
 			t.Fatalf("%s: IsProper = %v, %v; want false", label, pr, err)
 		}
@@ -295,6 +310,17 @@ func TestTransferFunctionImproperChainRefutedBySamples(t *testing.T) {
 		if errors.Is(perr, ErrDescriptorSingular) {
 			if !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
 				t.Errorf("%s: IsProper %v, Step %v, TF %v disagree", label, perr, serr, terr)
+			}
+			continue
+		}
+		if errors.Is(perr, ErrAccuracyUnverified) || errors.Is(terr, ErrAccuracyUnverified) {
+			// seed 293 bscale 1e-6: the float reduction fails closed; the
+			// exact tier's improper model is refuted at 10i (3.65× the
+			// refute threshold) with no numerator degree left to raise, so
+			// it comes as a value with ErrAccuracyUnverified (IsProper
+			// false) and Step, which has no value, fails closed.
+			if !errors.Is(perr, ErrAccuracyUnverified) || !errors.Is(terr, ErrAccuracyUnverified) || pr || !errors.Is(serr, ErrDescriptorSingular) {
+				t.Errorf("%s: IsProper %v, %v, Step %v, TF %v: want false and a value with ErrAccuracyUnverified, Step ErrDescriptorSingular", label, pr, perr, serr, terr)
 			}
 			continue
 		}

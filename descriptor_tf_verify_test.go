@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -92,35 +93,57 @@ func TestTransferFunctionDescriptorVerifiedBelowRoots(t *testing.T) {
 // TestTransferFunctionDescriptorRefutedReturnsUnverified: OXJGBU. Main
 // returned smallSTermChainDescriptor(1437, 1e-4)'s TF with nil though it
 // misses the stored response at 10i by 2× the larger of √ε times its terms
-// and the data resolution; it now comes with ErrAccuracyUnverified, the
-// value unchanged, and IsProper and Step share the verdict. Where the
-// reduction fails closed instead (amd64: an infinite chain left among the
-// finite eigenvalues) there is no value to judge.
+// and the data resolution; the float reduction's TF now comes with
+// ErrAccuracyUnverified, the value unchanged. Where the reduction fails
+// closed instead (amd64: an infinite chain left among the finite
+// eigenvalues) there is no value to judge. With the float path refuted,
+// TransferFunction returns the exact tier's model, certified: nil, within
+// terms at 10i (0.76× the refute threshold, miss 3.9e-7 relative against
+// δ_data 4.8e-7 relative), improper, and IsProper and Step agree.
 func TestTransferFunctionDescriptorRefutedReturnsUnverified(t *testing.T) {
 	sys := smallSTermConverse1437.system(t)
-	res, err := sys.TransferFunction(nil)
-	if errors.Is(err, ErrDescriptorSingular) {
-		return
-	}
-	if !errors.Is(err, ErrAccuracyUnverified) || res == nil {
-		t.Fatalf("TransferFunction = %v, %v; want a value with ErrAccuracyUnverified", res, err)
-	}
-	pr, perr := sys.IsProper()
-	if !errors.Is(perr, ErrAccuracyUnverified) {
-		t.Errorf("IsProper err %v, want ErrAccuracyUnverified", perr)
-	}
-	if pr == fzTFImproper(res.TF) {
-		t.Errorf("IsProper %v but TF improper %v", pr, fzTFImproper(res.TF))
-	}
-	if _, serr := Step(sys, 1); pr && !errors.Is(serr, ErrAccuracyUnverified) || !pr && !errors.Is(serr, ErrImproperModel) {
-		t.Errorf("Step err %v with IsProper %v", serr, pr)
-	}
 	s := complex(0, 10.0)
+	exactChainTier = false
+	res, err := sys.TransferFunction(nil)
+	fpr, fperr := sys.IsProper()
+	_, fserr := Step(sys, 1)
+	exactChainTier = true
+	if !errors.Is(err, ErrDescriptorSingular) {
+		if !errors.Is(err, ErrAccuracyUnverified) || res == nil {
+			t.Fatalf("float path: TransferFunction = %v, %v; want a value with ErrAccuracyUnverified", res, err)
+		}
+		if !errors.Is(fperr, ErrAccuracyUnverified) {
+			t.Errorf("float path: IsProper err %v, want ErrAccuracyUnverified", fperr)
+		}
+		if fpr == fzTFImproper(res.TF) {
+			t.Errorf("float path: IsProper %v but TF improper %v", fpr, fzTFImproper(res.TF))
+		}
+		if fpr && !errors.Is(fserr, ErrAccuracyUnverified) || !fpr && !errors.Is(fserr, ErrImproperModel) {
+			t.Errorf("float path: Step err %v with IsProper %v", fserr, fpr)
+		}
+		full := newPencilBoundedResponse(sys, []complex128{s})
+		_, poles, _, _, _ := tfShape(res.TF)
+		jp := judgeDescriptorTF(sys, res.TF, []complex128{s}, full, tfPoleWindows(res.TF, poles, math.Sqrt(eps())))
+		if !jp[0].refuted {
+			t.Errorf("float path: 10i does not refute the TF (worst %.3g)", jp[0].worst)
+		}
+	}
+	res, err = sys.TransferFunction(nil)
+	if err != nil {
+		t.Fatalf("TransferFunction: %v", err)
+	}
 	full := newPencilBoundedResponse(sys, []complex128{s})
 	_, poles, _, _, _ := tfShape(res.TF)
 	jp := judgeDescriptorTF(sys, res.TF, []complex128{s}, full, tfPoleWindows(res.TF, poles, math.Sqrt(eps())))
-	if !jp[0].refuted {
-		t.Errorf("10i does not refute the TF (worst %.3g)", jp[0].worst)
+	if jp[0].refuted || !(jp[0].worst <= 1) {
+		t.Errorf("10i refutes the TF (worst %.3g)", jp[0].worst)
+	}
+	pr, perr := sys.IsProper()
+	if perr != nil || pr == fzTFImproper(res.TF) {
+		t.Errorf("IsProper %v, %v but TF improper %v", pr, perr, fzTFImproper(res.TF))
+	}
+	if _, serr := Step(sys, 1); pr && serr != nil || !pr && !errors.Is(serr, ErrImproperModel) {
+		t.Errorf("Step err %v with IsProper %v", serr, pr)
 	}
 }
 
@@ -228,7 +251,7 @@ func TestTransferFunctionDescriptorWindowUndeterminedDegree(t *testing.T) {
 	w := tfPoleWindows(tf, poles, math.Sqrt(eps()))
 	for _, s := range []complex128{1e12i, 1e11i, 1i} {
 		if w.contain(s) {
-			t.Errorf("%v inside a pole window (%v, %v)", s, w.centre, w.radius)
+			t.Errorf("%v inside a pole window (%v, %v)", s, w.pole, w.zero)
 		}
 	}
 }
@@ -448,5 +471,40 @@ func TestMarkovBoundCoversExactPerturbations(t *testing.T) {
 			t.Errorf("k=%d: |Δg_k| up to %.3g, bound %.3g", k, worst, bound)
 		}
 		t.Logf("k=%d: |Δg_k| ≤ %.3g, bound %.3g", k, worst, bound)
+	}
+}
+
+// TestDescriptorTFZeroWindowGuardsOwnEntry: BDGOMW. A window about a
+// rounding-level zero of one entry's numerator guards that entry only.
+// Entry A of [9s², 1]/(7s + 9) carries the reduction's split double zero
+// at ±1.9e-8j (coefficients −6.7e-16, 4.4e-16 beside 1.29), whose cluster
+// window covers 1e-8j; entry B, 1e-4 relative off there (|G_B| = 1/9), must
+// still refute the transfer function. Pole windows of the shared
+// denominator guard both entries.
+func TestDescriptorTFZeroWindowGuardsOwnEntry(t *testing.T) {
+	ss, err := (&TransferFunc{Num: [][][]float64{{{9, 0, 0}, {1}}}, Den: [][]float64{{7, 9}}}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := ss.Sys
+	tf := &TransferFunc{
+		Num: [][][]float64{{{1.2857142857142856, -6.661338147750939e-16, 4.440892098500626e-16}, {0.14285714285714285 * (1 + 1e-4)}}},
+		Den: [][]float64{{1, 1.2857142857142856}},
+	}
+	_, poles, _, _, ok := tfShape(tf)
+	if !ok {
+		t.Fatal("roots")
+	}
+	s := complex(0, 1e-8)
+	w := tfPoleWindows(tf, poles, math.Sqrt(eps()))
+	if !w.guards(s, 0, 0) || w.guards(s, 0, 1) {
+		t.Fatalf("windows at %v: entry A %v, entry B %v; want A only", s, w.guards(s, 0, 0), w.guards(s, 0, 1))
+	}
+	jp := judgeDescriptorTF(sys, tf, []complex128{s}, newPencilBoundedResponse(sys, []complex128{s}), w)[0]
+	if !jp.refuted || !slices.Contains(jp.refutedEntries, 1) || slices.Contains(jp.refutedEntries, 0) {
+		t.Errorf("at %v: refuted %v, entries %v; want entry B (1) only", s, jp.refuted, jp.refutedEntries)
+	}
+	if descriptorTFVerify(sys, tf) {
+		t.Errorf("tf with entry B 1e-4 off verifies")
 	}
 }
