@@ -190,10 +190,12 @@ func TestAllMarginGainCrossingDCEnd(t *testing.T) {
 // Bandwidth does (diskScan; an addition within A2OX65 Q1 ruling (c)): the
 // skipped interval could hide a crossing. F5illCondBlockBesideStiff 1153
 // with B and D scaled by 2⁻⁵⁴ crosses |L| = 1 at 3.787105372556351e-16
-// (320-bit scan) inside the disk, beneath responses snapped from about
-// 3e-15 to 1e-7, so AllMargin is ErrAccuracyUnverified; its Bandwidth, the
-// first crossing from DC, stays 2.7443693792881339e-16 with nil.
-func TestAllMarginDoesNotSkipSnappedGap(t *testing.T) {
+// (A2OX65 320-bit gcf oracle scan) inside the disk, beneath responses snapped from about
+// 3e-15 to 1e-7. The scan reads the stored model's exact responses where
+// the double ones are snapped, so it skips no interval and AllMargin
+// closes on certified ends with nil (OXOAL6); its Bandwidth, the first
+// crossing from DC, stays 2.7443693792881339e-16 with nil.
+func TestAllMarginCrossingBeneathSnappedGap(t *testing.T) {
 	a := []float64{1.6047273271825544, 0.011557314468999233, 0.33764257328723901, -1.6672380779179998, 0.44222904703767885, 1.8450843712564799,
 		0.79620332791320148, 1.0152167296371886, -0.78988407264605431, -0.23584642219195984, 0.35773176321460376, -0.13012063671865282,
 		0, 0, -2990.0471424811426, -0.81636192711873745, -0.5606837624217067, -0.90735798986995908,
@@ -209,8 +211,8 @@ func TestAllMarginDoesNotSkipSnappedGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
-		t.Errorf("AllMargin = %v, %v; want ErrAccuracyUnverified (oracle crossing 3.787105372556351e-16)", res, err)
+	if res, err := AllMargin(sys); err != nil || !sameCrossings(res.GainCrossFreqs, []float64{3.787105372556351e-16}, 1e-9) {
+		t.Errorf("AllMargin = %v, %v; want oracle crossing 3.787105372556351e-16, nil", res, err)
 	}
 	const want = 2.7443693792881339e-16
 	if bw, err := Bandwidth(sys, -3); err != nil || !(math.Abs(bw-want) <= 1e-12*want) {
@@ -222,17 +224,20 @@ func TestAllMarginDoesNotSkipSnappedGap(t *testing.T) {
 // one just outside it is not resolved (OXOAL6): there the double response
 // of dover-pcg 144.1 reads |L| = 0.5 at ω = 1e-14 against the stored
 // model's 0.228, and bisecting toward it put the crossing at 6.19e-15
-// against the 320-bit 2.2814893160620932e-15. AllMargin is
-// ErrAccuracyUnverified, as before the exact in-disk response.
-func TestAllMarginDiskEdgeBracketUnresolved(t *testing.T) {
+// against the 320-bit 2.2814893160620932e-15. Its ends now carry the signs
+// of the stored model's exact responses, and the bracket bisects again on
+// them: nil and the oracle crossings [2.2814893160620932e-15
+// 6.1918520189186754 21.394554459320492] (A2OX65 320-bit gcf oracle scan).
+func TestAllMarginDiskEdgeBracketCertified(t *testing.T) {
 	sys, err := NewFromSlices(3, 1, 1,
 		[]float64{1, 0, 0, 0.80458938398133539, 0, -0.093059363785421234, -1.0938572489852625, 1, 0.76699393619437006},
 		[]float64{1, 0, 0}, []float64{0.8871466905921862, 0, 1}, []float64{0}, 0.1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
-		t.Errorf("AllMargin = %v, %v; want ErrAccuracyUnverified (oracle [2.2814893160620932e-15 6.1918520189186754 21.394554459320492])", res, err)
+	want := []float64{2.2814893160620932e-15, 6.1918520189186754, 21.394554459320492}
+	if res, err := AllMargin(sys); err != nil || !sameCrossings(res.GainCrossFreqs, want, 1e-9) {
+		t.Errorf("AllMargin = %v, %v; want oracle %v, nil", res, err, want)
 	}
 }
 
