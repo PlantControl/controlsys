@@ -1003,6 +1003,30 @@ func dcRoundingDisk(sys *System) (radius float64, inside bool) {
 	return radius, inside
 }
 
+// dcDiskPoleCount is the number of computed poles of the explicit
+// delay-free sys within their own first-order rounding move of DC, as
+// dcRoundingDisk measures it; 0 outside its scope.
+func dcDiskPoleCount(sys *System) int {
+	n, _, _ := sys.Dims()
+	if n == 0 || sys.internalDelayCount() > 0 || newDescriptorPolicy(sys).isDescriptor() {
+		return 0
+	}
+	pe, ok := newPoleEigen(sys.A)
+	if !ok {
+		return 0
+	}
+	dc := dcPoint(sys)
+	count := 0
+	for k, p := range pe.poles {
+		yax, yx := pe.coupling(sys.A, k, k)
+		move := eps() * yax / cmplx.Abs(yx)
+		if !math.IsInf(move, 0) && !math.IsNaN(move) && cmplx.Abs(p-dc) <= move {
+			count++
+		}
+	}
+	return count
+}
+
 // ddLFTSampler evaluates an internal-delay model where its double solve
 // fails off a pole, as next to a pole cluster at the origin far below ‖A‖:
 // the delay-free plant H in double-double (ddResponseInto), closed by Δ in

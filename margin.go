@@ -1056,6 +1056,19 @@ type rationalLoop struct {
 	// dcGain caches certifiedDC.
 	dcGain       float64
 	dcDone, dcOK bool
+	// dcInf is the exact DC limit's pole at DC (exactDCGainLimitChecked),
+	// |L| above every level there.
+	dcInf bool
+	// gamma is the level of the gain search in progress.
+	gamma float64
+	// core caches exactCore.
+	core     *System
+	coreDone bool
+	// exactFailed is the last level whose exact crossings did not resolve.
+	exactFailed float64
+	// counter caches crossingCounter at counterGamma.
+	counter      *crossingCounter
+	counterGamma float64
 }
 
 type resonancePoleSet struct{ pairs, reals, cluster []float64 }
@@ -1323,6 +1336,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	}
 	lg := math.Log(gamma)
 	f := r.gainLog(lg)
+	r.gamma = gamma
 	r.eval.extended = true
 	r.pairExact = r.exactGainLog(lg)
 	defer func() { r.eval.extended, r.pairExact = false, nil }()
@@ -1400,7 +1414,7 @@ func (r *rationalLoop) exactVetoed(w float64, h complex128) bool {
 // the exact Nyquist frequency is nyquistGapCrossing's.
 func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, error) {
 	cs := &crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol, exact: r.exactGainLog(lg)}
-	dcEnd, dcSnap := false, false
+	dcEnd, dcSnap, dcUnknown, lowInferred, dcAtLevel := false, false, false, false, false
 	endSign := func(w float64) int {
 		h, ok := r.eval.try(w)
 		if w == 0 {
@@ -1408,15 +1422,28 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 				dcEnd = true
 				return cs.sgn(v)
 			}
-			if v, certified := r.certifiedDC(); certified {
+			v, certified := r.certifiedDC()
+			if certified {
 				if sg := cs.sgn(math.Log(v) - lg); sg != 0 {
 					dcEnd = true
 					return sg
 				}
+				dcAtLevel = true
+			} else if r.dcInf {
+				dcEnd = true
+				return 1
 			}
+			if !ok || cmplx.IsInf(h) {
+				dcSnap = true
+				return 1
+			}
+			if !certified {
+				dcUnknown = true
+				return 0
+			}
+			return cs.sgn(cs.f(w))
 		}
 		if !ok || cmplx.IsInf(h) {
-			dcSnap = dcSnap || w == 0
 			return 1
 		}
 		return cs.sgn(cs.f(w))
@@ -1433,8 +1460,28 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	if len(ws) > 0 {
 		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
 	}
-	if !math.IsInf(pLo, 0) {
-		if s0, s := endSign(0), cs.sgn(cs.ft(pLo)); s0 != 0 && s != 0 && s != s0 {
+	lowInferred = math.IsInf(pLo, 0)
+	if out, ok := r.exactCrossings(ws, wTop); ok {
+		ws, lowInferred = out, false
+		if len(ws) > 0 {
+			pHi = ws[len(ws)-1] * (1 + 1e-6)
+		}
+	} else if !math.IsInf(pLo, 0) {
+		s0, s := endSign(0), cs.sgn(cs.ft(pLo))
+		if dcAtLevel {
+			if out, ok := r.exactCrossings(ws, wTop); ok {
+				return out, nil
+			}
+			return nil, fmt.Errorf("gain at DC certified at the level, crossings beside DC beyond the exact count: %w", ErrAccuracyUnverified)
+		}
+		if dcUnknown && s != 0 {
+			if out, ok := r.exactCrossings(ws, wTop); ok {
+				return out, nil
+			}
+			return nil, fmt.Errorf("gain at DC not certified on either side of the level, crossings below ω=%g undecided: %w", pLo, ErrAccuracyUnverified)
+		}
+		lowInferred = s0 != 0
+		if s0 != 0 && s != 0 && s != s0 {
 			c, ok, floor := cs.scan(pLo, ident, s0)
 			if !ok && floor == 0 && r.firstCrossing {
 				c, ok = r.diskScan(cs, s0, s)
@@ -1447,6 +1494,9 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 				ok = true
 			}
 			if !ok && (dcEnd || dcSnap || cs.unresolved) {
+				if out, ok := r.exactCrossings(ws, wTop); ok {
+					return out, nil
+				}
 				return nil, fmt.Errorf("gain crossing below ω=%g does not close on an evaluable frequency: %w", pLo, ErrAccuracyUnverified)
 			}
 			if ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
@@ -1486,19 +1536,67 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 			}
 		}
 	}
+	if lowInferred {
+		if out, ok := r.exactCrossings(ws, wTop); ok {
+			return out, nil
+		}
+		if dcDiskPoleCount(r.eval.sys) >= 2 {
+			return nil, fmt.Errorf("gain crossings beside a pole cluster at DC beyond the exact count: %w", ErrAccuracyUnverified)
+		}
+	}
 	return ws, nil
 }
+
+// marginDCMaxOrder caps the order whose DC end certifiedDC takes from the
+// exact DC limit where DCGain does not certify it; marginEndMaxOrder caps
+// the order whose bracket ends exactGainLog certifies. Both are cost caps:
+// the exact limit takes ~7ms at n=32 dense, two exact ends ~110ms at n=24.
+// Above them an uncertified end is ErrAccuracyUnverified (CISC3B).
+const (
+	marginDCMaxOrder  = 32
+	marginEndMaxOrder = 24
+)
 
 // exactGainLog is f = log|L| − lg from the stored model's exact response
 // at ω (exactResponseAt), ok false where pI + qA is exactly singular or the
 // model does not factorize (cachedPoleSchur, formed on first use); nil
 // outside that solve's scope: order above exactDetMaxOrder, a descriptor
 // or internal-delay loop. |L| does not depend on input and output delays.
+// Past exactDetMaxOrder it is the structural core's (exactCore), up to
+// marginEndMaxOrder. Below Nyquist, at the gain search's own level, it is
+// only the sign of f, ±1 or 0, from the exact crossing polynomial
+// (crossingCounter): the scans and bisections it serves read signs.
 func (r *rationalLoop) exactGainLog(lg float64) func(float64) (float64, bool) {
 	sys := r.eval.sys
-	if n, _, _ := sys.Dims(); n == 0 || n > exactDetMaxOrder || sys.internalDelayCount() > 0 || newDescriptorPolicy(sys).isDescriptor() {
+	if n, _, _ := sys.Dims(); n == 0 || sys.internalDelayCount() > 0 || newDescriptorPolicy(sys).isDescriptor() {
 		return nil
 	}
+	if n, _, _ := sys.Dims(); n > exactDetMaxOrder {
+		if sys = r.exactCore(); sys == nil {
+			return nil
+		}
+	}
+	if n, _, _ := sys.Dims(); n > marginEndMaxOrder {
+		return nil
+	}
+	if cc, ok := r.crossingCounter(); ok && len(cc.p) > 0 && math.Log(r.gamma) == lg {
+		top := math.Inf(1)
+		if r.discrete() {
+			top = r.nyquist()
+		}
+		exact := r.exactResponseLog(sys, lg)
+		return func(w float64) (float64, bool) {
+			if !(w < top) {
+				return exact(w)
+			}
+			return float64(cc.signAtOmega(w)), true
+		}
+	}
+	return r.exactResponseLog(sys, lg)
+}
+
+// exactResponseLog is log|L| − lg from the exact response of sys at ω.
+func (r *rationalLoop) exactResponseLog(sys *System, lg float64) func(float64) (float64, bool) {
 	return func(w float64) (float64, bool) {
 		ps, ok := cachedPoleSchur(sys)
 		if !ok {
@@ -1557,9 +1655,14 @@ func (r *rationalLoop) certifiedDC() (float64, bool) {
 		r.dcDone = true
 		sys := r.eval.sys
 		if sys.internalDelayCount() == 0 && !newDescriptorPolicy(sys).isDescriptor() {
-			if g, err := sys.DCGain(); err == nil {
-				v := math.Abs(g.At(0, 0))
-				r.dcGain, r.dcOK = v, !math.IsInf(v, 0)
+			g, err := sys.DCGain()
+			if err == nil && !math.IsInf(g.At(0, 0), 0) {
+				r.dcGain, r.dcOK = math.Abs(g.At(0, 0)), true
+			} else if ex := r.exactCoreOr(sys); ex != nil && ex.n() <= marginDCMaxOrder {
+				if l, overflow := exactDCGainLimitChecked(ex.A, ex.B, ex.C, ex.D, real(dcPoint(sys))); !overflow {
+					v := math.Abs(l.At(0, 0))
+					r.dcGain, r.dcOK, r.dcInf = v, !math.IsInf(v, 0), math.IsInf(v, 0)
+				}
 			} else if ps, ok := cachedPoleSchur(sys); ok && ps.n <= exactDetMaxOrder {
 				if g, overflow, singular := ps.exactDC(dcPoint(sys)); !singular && !overflow {
 					r.dcGain, r.dcOK = math.Abs(g.At(0, 0)), true
