@@ -2434,6 +2434,8 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 					if c, p, cut, ok := r.exactPair(a, w, b); ok {
 						best, bracketed, pair = c, cut, p
 					} else {
+						// Tag legacy-pair (TL4ZIH): outside the exact scope the
+						// pair stands on double readings, base's rule unchanged.
 						best, bracketed = refineCrossing(a, w, ft), true
 						pair = refineCrossing(w, b, ft)
 					}
@@ -2488,7 +2490,9 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 // them may be a single crossing (OXOAL6). It returns both crossings where
 // the exact signs confirm the pair, the one crossing in [a, b] where they
 // change once, and w unbracketed (cut false) where they do not change;
-// ok is false outside the exact scope or where the exact solve fails.
+// ok is false outside the exact scope or where the exact solve fails,
+// where polish keeps base's double pair (tag legacy-pair, a recorded hole
+// owned by TL4ZIH).
 func (r *rationalLoop) exactPair(a, w, b float64) (c, p float64, cut, ok bool) {
 	if r.pairExact == nil {
 		return 0, 0, false, false

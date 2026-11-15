@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"testing"
 )
@@ -114,5 +115,33 @@ func TestCrossingScanCertifiedEnds(t *testing.T) {
 				t.Fatalf("scan = %.17g, %v; want %.17g", c, ok, tc.w0)
 			}
 		})
+	}
+}
+
+// dover-grid a=0.7,b=0.99,k=5.1 with 14 unobservable states added: the
+// loop is the same, but at order 17 > exactDetMaxOrder no exact response
+// certifies a bracket end of the scan below the pencil crossing, so
+// AllMargin is ErrAccuracyUnverified (plain rejection out of the exact
+// scope, OXOAL6 ruling 2). Main returned the noise-bracketed
+// [1.0691800428606525e-12 0.0060107292292177926] with nil; A2OX65 320-bit
+// gcf oracle [3.7007434156454433e-13 0.0060107292303075814].
+func TestAllMarginGainCrossBelowScanOutOfExactScope(t *testing.T) {
+	core := []float64{1, 0, 0, 1.5350000000000001, 0, -0.69299999999999995, -1.5500000000000003, 1, 1.6899999999999999}
+	const n = 17
+	a, b, c := make([]float64, n*n), make([]float64, n), make([]float64, n)
+	for i := range 3 {
+		copy(a[i*n:i*n+3], core[i*3:i*3+3])
+	}
+	copy(b, []float64{1, 0, 0})
+	copy(c, []float64{5, 0, 1})
+	for i := 3; i < n; i++ {
+		a[i*n+i], b[i] = 0.5, 1
+	}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("AllMargin = %v, %v; want ErrAccuracyUnverified", res, err)
 	}
 }

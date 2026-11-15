@@ -87,16 +87,17 @@ func TestFreqResponseDCPoleLimitZeroResidue(t *testing.T) {
 	}
 }
 
-// TestAllMarginDCPoleClusterUnverified: the gain crossover of dcPairModel
+// TestAllMarginDCPoleClusterCrossover: the gain crossover of dcPairModel
 // lies at 6.0003e-16 (p = 1e-305) and 6.0003e-18 (p = 1e-307), where
 // AllMargin returned no crossing with a nil error. At p = 1e-307 it lies
 // inside the dc rounding disk 2.2e-16, where the stored model's exact
 // responses close the bracket from the certified DC gain (A2OX65 Q1 ruling
-// (c)); 320-bit oracle 6.0002999244552604e-18. At p = 1e-305 it lies
-// outside the disk among snapped responses, where the scan takes the
-// stored model's exact responses in their place and closes on ends whose
-// signs they certify (OXOAL6); 320-bit oracle 6.0002999985688122e-16.
-func TestAllMarginDCPoleClusterUnverified(t *testing.T) {
+// (c)). At p = 1e-305 it lies outside the disk among snapped responses,
+// where the scan takes the stored model's exact responses in their place
+// and closes on ends whose signs they certify (OXOAL6). Oracle values
+// 6.0002999985688122e-16 and 6.0002999244552604e-18: CWMCXC 320-bit oracle,
+// as recorded on A2OX65.
+func TestAllMarginDCPoleClusterCrossover(t *testing.T) {
 	sys, _ := dcPairModel(t, 1e-305)
 	const want305 = 6.0002999985688122e-16
 	if res, err := AllMargin(sys); err != nil || !sameCrossings(res.GainCrossFreqs, []float64{want305}, 1e-9) {
