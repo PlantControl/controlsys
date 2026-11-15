@@ -298,6 +298,17 @@ func TestTransferFunctionImproperChainRefutedBySamples(t *testing.T) {
 			}
 			continue
 		}
+		if errors.Is(perr, ErrAccuracyUnverified) || errors.Is(terr, ErrAccuracyUnverified) {
+			// seed 293 bscale 1e-6: the float reduction fails closed; the
+			// exact tier's improper model is refuted at 10i (3.65× the
+			// refute threshold) with no numerator degree left to raise, so
+			// it comes as a value with ErrAccuracyUnverified (IsProper
+			// false) and Step, which has no value, fails closed.
+			if !errors.Is(perr, ErrAccuracyUnverified) || !errors.Is(terr, ErrAccuracyUnverified) || pr || !errors.Is(serr, ErrDescriptorSingular) {
+				t.Errorf("%s: IsProper %v, %v, Step %v, TF %v: want false and a value with ErrAccuracyUnverified, Step ErrDescriptorSingular", label, pr, perr, serr, terr)
+			}
+			continue
+		}
 		if perr != nil || terr != nil {
 			t.Fatalf("%s: IsProper %v, TransferFunction %v", label, perr, terr)
 		}

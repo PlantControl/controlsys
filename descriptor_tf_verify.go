@@ -444,7 +444,7 @@ func descriptorTFProbes(sys *System, roots []complex128) []complex128 {
 // bound has no determined degree, and its roots get no window: a root
 // that bound places anywhere would otherwise take its neighbours into
 // a cluster with an unbounded disk.
-func tfPoleWindows(tf *TransferFunc, poles []complex128, tol float64) poleWindows {
+func tfPoleWindows(tf *TransferFunc, poles []complex128, tol float64) tfWindows {
 	var w poleWindows
 	add := func(c []float64) {
 		c = trimLeadingZeros(c)
@@ -511,13 +511,53 @@ func tfPoleWindows(tf *TransferFunc, poles []complex128, tol float64) poleWindow
 			w.radius = append(w.radius, math.Min(beta/tol, lim))
 		}
 	}
-	for i, den := range tf.Den {
+	out := tfWindows{m: len(tf.Num[0])}
+	for _, den := range tf.Den {
 		add(den)
+	}
+	out.pole, w = w, poleWindows{}
+	for i := range tf.Den {
 		for _, num := range tf.Num[i] {
 			add(num)
+			out.zero = append(out.zero, w)
+			w = poleWindows{}
 		}
 	}
-	return w
+	return out
+}
+
+// tfWindows are the windows of tfPoleWindows: pole the windows of the
+// row denominators' roots, which guard every entry, and zero, per entry
+// (row-major i·m + j), the windows of that entry's numerator roots, which
+// guard that entry only: a rounding-level zero of one numerator says
+// nothing of the response of another.
+type tfWindows struct {
+	pole poleWindows
+	zero []poleWindows
+	m    int
+}
+
+// contain reports whether s lies in any window, pole or zero.
+func (w tfWindows) contain(s complex128) bool {
+	if w.pole.contain(s) {
+		return true
+	}
+	for _, z := range w.zero {
+		if z.contain(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// guards reports whether s lies in a window guarding entry (i, j): a pole
+// window or a window of that entry's own numerator.
+func (w tfWindows) guards(s complex128, i, j int) bool {
+	if w.pole.contain(s) {
+		return true
+	}
+	e := i*w.m + j
+	return e < len(w.zero) && w.zero[e].contain(s)
 }
 
 // descriptorTFPoint is the judgement of tf at one point: verified, refuted,
@@ -536,11 +576,21 @@ func tfPoleWindows(tf *TransferFunc, poles []complex128, tol float64) poleWindow
 type descriptorTFPoint struct {
 	determined, verified, refuted, open bool
 	worst                               float64
+	refutedEntries                      []int
 }
 
 // judgeDescriptorTF judges tf against full, the bounded pencil response of
-// sys at pts (see descriptorTFVerified), with win the pole windows.
-func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pencilBoundedResp, win poleWindows) []descriptorTFPoint {
+// sys at pts (see descriptorTFVerified), with win the windows: an entry
+// inside a window guarding it (tfWindows.guards: a pole window, or a zero
+// window of its own numerator) neither refutes nor triggers exact
+// evaluation.
+func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pencilBoundedResp, win tfWindows) []descriptorTFPoint {
+	return judgeDescriptorTFCached(sys, tf, pts, full, win, nil)
+}
+
+// judgeDescriptorTFCached is judgeDescriptorTF taking exact evaluations of
+// open points from c (nil: none cached).
+func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
 	_, m, p := sys.Dims()
 	tol := math.Sqrt(eps())
 	pm := p * m
@@ -551,7 +601,6 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 			continue
 		}
 		jp := descriptorTFPoint{determined: true, verified: true}
-		in := win.contain(s)
 		var ur, ui [][]*big.Rat
 		exact := false
 		for i := range p {
@@ -576,6 +625,7 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 				ver := diff+delta <= tol*math.Max(scale, T-dT)
 				thr := tol*math.Max(scale, T+dT) + full.data[e]
 				ref := dT < T && diff-delta > thr
+				in := win.guards(s, i, j)
 				lo, hi := math.Max(0, diff-delta), diff+delta
 				canRef := hi > tol*math.Max(scale, math.Max(0, T-dT))+full.data[e]
 				canVer := lo <= tol*math.Max(scale, T+dT)
@@ -583,7 +633,7 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 					if !exact {
 						exact = true
 						if n, _, _ := sys.Dims(); n <= exactDetMaxOrder {
-							ur, ui = exactPencilAt(sys, s)
+							ur, ui = c.exactAt(sys, s)
 						}
 					}
 					if ur != nil {
@@ -601,6 +651,9 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 				}
 				if !in && (dT < T || ur != nil) {
 					jp.refuted = jp.refuted || ref
+					if ref {
+						jp.refutedEntries = append(jp.refutedEntries, i*m+j)
+					}
 					jp.worst = math.Max(jp.worst, (diff-delta)/thr)
 				}
 			}
@@ -622,8 +675,9 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 // bits and divided, δ_tf = 4ε·|tf| for the rounding of numerator,
 // denominator and quotient. An entry verifies when |Ĝ − tf| + δ ≤
 // tol·max(scale, T̂ − δ_T), δ = δ_G + ε(|Ĝ| + |D|) + δ_tf, and refutes tf
-// when |Ĝ − tf| − δ > tol·max(scale, T̂ + δ_T) + δ_data outside a pole
-// window (tfPoleWindows), δ_data the data bound, the resolution of the
+// when |Ĝ − tf| − δ > tol·max(scale, T̂ + δ_T) + δ_data outside the
+// windows guarding it (tfPoleWindows: the row denominators' for every
+// entry, its own numerator's zeros for that entry alone), δ_data the data bound, the resolution of the
 // stored model; with δ_T ≥ T̂ it only verifies against scale, and a point
 // with η ≥ 1 is never counted. A point verifies when all its entries do.
 // tf is verified when no point refutes it and the verified points,
@@ -646,8 +700,15 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 // value, which the stored data determine. The census of these models
 // judges the same points.
 func descriptorTFVerified(sys *System, tf *TransferFunc) bool {
+	return descriptorTFVerifiedCached(sys, tf, nil)
+}
+
+// descriptorTFVerifiedCached is descriptorTFVerified with c's per-point
+// work (pencilCache).
+func descriptorTFVerifiedCached(sys *System, tf *TransferFunc, c *pencilCache) bool {
 	if !tfVerdictMemo {
-		return descriptorTFVerify(sys, tf)
+		v, _ := descriptorTFJudgeCached(sys, tf, c)
+		return v
 	}
 	key := tfVerdictKey(sys, tf)
 	tfVerdicts.Lock()
@@ -656,7 +717,7 @@ func descriptorTFVerified(sys *System, tf *TransferFunc) bool {
 	if ok {
 		return v
 	}
-	v = descriptorTFVerify(sys, tf)
+	v, _ = descriptorTFJudgeCached(sys, tf, c)
 	tfVerdicts.Lock()
 	if tfVerdicts.m == nil || len(tfVerdicts.m) >= tfVerdictMemoSize {
 		tfVerdicts.m = make(map[string]bool)
@@ -725,17 +786,32 @@ func tfVerdictKey(sys *System, tf *TransferFunc) string {
 
 // descriptorTFVerify is descriptorTFVerified without the memo.
 func descriptorTFVerify(sys *System, tf *TransferFunc) bool {
+	v, _ := descriptorTFJudge(sys, tf)
+	return v
+}
+
+// descriptorTFJudge is descriptorTFVerify also returning, when a point
+// refutes tf, the entries (row-major i·m + j) refuted there; none when tf
+// is only short of verified points or the point at ∞ refutes it.
+func descriptorTFJudge(sys *System, tf *TransferFunc) (bool, []int) {
+	return descriptorTFJudgeCached(sys, tf, nil)
+}
+
+// descriptorTFJudgeCached is descriptorTFJudge with the per-point work on
+// sys, which does not depend on tf, taken from c (nil: none cached).
+func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (bool, []int) {
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
-		return true
+		return true, nil
 	}
 	roots, poles, nf, polyDeg, ok := tfShape(tf)
 	if !ok {
-		return false
+		return false, nil
 	}
 	need := n + nf + polyDeg + 1
 	win := tfPoleWindows(tf, poles, math.Sqrt(eps()))
 	var seen []complex128
+	var refuted []int
 	verified := 0
 	judge := func(cand []complex128) bool {
 		var pts []complex128
@@ -748,8 +824,9 @@ func descriptorTFVerify(sys *System, tf *TransferFunc) bool {
 		if len(pts) == 0 {
 			return true
 		}
-		for k, jp := range judgeDescriptorTF(sys, tf, pts, newPencilBoundedResponse(sys, pts), win) {
+		for k, jp := range judgeDescriptorTFCached(sys, tf, pts, c.response(sys, pts), win, c) {
 			if jp.refuted {
+				refuted = jp.refutedEntries
 				return false
 			}
 			if jp.verified {
@@ -759,7 +836,7 @@ func descriptorTFVerify(sys *System, tf *TransferFunc) bool {
 		return true
 	}
 	if !judge(descriptorTFProbes(sys, roots)) {
-		return false
+		return false, refuted
 	}
 	if sys.Dt == 0 {
 		_, hi := rootBand(sys, roots)
@@ -774,30 +851,30 @@ func descriptorTFVerify(sys *System, tf *TransferFunc) bool {
 				continue
 			}
 			seen = append(seen, s)
-			full := newPencilBoundedResponse(sys, []complex128{s})
+			full := c.response(sys, []complex128{s})
 			if !full.ok[0] || !(full.eta[0] < 1) {
 				continue
 			}
-			jp := judgeDescriptorTF(sys, tf, []complex128{s}, full, win)[0]
+			jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
 			if jp.refuted {
-				return false
+				return false, jp.refutedEntries
 			}
 			if jp.verified {
 				verified += probeWeight(s)
 			}
 		}
 	}
-	if sys.Dt == 0 && descriptorTFInfinityRefutes(sys, tf) {
-		return false
+	if sys.Dt == 0 && descriptorTFInfinityRefutesCached(sys, tf, c) {
+		return false, nil
 	}
 	for r := range 3 {
 		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, 4<<r)) {
-			return false
+			return false, refuted
 		}
 	}
 	for r := 0; r < 3 && verified < need; r++ {
 		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, (need-verified+1)/2<<r)) {
-			return false
+			return false, refuted
 		}
 	}
 	lo, _ := rootBand(sys, roots)
@@ -813,19 +890,144 @@ func descriptorTFVerify(sys *System, tf *TransferFunc) bool {
 			continue
 		}
 		seen = append(seen, s)
-		full := newPencilBoundedResponse(sys, []complex128{s})
+		full := c.response(sys, []complex128{s})
 		if !full.ok[0] || !(full.eta[0] < 1) {
 			continue
 		}
-		jp := judgeDescriptorTF(sys, tf, []complex128{s}, full, win)[0]
+		jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
 		if jp.refuted {
-			return false
+			return false, jp.refutedEntries
 		}
 		if jp.verified {
 			verified += probeWeight(s)
 		}
 	}
-	return verified >= need
+	return verified >= need, nil
+}
+
+// descriptorTFPoints returns the points descriptorTFVerified judges for a
+// transfer function with roots: descriptorTFProbes, the upward ladder to
+// dominatedFrequency (continuous), the fixed fill rounds of
+// zpkFillProbes(roots, 4·2^r), r = 0, 1, 2, and the downward ladder to
+// belowLadderFloor; not the shortfall fills nor ∞.
+func descriptorTFPoints(sys *System, roots []complex128) []complex128 {
+	pts := descriptorTFProbes(sys, roots)
+	push := func(s complex128) {
+		if !slices.Contains(pts, s) {
+			pts = append(pts, s)
+		}
+	}
+	discrete := sys.Dt != 0
+	if !discrete {
+		_, hi := rootBand(sys, roots)
+		sdom := dominatedFrequency(sys)
+		for k := math.Ceil(2*math.Log10(1e3*hi)) + 1; math.Pow(10, k/2) <= sdom; k++ {
+			push(complex(0, math.Pow(10, k/2)))
+		}
+	}
+	for r := range 3 {
+		for _, s := range zpkFillProbes(roots, nil, discrete, 4<<r) {
+			push(s)
+		}
+	}
+	lo, _ := rootBand(sys, roots)
+	floor := belowLadderFloor(sys)
+	for k := math.Floor(2*math.Log10(1e-3*lo)) - 1; math.Pow(10, k/2) > floor; k-- {
+		push(axisPoint(discrete, math.Pow(10, k/2)))
+	}
+	return pts
+}
+
+// pencilCache holds, for one model, the work of descriptorTFJudge that
+// does not depend on the transfer function judged: the bounded pencil
+// response per point (newPencilBoundedResponse computes each point on its
+// own, so a cached point is the one a fresh call gives bit for bit), the
+// exact U at open points (exactPencilAt) and the swapped pencil's response
+// at t = 0 for the point at ∞. A nil cache computes everything afresh.
+type pencilCache struct {
+	pts   map[complex128]pencilPoint
+	exact map[complex128][2][][]*big.Rat
+	inf   *pencilBoundedResp
+}
+
+type pencilPoint struct {
+	g                       []complex128
+	comp, data, terms, dTer []float64
+	eta                     float64
+	ok                      bool
+}
+
+func newPencilCache() *pencilCache {
+	return &pencilCache{pts: make(map[complex128]pencilPoint), exact: make(map[complex128][2][][]*big.Rat)}
+}
+
+// response is newPencilBoundedResponse(sys, pts) with cached points.
+func (c *pencilCache) response(sys *System, pts []complex128) pencilBoundedResp {
+	if c == nil {
+		return newPencilBoundedResponse(sys, pts)
+	}
+	var miss []complex128
+	for _, s := range pts {
+		if _, ok := c.pts[s]; !ok && !slices.Contains(miss, s) {
+			miss = append(miss, s)
+		}
+	}
+	if len(miss) > 0 {
+		r := newPencilBoundedResponse(sys, miss)
+		pm := r.p * r.m
+		for k, s := range miss {
+			o := k * pm
+			c.pts[s] = pencilPoint{g: r.g[o : o+pm], comp: r.comp[o : o+pm], data: r.data[o : o+pm],
+				terms: r.terms[o : o+pm], dTer: r.dTer[o : o+pm], eta: r.eta[k], ok: r.ok[k]}
+		}
+	}
+	_, m, p := sys.Dims()
+	pm := p * m
+	np := len(pts)
+	out := pencilBoundedResp{p: p, m: m, g: make([]complex128, np*pm), comp: make([]float64, np*pm),
+		data: make([]float64, np*pm), terms: make([]float64, np*pm), dTer: make([]float64, np*pm),
+		eta: make([]float64, np), ok: make([]bool, np)}
+	for k, s := range pts {
+		q := c.pts[s]
+		o := k * pm
+		copy(out.g[o:o+pm], q.g)
+		copy(out.comp[o:o+pm], q.comp)
+		copy(out.data[o:o+pm], q.data)
+		copy(out.terms[o:o+pm], q.terms)
+		copy(out.dTer[o:o+pm], q.dTer)
+		out.eta[k], out.ok[k] = q.eta, q.ok
+	}
+	return out
+}
+
+// exactAt is exactPencilAt(sys, s), cached.
+func (c *pencilCache) exactAt(sys *System, s complex128) (ur, ui [][]*big.Rat) {
+	if c == nil {
+		return exactPencilAt(sys, s)
+	}
+	if e, ok := c.exact[s]; ok {
+		return e[0], e[1]
+	}
+	ur, ui = exactPencilAt(sys, s)
+	c.exact[s] = [2][][]*big.Rat{ur, ui}
+	return ur, ui
+}
+
+// infinity is the response of the swapped pencil tA − E of sys (D = 0) at
+// t = 0, cached.
+func (c *pencilCache) infinity(sys *System) pencilBoundedResp {
+	if c != nil && c.inf != nil {
+		return *c.inf
+	}
+	_, m, p := sys.Dims()
+	sw := sys.Copy()
+	sw.A, sw.E = mat.DenseCopyOf(sys.E), mat.DenseCopyOf(sys.A)
+	sw.D = mat.NewDense(p, m, nil)
+	full := newPencilBoundedResponse(sw, []complex128{0})
+	if c != nil {
+		c.inf = &full
+	}
+	return full
 }
 
 // belowLadderFloor is the frequency under which the continuation of the
@@ -856,8 +1058,9 @@ func belowLadderFloor(sys *System) float64 {
 }
 
 // exactPencilAt returns U = (sE − A)⁻¹B at s exactly, s's parts and the
-// data taken as the rationals they are, by elimination on the real 2n×2n
-// embedding; nil when sE − A is singular.
+// data taken as the rationals they are, by fraction-free Gauss–Jordan
+// elimination (Bareiss) on the real 2n×2n embedding scaled to integers by
+// one power of two; nil when sE − A is singular.
 func exactPencilAt(sys *System, s complex128) (ur, ui [][]*big.Rat) {
 	n, m, _ := sys.Dims()
 	N := 2 * n
@@ -884,10 +1087,28 @@ func exactPencilAt(sys *System, s complex128) (ur, ui [][]*big.Rat) {
 			M[i][N+j].SetFloat64(sys.B.At(i, j))
 		}
 	}
+	shift := 0
+	for i := range N {
+		for _, v := range M[i] {
+			if v.Sign() != 0 {
+				shift = max(shift, v.Denom().BitLen()-1)
+			}
+		}
+	}
+	Z := make([][]*big.Int, N)
+	for i := range N {
+		Z[i] = make([]*big.Int, len(M[i]))
+		for j, v := range M[i] {
+			z := new(big.Int).Lsh(v.Num(), uint(shift-(v.Denom().BitLen()-1)))
+			Z[i][j] = z
+		}
+	}
+	var u, w big.Int
+	prev := big.NewInt(1)
 	for col := range N {
 		piv := -1
 		for r := col; r < N; r++ {
-			if M[r][col].Sign() != 0 {
+			if Z[r][col].Sign() != 0 {
 				piv = r
 				break
 			}
@@ -895,19 +1116,28 @@ func exactPencilAt(sys *System, s complex128) (ur, ui [][]*big.Rat) {
 		if piv < 0 {
 			return nil, nil
 		}
-		M[col], M[piv] = M[piv], M[col]
-		inv := new(big.Rat).Inv(M[col][col])
-		for j := col; j < len(M[col]); j++ {
-			M[col][j].Mul(M[col][j], inv)
-		}
+		Z[col], Z[piv] = Z[piv], Z[col]
+		pk := Z[col][col]
 		for r := range N {
-			if r == col || M[r][col].Sign() == 0 {
+			if r == col {
 				continue
 			}
-			f := new(big.Rat).Set(M[r][col])
-			for j := col; j < len(M[r]); j++ {
-				M[r][j].Sub(M[r][j], t.Mul(f, M[col][j]))
+			ark := new(big.Int).Set(Z[r][col])
+			for j := range Z[r] {
+				if j == col {
+					continue
+				}
+				u.Mul(pk, Z[r][j])
+				w.Mul(ark, Z[col][j])
+				Z[r][j].Quo(u.Sub(&u, &w), prev)
 			}
+			Z[r][col].SetInt64(0)
+		}
+		prev = new(big.Int).Set(pk)
+	}
+	for i := range N {
+		for j := N; j < len(M[i]); j++ {
+			M[i][j].SetFrac(Z[i][j], Z[i][i])
 		}
 	}
 	ur, ui = make([][]*big.Rat, n), make([][]*big.Rat, n)
@@ -991,14 +1221,17 @@ func dominatedFrequency(sys *System) float64 {
 // are all 0, up to n orders. δ_k above order 1 is markovBounds.bound over
 // (1 − η_∞)^k.
 func descriptorTFInfinityRefutes(sys *System, tf *TransferFunc) bool {
+	return descriptorTFInfinityRefutesCached(sys, tf, nil)
+}
+
+// descriptorTFInfinityRefutesCached is descriptorTFInfinityRefutes with the
+// swapped pencil's response at t = 0 taken from c (nil: none cached).
+func descriptorTFInfinityRefutesCached(sys *System, tf *TransferFunc, c *pencilCache) bool {
 	n, m, p := sys.Dims()
 	if n == 0 || n > exactDetMaxOrder {
 		return false
 	}
-	sw := sys.Copy()
-	sw.A, sw.E = mat.DenseCopyOf(sys.E), mat.DenseCopyOf(sys.A)
-	sw.D = mat.NewDense(p, m, nil)
-	full := newPencilBoundedResponse(sw, []complex128{0})
+	full := c.infinity(sys)
 	if !full.ok[0] || !(full.eta[0] < 1) {
 		return false
 	}

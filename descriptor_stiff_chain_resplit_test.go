@@ -118,15 +118,19 @@ func TestTransferFunction_StiffChainQZCountResplit(t *testing.T) {
 // the staircase re-split of these does not reproduce under 4ε copies of
 // the data near the stiff pole, and base itself fails closed on the
 // copies. They must fail closed (ErrDescriptorSingular from IsProper, Step
-// and TransferFunction alike) or match the oracle.
+// and TransferFunction alike) or match the oracle. Where the exact tier
+// certifies a proper model (PCG(1047, 2525), PCG(316, 31)), IsProper and TF
+// return values while Step keeps the float reduction's
+// ErrDescriptorSingular; the TF must still match the oracle.
 func TestTransferFunction_StiffChainNoWrongProperValue(t *testing.T) {
 	for _, tc := range stiffChainClosedCases {
 		sys, oracle := tc.systems(t)
 		requireDataDetermined(t, tc, oracle)
-		_, perr := sys.IsProper()
+		pr, perr := sys.IsProper()
 		_, serr := Step(sys, 1)
 		_, terr := sys.TransferFunction(nil)
-		if perr != nil || serr != nil || terr != nil {
+		stepClosed := pr && perr == nil && terr == nil && errors.Is(serr, ErrDescriptorSingular)
+		if !stepClosed && (perr != nil || serr != nil || terr != nil) {
 			for _, e := range []error{perr, serr, terr} {
 				if !errors.Is(e, ErrDescriptorSingular) {
 					t.Errorf("%s: IsProper %v, Step %v, TF %v: want all ErrDescriptorSingular or values", tc.name, perr, serr, terr)

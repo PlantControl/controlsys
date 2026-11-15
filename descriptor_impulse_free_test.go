@@ -144,7 +144,14 @@ func smallDerivativeDescriptor(t *testing.T, c *mat.Dense) *System {
 // 1e-8-relative impulse test, so Step and TransferFunction dropped kd·s
 // (TF(1e6j) = −0.001i, EvalFr +0.999i) while IsProper reported false. Base
 // and MATLAB step reject them. The test is now rounding level and IsProper
-// uses it, so all three agree; a 1e-15 s-term is rounding noise.
+// uses it, so all three agree. kd = 1e-15 is improper too: the stored
+// s-term cannot vanish under ε-rounding of the data, and the exact
+// response differs from 1/(s+1) by 1e-11 at 1e4i against the refute
+// threshold 1.49e-12 (η 1.3e-11, δ_data 6.7e-20) and by 1e-9 at 1e6i
+// against 1.49e-14 (η 1.3e-9, δ_data 6.7e-22), so no proper model is
+// within terms there (the exact tier certifies the improper one; MATLAB's
+// documented semantics, a nonzero polynomial part, agree; only its
+// normwise tolerance reads it proper).
 func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -157,7 +164,7 @@ func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
 		{"c1=1e4 kd=1e-5", mat.NewDense(1, 3, []float64{1e4, 1e-5, 0}), false},
 		{"c1=1 kd=1e-11", mat.NewDense(1, 3, []float64{1, 1e-11, 0}), false},
 		{"two outputs", mat.NewDense(2, 3, []float64{1e4, 0, 0, 0, 1e-5, 0}), false},
-		{"c1=1 kd=1e-15", mat.NewDense(1, 3, []float64{1, 1e-15, 0}), true},
+		{"c1=1 kd=1e-15", mat.NewDense(1, 3, []float64{1, 1e-15, 0}), false},
 	}
 	for _, tc := range cases {
 		sys := smallDerivativeDescriptor(t, tc.c)

@@ -2627,12 +2627,22 @@ func Damp(sys *System) ([]DampInfo, error) {
 // ErrInvalidArgument. A model without inputs or outputs returns
 // ErrDimensionMismatch. A proper singular-E descriptor whose reduction
 // TransferFunction does not verify returns its response with an error
-// wrapping ErrAccuracyUnverified.
+// wrapping ErrAccuracyUnverified. Where TransferFunction certifies the
+// exact tier's model instead (see TransferFunction), an improper one
+// returns ErrImproperModel and a proper one the float response as before,
+// or ErrDescriptorSingular when the float reduction calls it improper.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
+	rg := sys.chainRegime()
+	if rg.kind == regimeExact && rg.v.polyDeg > 0 {
+		return nil, fmt.Errorf("Step: descriptor has a polynomial part of degree %d: %w", rg.v.polyDeg, ErrImproperModel)
+	}
 	resp, err := step(sys, tFinal)
+	if rg.kind == regimeExact && errors.Is(err, ErrImproperModel) {
+		return nil, fmt.Errorf("Step: float reduction disagrees with the certified proper model: %w", ErrDescriptorSingular)
+	}
 	if err == nil && sys.reductionUnverified() {
 		err = fmt.Errorf("Step: descriptor reduction: %w", ErrAccuracyUnverified)
 	}

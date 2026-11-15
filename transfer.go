@@ -195,17 +195,46 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // verified against the pencil within the response's terms at points where
 // the stored data determine it (descriptorTFVerified); one that does not
 // verify is returned with an error wrapping ErrAccuracyUnverified, and
-// IsProper and Step share that verdict.
+// IsProper and Step share that verdict. When it does not verify and the
+// pencil (E singular, not index 1, within a cost cap) has an index ≥ 2
+// chain, the exact rational num/den of the stored data, trimmed to the
+// least degrees whose model is within terms, is tried instead, and when
+// verified is returned with nil and MinimalOrder its denominator degree;
+// otherwise the float path's value or error stands, the exact model being
+// returned with ErrAccuracyUnverified only where that path has none.
+// IsProper reports the least-degree model within terms at every
+// determined frequency; a polynomial term the data cannot tell from the
+// tail of a pole beyond the determined band counts as absent. Only the
+// in-band response is certified: the TF's individual coefficients beyond
+// the band (far poles, their residues, D, s-terms) are undetermined, on
+// a proper and on an improper verdict alike. Each candidate is
+// verified only at its points, nowhere between them, so the exposure
+// grows with the number of candidates tried. The exact tier ignores the
+// TransferFuncOpts tolerances.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	if err := requireFiniteSystem("TransferFunction", sys); err != nil {
 		return nil, err
 	}
-	res, reduced, err := sys.transferRationalReduced(opts)
-	if err != nil {
-		return nil, err
-	}
-	if reduced && !descriptorTFVerified(sys, res.TF) {
-		err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
+	var res *TransferFuncResult
+	var err error
+	if rg := sys.chainRegime(); rg.kind == regimeExact {
+		res = rg.v.result()
+	} else {
+		var reduced bool
+		if opts == nil && (rg.mainRes != nil || rg.mainErr != nil) {
+			res, reduced, err = rg.mainRes, rg.reduced, rg.mainErr
+		} else {
+			res, reduced, err = sys.transferRationalReduced(opts)
+		}
+		switch {
+		case err != nil && rg.kind == regimeNone && rg.hasV:
+			res = rg.v.result()
+			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
+		case err != nil:
+			return nil, err
+		case reduced && !descriptorTFVerified(sys, res.TF):
+			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
+		}
 	}
 	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
@@ -2690,7 +2719,11 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 // ErrDescriptorSingular, and a numerical failure deciding it returns an
 // error rather than false. When TransferFunction would return the
 // reduction with ErrAccuracyUnverified, IsProper returns its decision with
-// that error as well. See
+// that error as well. IsProper reports the least-degree model within
+// terms at every determined frequency; a polynomial term the data cannot
+// tell from the tail of a pole beyond the determined band counts as absent
+// (the exact tier of TransferFunction, when the float reduction does not
+// verify and that tier does). See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.isproper.html.
 func (sys *System) IsProper() (bool, error) {
 	if err := requireFiniteSystem("IsProper", sys); err != nil {
@@ -2723,6 +2756,20 @@ func (sys *System) isProper() (bool, error) {
 	if _, ok := regularDescriptorShift(sys.A, sys.E, n); !ok {
 		return false, fmt.Errorf("pencil (A, E) is singular: %w", ErrDescriptorSingular)
 	}
+	rg := sys.chainRegime()
+	if rg.kind == regimeExact {
+		return rg.v.polyDeg == 0, nil
+	}
+	proper, err := sys.isProperFloat(N)
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) && rg.kind == regimeNone && rg.hasV {
+		return rg.v.polyDeg == 0, fmt.Errorf("descriptor reduction: %w", ErrAccuracyUnverified)
+	}
+	return proper, err
+}
+
+// isProperFloat is isProper's decision on the float path, the Weierstrass
+// reduction, for a regular singular-E descriptor with N internal delays.
+func (sys *System) isProperFloat(N int) (bool, error) {
 	if _, err := sys.weierstrassReduce(); err != nil {
 		if errors.Is(err, ErrImproperModel) {
 			if N == 0 && !sys.reductionPartsVerified() {

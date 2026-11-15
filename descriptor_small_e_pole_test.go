@@ -32,7 +32,11 @@ func fzPertULP(rng *rand.Rand, x []float64) []float64 {
 // base failed closed. An infinite
 // chain leaves Ulᵀ·A·Vr at rounding level; these keep it ≥ 1e-12·‖A‖.
 // Oracle: eig(W⁻¹F) of the structured model; TF against the exact
-// rational response of the float data.
+// rational response of the float data, within terms: √ε·max(|G|, T) plus
+// the data bound δ_data at points the data determine (η < 1). Where the
+// float reduction fails closed the exact tier's TF is certified within
+// those terms (418 run 10: 2.3e-6 relative off at −0.5+3i, δ_data 1.2e-5
+// relative, |G| ≈ 1e11), not within a fixed 1e-6.
 func TestDescriptorIndexOneIllConditionedKeepsFinitePole(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -94,17 +98,22 @@ func TestDescriptorIndexOneIllConditionedKeepsFinitePole(t *testing.T) {
 			if run%5 != 0 {
 				continue
 			}
-			for _, x := range []complex128{0.37i, complex(-0.5, 3)} {
+			pts := []complex128{0.37i, complex(-0.5, 3)}
+			full := newPencilBoundedResponse(sys, pts)
+			for k, x := range pts {
 				w, ok := fzExactDescResponse(tc.n, 1, 1, a, e, tc.b, tc.c, []float64{0.3}, x)
-				if !ok {
-					t.Fatalf("%s run %d: exact response at %v failed", tc.name, run, x)
+				ur, ui := exactPencilAt(sys, x)
+				if !ok || ur == nil || !(full.eta[k] < 1) {
+					t.Fatalf("%s run %d: exact response at %v failed or undetermined (η %.3g)", tc.name, run, x, full.eta[k])
 				}
+				_, T := exactEntry(sys, ur, ui, 0, 0)
 				g, err := res.TF.Eval(x)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if d := cmplx.Abs(g[0][0] - w[0]); !(d <= 1e-6*(1+cmplx.Abs(w[0]))) {
-					t.Fatalf("%s run %d: G(%v) = %v, exact %v", tc.name, run, x, g[0][0], w[0])
+				bar := math.Sqrt(eps())*math.Max(cmplx.Abs(w[0]), T) + full.data[k]
+				if d := cmplx.Abs(g[0][0] - w[0]); !(d <= bar) {
+					t.Fatalf("%s run %d: G(%v) = %v, exact %v (off %.3g, within-terms bar %.3g)", tc.name, run, x, g[0][0], w[0], d, bar)
 				}
 			}
 		}
