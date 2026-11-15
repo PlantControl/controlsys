@@ -1743,7 +1743,8 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 }
 
 // plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
-// crossover came from a pole fallback: G has no gain crossover and a
+// crossover came from a pole fallback: G has no usable gain crossover,
+// none above pidtuneMinCrossover, and a
 // finite DC gain that is 0 (a zero at the integrator, whose rounded DC gain
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
 // bandwidth, as for a high-pass plant with |G| < 1, both taking half the
@@ -1761,13 +1762,37 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	return wc, src != pidtuneCrossGain, err
 }
 
+// pidtuneMinCrossover is the lowest usable gain crossover of plant: a
+// design crossing at or below it cannot pass pidTuningPolesStable's exact
+// |z| < 1 − poleStabilityTolerance(1) test, and inside the dc rounding disk
+// (dcRoundingDisk) the poles do not resolve. It is the larger of that
+// disk's edge, as a frequency, and poleStabilityTolerance(1)/Dt, or the
+// tolerance itself for a continuous plant (A2OX65 Pidtune ruling, layer 1).
+func pidtuneMinCrossover(plant *System) float64 {
+	tol := poleStabilityTolerance(1)
+	edge := 0.0
+	if r, ok := dcRoundingDisk(plant); ok {
+		edge = r
+		if plant.Dt > 0 {
+			edge = 2 * math.Asin(min(r/2, 1)) / plant.Dt
+		}
+	}
+	if plant.Dt > 0 {
+		tol /= plant.Dt
+	}
+	return max(edge, tol)
+}
+
 func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
 		return 0, pidtuneCrossGain, err
 	}
-	if len(all.GainCrossFreqs) > 0 {
-		return all.GainCrossFreqs[0], pidtuneCrossGain, nil
+	wcMin := pidtuneMinCrossover(plant)
+	for _, w := range all.GainCrossFreqs {
+		if w > wcMin {
+			return w, pidtuneCrossGain, nil
+		}
 	}
 	dc, err := plant.integratingDCGain()
 	if err == nil && (math.IsInf(dc.At(0, 0), 0) || dc.At(0, 0) == 0 && pidtuneRoundedIntegrator(plant)) {

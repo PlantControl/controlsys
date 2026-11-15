@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -239,7 +240,7 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		}
 		p := pidtuneBackoffPlant(t, num, den, dt, 0)
 		am, err := AllMargin(p)
-		if err != nil || len(am.GainCrossFreqs) > 0 {
+		if err != nil || slices.ContainsFunc(am.GainCrossFreqs, func(w float64) bool { return w > pidtuneMinCrossover(p) }) {
 			continue
 		}
 		poles, err := p.Poles()
