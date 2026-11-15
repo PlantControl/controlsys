@@ -147,11 +147,14 @@ func paddedDoverGrid(t *testing.T, n int) *System {
 // that no exactly zero block drops it (structuralCore), no exact response
 // certifies a bracket end of the scan below the pencil crossing, so
 // AllMargin is ErrAccuracyUnverified (plain rejection out of the exact
-// scope, OXOAL6 ruling 2; n moved from 17 to 25 by CISC3B ruling 4). Main returned the noise-bracketed
+// scope, OXOAL6 ruling 2; n moved from 17 to 25 by CISC3B ruling 4, and
+// 65 added). Main returned the noise-bracketed
 // [1.0691800428606525e-12 0.0060107292292177926] with nil at order 17.
 func TestAllMarginGainCrossBelowScanOutOfExactScope(t *testing.T) {
-	if res, err := AllMargin(mixPadding(t, paddedDoverGrid(t, 25), 3)); !errors.Is(err, ErrAccuracyUnverified) {
-		t.Fatalf("AllMargin = %v, %v; want ErrAccuracyUnverified", res, err)
+	for _, n := range []int{25, 65} {
+		if res, err := AllMargin(mixPadding(t, paddedDoverGrid(t, n), 3)); !errors.Is(err, ErrAccuracyUnverified) {
+			t.Fatalf("n=%d: AllMargin = %v, %v; want ErrAccuracyUnverified", n, res, err)
+		}
 	}
 }
 
