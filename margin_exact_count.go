@@ -710,6 +710,11 @@ func (r *rationalLoop) reconcileExact(ws []float64, wTop float64) ([]float64, bo
 		}
 	}
 	chained = chained && side == p[len(p)-1].Sign()
+	if r.firstCrossing && len(ws) > 0 && ws[0] < wTop {
+		if lo, hi := ws[0]*(1-1e-9), ws[0]*(1+1e-9); cc.firstIsolated(p, lo, hi) {
+			return ws, true
+		}
+	}
 	if shown == inside && chained && shown+2 > len(p)-1 {
 		return ws, true
 	}
@@ -989,4 +994,13 @@ func squarefreeModPrime(p ipoly) bool {
 		a, b = b, a
 	}
 	return len(a) == 1
+}
+
+// firstIsolated reports whether Descartes' rule proves p root-free on
+// (0, lo) and with one root in (lo, hi): the first crossing, the one
+// Bandwidth's search (firstCrossing) takes, is then the bracketed one.
+func (cc *crossingCounter) firstIsolated(p ipoly, lo, hi float64) bool {
+	ln, lq := cc.point(lo)
+	hn, hq := cc.point(hi)
+	return descartesIn(p, new(big.Int), 0, ln, lq) == 0 && descartesIn(p, ln, lq, hn, hq) == 1
 }
