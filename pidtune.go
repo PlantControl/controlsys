@@ -1825,7 +1825,7 @@ func pidtuneMinCrossover(plant *System) float64 {
 
 // pidtuneDCLevelCrossover is, for a plant whose certified DC gain lies
 // within its own rounding bound β of 0 dB (solveDCRegular's certificate:
-// ε·(|D| + Σ|C||X|) + ½ulp), the lowest ω where |G| leaves the band
+// its τ = ε·(|D| + Σ|C||X|) as formed there, plus ½ulp), the lowest ω where |G| leaves the band
 // |G(0)| ± β: the gain crossings of the levels |G(0)| ± β, from the gain
 // search itself. Below it |G| stays within rounding of the level, so a 0 dB
 // crossing there is one of the stored data's rounding (0.1/(z−0.9): |G(1)| =
@@ -1841,13 +1841,11 @@ func pidtuneDCLevelCrossover(plant *System) float64 {
 	if !r.certified || r.overflow || r.solveErr != nil || r.g == nil {
 		return 0
 	}
-	g0 := math.Abs(r.g.At(0, 0))
-	terms := math.Abs(plant.D.At(0, 0))
-	cr := plant.C.RawMatrix()
-	for l := range n {
-		terms += math.Abs(cr.Data[l]) * math.Abs(r.x[l].hi+r.x[l].lo)
+	if len(r.tau) == 0 {
+		return 0
 	}
-	beta := eps()*terms*(1+4*eps()) + 0.5*(math.Nextafter(g0, math.Inf(1))-g0)
+	g0 := math.Abs(r.g.At(0, 0))
+	beta := r.tau[0] + 0.5*(math.Nextafter(g0, math.Inf(1))-g0)
 	if !(math.Abs(g0-1) <= beta) || !(g0 > beta) {
 		return 0
 	}

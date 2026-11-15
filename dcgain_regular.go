@@ -28,6 +28,9 @@ type dcRegularSolve struct {
 	// ε·(|D_ij| + Σ_l |C_il||X_lj|) + ½ulp of the exact gain, and that an
 	// entry of 0 is exact: its error bound is 0.
 	certified bool
+	// tau is, where certified, that bound's ε·(…) term for each entry of g,
+	// row-major p×m, as the certificate formed it; ½ulp of g is on top.
+	tau []float64
 	// steps counts the refinement steps taken; stalled reports that the
 	// residual stopped halving; unbound that β ≥ 1, a non-finite bound or a
 	// product below dcProductFloor left no bound.
@@ -332,6 +335,10 @@ func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegular
 				}
 				gr.Data[i*gr.Stride+j] = gs + gc
 				tau := 0x1p-52 * t
+				if res.tau == nil {
+					res.tau = make([]float64, p*m)
+				}
+				res.tau[i*m+j] = tau
 				e := (cnorm[i]*eta[j] + resGamma*gabs) * eFactor
 				ok := e <= tau && !math.IsInf(tau, 0) && (tau == 0 || tau >= 0x1p-1022)
 				if e == 0 && cnorm[i] != 0 && eta[j] != 0 {
