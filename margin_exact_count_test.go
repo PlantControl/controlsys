@@ -27,7 +27,7 @@ func TestCrossingCounterFirstOrderLoop(t *testing.T) {
 		if c.dt > 0 {
 			top = math.Pi / c.dt
 		}
-		ws, ok := cc.crossings(top)
+		ws, ok := cc.crossings(top, false)
 		if !ok || len(ws) != len(c.want) {
 			t.Fatalf("%s: crossings = %v, %v; want %v", c.name, ws, ok, c.want)
 		}

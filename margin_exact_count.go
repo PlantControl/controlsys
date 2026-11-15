@@ -577,8 +577,9 @@ func (cc *crossingCounter) oddMultiplicityAt(num *big.Int, q int) bool {
 // crossings are the gain crossings in (0, wTop): the float ω at which the
 // exact sign of P changes from its float predecessor; ok is false where two
 // crossings fall between adjacent float64 ω, a crossing is subnormal, P
-// vanishes identically, or the isolation does not converge.
-func (cc *crossingCounter) crossings(wTop float64) (ws []float64, ok bool) {
+// vanishes identically, or the isolation does not converge. With first set
+// it refines only the lowest crossing.
+func (cc *crossingCounter) crossings(wTop float64, first bool) (ws []float64, ok bool) {
 	P := cc.p
 	S := P
 	if dp := ipolyDeriv(P); len(dp) > 0 && !squarefreeModPrime(P) {
@@ -590,7 +591,13 @@ func (cc *crossingCounter) crossings(wTop float64) (ws []float64, ok bool) {
 	if !ok {
 		return nil, false
 	}
+	slices.SortFunc(roots, func(a, b rootInterval) int {
+		return new(big.Rat).SetFrac(a.lo, new(big.Int).Lsh(big.NewInt(1), uint(a.q))).Cmp(new(big.Rat).SetFrac(b.lo, new(big.Int).Lsh(big.NewInt(1), uint(b.q))))
+	})
 	for _, r := range roots {
+		if first && len(ws) > 0 {
+			break
+		}
 		var lo, hi float64
 		if r.exact {
 			if !cc.oddMultiplicityAt(r.lo, r.q) {
@@ -625,10 +632,8 @@ func (cc *crossingCounter) crossings(wTop float64) (ws []float64, ok bool) {
 func (cc *crossingCounter) refine(lo, hi float64) (float64, bool) {
 	hi = min(hi, math.MaxFloat64)
 	if lo < 0x1p-1022 {
-		sh := cc.signAtOmega(hi)
-		for lo = hi / 2; lo >= 0x1p-1022 && cc.signAtOmega(lo) == sh; lo /= 2 {
-		}
-		if lo < 0x1p-1022 {
+		lo = 0x1p-1022
+		if s := cc.signAtOmega(lo); s == 0 || s == cc.signAtOmega(hi) {
 			return 0, false
 		}
 	}
@@ -732,7 +737,7 @@ func (r *rationalLoop) reconcileExact(ws []float64, wTop float64) ([]float64, bo
 	if shown == inside && (signVariations(p) == shown || cc.gapsEmpty(p, ends)) {
 		return ws, true
 	}
-	exact, ok := cc.crossings(wTop)
+	exact, ok := cc.crossings(wTop, r.firstCrossing)
 	if !ok {
 		return nil, false
 	}
