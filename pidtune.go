@@ -1808,6 +1808,8 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 // (dcRoundingDisk) the poles do not resolve. It is the larger of that
 // disk's edge, as a frequency, and poleStabilityTolerance(1)/Dt, or the
 // tolerance itself for a continuous plant (A2OX65 Pidtune ruling, layer 1).
+// plantCrossoverChoice also passes over crossings at or below
+// pidtuneDCLevelCrossover, formed only once a crossing is above this floor.
 func pidtuneMinCrossover(plant *System) float64 {
 	tol := poleStabilityTolerance(1)
 	edge := 0.0
@@ -1820,7 +1822,7 @@ func pidtuneMinCrossover(plant *System) float64 {
 	if plant.Dt > 0 {
 		tol /= plant.Dt
 	}
-	return max(edge, tol, pidtuneDCLevelCrossover(plant))
+	return max(edge, tol)
 }
 
 // pidtuneDCLevelCrossover is, for a plant whose certified DC gain lies
@@ -1889,8 +1891,12 @@ func plantCrossoverChoice(plant *System) (float64, pidtuneCrossover, pidtuneAltC
 		return 0, pidtuneCrossGain, nil, err
 	}
 	wcMin := pidtuneMinCrossover(plant)
+	dcLevel, dcDone := 0.0, false
 	for _, w := range all.GainCrossFreqs {
-		if w > wcMin {
+		if w > wcMin && !dcDone {
+			dcLevel, dcDone = pidtuneDCLevelCrossover(plant), true
+		}
+		if w > wcMin && w > dcLevel {
 			alt := func() (float64, pidtuneCrossover, bool) {
 				poles, err := plant.Poles()
 				if err != nil {

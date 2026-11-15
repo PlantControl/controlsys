@@ -16,8 +16,9 @@ type ipoly []*big.Int
 
 func newIpoly(n int) ipoly {
 	p := make(ipoly, n)
+	slab := make([]big.Int, n)
 	for i := range p {
-		p[i] = new(big.Int)
+		p[i] = &slab[i]
 	}
 	return p
 }
@@ -322,10 +323,21 @@ func floatScale(vs ...[]float64) int {
 	return k
 }
 
+// scaledInt is v·2^k, an integer by floatScale's choice of k.
 func scaledInt(v float64, k int) *big.Int {
-	f := new(big.Float).SetFloat64(v)
-	f.SetMantExp(f, k)
-	z, _ := f.Int(nil)
+	if v == 0 {
+		return new(big.Int)
+	}
+	m, e := math.Frexp(math.Abs(v))
+	z := new(big.Int).SetUint64(uint64(m * (1 << 53)))
+	if sh := e - 53 + k; sh >= 0 {
+		z.Lsh(z, uint(sh))
+	} else {
+		z.Rsh(z, uint(-sh))
+	}
+	if v < 0 {
+		z.Neg(z)
+	}
 	return z
 }
 
@@ -371,24 +383,23 @@ func charpolyLeading(n int, M []*big.Int) (lead, full ipoly) {
 // berkowitzColumn is the first column [1, −a, −R·S, −R·M·S, …] of order
 // r+1 of Berkowitz's Toeplitz factor for the leading (r+1)×(r+1) block.
 func berkowitzColumn(n, r int, M []*big.Int) []*big.Int {
-	out := make([]*big.Int, r+2)
-	out[0] = big.NewInt(1)
-	out[1] = new(big.Int).Neg(M[r*n+r])
+	out := newIpoly(r + 2)
+	out[0].SetInt64(1)
+	out[1].Neg(M[r*n+r])
 	t := new(big.Int)
-	v, nv := make([]*big.Int, r), make([]*big.Int, r)
+	v, nv := newIpoly(r), newIpoly(r)
 	for i := range r {
-		v[i] = new(big.Int).Set(M[i*n+r])
-		nv[i] = new(big.Int)
+		v[i].Set(M[i*n+r])
 	}
 	for k := 2; k <= r+1; k++ {
-		s := new(big.Int)
+		s := out[k]
 		row := M[r*n : r*n+r]
 		for i, m := range row {
 			if m.Sign() != 0 && v[i].Sign() != 0 {
 				s.Add(s, t.Mul(m, v[i]))
 			}
 		}
-		out[k] = s.Neg(s)
+		s.Neg(s)
 		if k == r+1 {
 			break
 		}
