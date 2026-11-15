@@ -123,6 +123,20 @@ func TestIsProperSmallSTermsBesideLargePole(t *testing.T) {
 			}
 			continue
 		}
+		if errors.Is(err, ErrAccuracyUnverified) {
+			// The float reduction fails closed and the exact tier's least-degree
+			// search ends uncertified (real x86 -race: seed 215): IsProper
+			// returns false with ErrAccuracyUnverified, TF the same improper
+			// model with it, and Step, without a certified model, the float
+			// path's fail-closed error.
+			if pr || !errors.Is(terr, ErrAccuracyUnverified) || res == nil || !fzTFImproper(res.TF) {
+				t.Errorf("%s: IsProper %v, %v, TF %v (improper %v): want false and an improper value, both unverified", label, pr, err, terr, res != nil && fzTFImproper(res.TF))
+			}
+			if !errors.Is(serr, ErrImproperModel) && !errors.Is(serr, ErrAccuracyUnverified) && !errors.Is(serr, ErrDescriptorSingular) {
+				t.Errorf("%s: Step: %v, want ErrImproperModel, ErrAccuracyUnverified or ErrDescriptorSingular", label, serr)
+			}
+			continue
+		}
 		if err != nil || pr {
 			t.Fatalf("%s: IsProper = %v, %v; want false", label, pr, err)
 		}
