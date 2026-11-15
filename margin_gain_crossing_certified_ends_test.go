@@ -15,7 +15,9 @@ import (
 // the decade the double read, past noisy bisection ends; dover-pcg/14.1
 // in the band between the disk and the double solve's reach, where the
 // double response is unsolved; dover-grid on a flip the exact response
-// moves down a decade.
+// moves down a decade. dover-pcg/130.1 grazes |L| = 1 near 0.0781, where
+// polish read a pair of crossings 1.4e-13 apart on double rounding; the
+// exact signs there change once (fine 320-bit scan: one crossing).
 func TestAllMarginGainCrossBelowScanCertifiedEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -43,6 +45,11 @@ func TestAllMarginGainCrossBelowScanCertifiedEnds(t *testing.T) {
 			[]float64{1, 0, 0},
 			[]float64{5, 0, 1},
 			[]float64{3.7007434156454433e-13, 0.0060107292303075814}},
+		{"dover-pcg/130.1", 0.1,
+			[]float64{1, 0, 0, 29.50531391380034, 0, -0.20485999316463663, -40.260758743346351, 1, 0.91501103577792753},
+			[]float64{1, 0, 0},
+			[]float64{37.107067510325287, 0, 1},
+			[]float64{1.8321125898066527e-14, 0.078119751347199576}},
 		{"series1/232.1", 0,
 			[]float64{-0, 0, -203.40831141013936, -14.532107196753987},
 			[]float64{1, 0},

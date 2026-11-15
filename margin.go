@@ -1050,6 +1050,9 @@ type rationalLoop struct {
 	// crossing from DC, so endCrossings may skip unresolved responses
 	// above the dc rounding disk to reach one inside it (diskScan).
 	firstCrossing bool
+	// pairExact is the gain search's exactGainLog, for polish's pair of
+	// crossings (exactPair).
+	pairExact func(float64) (float64, bool)
 	// dcGain caches certifiedDC.
 	dcGain       float64
 	dcDone, dcOK bool
@@ -1321,7 +1324,8 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	lg := math.Log(gamma)
 	f := r.gainLog(lg)
 	r.eval.extended = true
-	defer func() { r.eval.extended = false }()
+	r.pairExact = r.exactGainLog(lg)
+	defer func() { r.eval.extended, r.pairExact = false, nil }()
 	out := r.polish(cands, f, 1e-9, false)
 	r.gainRejected = len(out) < len(cands)
 	if len(out) < len(cands) || len(cands) == 0 {
@@ -2427,8 +2431,12 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 					break
 				}
 				if fa*fw < 0 {
-					best, bracketed = refineCrossing(a, w, ft), true
-					pair = refineCrossing(w, b, ft)
+					if c, p, cut, ok := r.exactPair(a, w, b); ok {
+						best, bracketed, pair = c, cut, p
+					} else {
+						best, bracketed = refineCrossing(a, w, ft), true
+						pair = refineCrossing(w, b, ft)
+					}
 					break
 				}
 				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)
@@ -2471,6 +2479,41 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		return nil
 	}
 	return out
+}
+
+// exactPair resolves the pair of crossings polish reads beside a gain
+// candidate w, f at a and b on one side of the level and at w on the
+// other, on the stored model's exact responses (pairExact): the double
+// readings differ there by rounding as |L| grazes the level, and a pair on
+// them may be a single crossing (OXOAL6). It returns both crossings where
+// the exact signs confirm the pair, the one crossing in [a, b] where they
+// change once, and w unbracketed (cut false) where they do not change;
+// ok is false outside the exact scope or where the exact solve fails.
+func (r *rationalLoop) exactPair(a, w, b float64) (c, p float64, cut, ok bool) {
+	if r.pairExact == nil {
+		return 0, 0, false, false
+	}
+	cs := &crossingScan{tol: 1e-9, exact: r.pairExact}
+	sgn := func(x float64) (int, bool) {
+		v, ok := r.pairExact(x)
+		return cs.sgn(v), ok
+	}
+	sa, okA := sgn(a)
+	sw, okW := sgn(w)
+	sb, okB := sgn(b)
+	if !okA || !okW || !okB {
+		return 0, 0, false, false
+	}
+	switch {
+	case sa*sw < 0 && sw*sb < 0:
+		c, okC := cs.exactFind(a, w)
+		p, okP := cs.exactFind(w, b)
+		return c, p, true, okC && okP
+	case sa*sb < 0:
+		c, okC := cs.exactFind(a, b)
+		return c, math.NaN(), true, okC
+	}
+	return w, math.NaN(), false, true
 }
 
 // wideBracket looks for a phase crossing of a pencil root w, off it by more
