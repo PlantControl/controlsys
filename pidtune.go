@@ -1820,7 +1820,52 @@ func pidtuneMinCrossover(plant *System) float64 {
 	if plant.Dt > 0 {
 		tol /= plant.Dt
 	}
-	return max(edge, tol)
+	return max(edge, tol, pidtuneDCLevelCrossover(plant))
+}
+
+// pidtuneDCLevelCrossover is, for a plant whose certified DC gain lies
+// within its own rounding bound β of 0 dB (solveDCRegular's certificate:
+// ε·(|D| + Σ|C||X|) + ½ulp), the lowest ω where |G| leaves the band
+// |G(0)| ± β: the gain crossings of the levels |G(0)| ± β, from the gain
+// search itself. Below it |G| stays within rounding of the level, so a 0 dB
+// crossing there is one of the stored data's rounding (0.1/(z−0.9): |G(1)| =
+// 1 + 2.8e-16 crosses at 2.5e-8). +Inf where |G| never leaves the band; 0
+// where DC is not at the level within terms, not certified, or the band's
+// crossings are not resolved (CISC3B, LI4CO5).
+func pidtuneDCLevelCrossover(plant *System) float64 {
+	n, m, p := plant.Dims()
+	if n == 0 || m != 1 || p != 1 || plant.internalDelayCount() > 0 || newDescriptorPolicy(plant).isDescriptor() {
+		return 0
+	}
+	r := solveDCRegular(nil, plant.A, plant.B, plant.C, plant.D, real(dcPoint(plant)), true)
+	if !r.certified || r.overflow || r.solveErr != nil || r.g == nil {
+		return 0
+	}
+	g0 := math.Abs(r.g.At(0, 0))
+	terms := math.Abs(plant.D.At(0, 0))
+	cr := plant.C.RawMatrix()
+	for l := range n {
+		terms += math.Abs(cr.Data[l]) * math.Abs(r.x[l].hi+r.x[l].lo)
+	}
+	beta := eps()*terms*(1+4*eps()) + 0.5*(math.Nextafter(g0, math.Inf(1))-g0)
+	if !(math.Abs(g0-1) <= beta) || !(g0 > beta) {
+		return 0
+	}
+	loop, err := newRationalLoop(plant)
+	if err != nil {
+		return 0
+	}
+	wc := math.Inf(1)
+	for _, level := range []float64{math.Nextafter(g0+beta, math.Inf(1)), math.Nextafter(g0-beta, 0)} {
+		ws, err := loop.gainCrossings(level)
+		if err != nil {
+			return 0
+		}
+		if len(ws) > 0 {
+			wc = min(wc, ws[0])
+		}
+	}
+	return wc
 }
 
 func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {

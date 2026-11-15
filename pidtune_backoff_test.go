@@ -911,3 +911,24 @@ func pidtuneExactSchurStableLag(t *testing.T, pid *PID, num, den Poly, dt, rho f
 	}
 	return true
 }
+
+// A certified DC gain within its own rounding bound of 0 dB (0.1/(z−0.9):
+// |G(1)| = 1 + 2.8e-16 in stored doubles) moves the lowest usable crossover
+// above the band where |G| stays within that bound, past the stored data's
+// 0 dB crossing at 2.48e-8 (CISC3B, LI4CO5). A DC gain away from 0 dB adds
+// nothing.
+func TestPidtuneMinCrossoverDCAtLevelWithinTerms(t *testing.T) {
+	tf := func(num, den []float64) *System {
+		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: 0.1}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Sys
+	}
+	if w := pidtuneDCLevelCrossover(tf([]float64{0.1}, []float64{1, -0.9})); !(w > 2.4835268656412758e-08 && w < 1e-6) {
+		t.Errorf("0.1/(z−0.9): DC-level crossover %g, want just above 2.48e-8", w)
+	}
+	if w := pidtuneDCLevelCrossover(tf([]float64{2}, []float64{1, -0.5})); w != 0 {
+		t.Errorf("2/(z−0.5): DC-level crossover %g, want 0", w)
+	}
+}
