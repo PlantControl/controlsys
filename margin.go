@@ -128,6 +128,9 @@ type sisoEval struct {
 	// double-double response; neither is a bracket end of the gain
 	// search unless solved (A2OX65).
 	limited, exactHit bool
+	// diskExact records that at's last value is exactResponseAt's, off DC
+	// within the dc rounding disk, where the plain double solve fails.
+	diskExact bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -151,7 +154,7 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
-	e.atPole, e.limited, e.exactHit = false, false, false
+	e.atPole, e.limited, e.exactHit, e.diskExact = false, false, false, false
 	ps, inDisk := e.diskScope(pt)
 	if inDisk && e.exact {
 		g, _, ok := exactResponseAt(ps, pt)
@@ -159,6 +162,7 @@ func (e *sisoEval) at(w float64) complex128 {
 			return e.fail(w, errPoleLimitDisk)
 		}
 		e.dst[0] = g[0]
+		e.diskExact = true
 	} else if h, ok := e.exactAt(pt); ok {
 		e.dst[0] = h
 		e.exactHit = true
@@ -172,6 +176,9 @@ func (e *sisoEval) at(w float64) complex128 {
 			return e.fail(w, err)
 		}
 		e.dst[0] = h
+	}
+	if e.limited && diskResponseResolved(e.sys, pt.value()) {
+		e.diskExact = true
 	}
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)

@@ -45,3 +45,34 @@ func TestTunePIDBackOffScansPastBlindGates(t *testing.T) {
 		}
 	}
 }
+
+// A2OX65: (z−0.99)/((z−1)³(z−0.72)) as stored, the canonical realization
+// makeDiscretePlant gives. Samples beside the rounded triple pole that the
+// plain double solve cannot resolve now come from the stored model's
+// exact response inside the dc rounding disk; they still mark the search
+// blind (sisoEval.diskExact), so the back-off scans the depths between its
+// probes and keeps the design at crossover 16.58·2^(-2) = 4.146 rad/s.
+// Without that the back-off stopped at its probes and TunePID returned
+// ErrPIDTuningTargetUnattainable on amd64. Oracle: exact Schur–Cohn of the
+// closed loop, margin and |S| of the loop from the coefficients.
+func TestTunePIDBackOffExactInDiskSampleBlind(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
+	num := []float64{0.05561793864532625, -0.055150540391457045}
+	den := []float64{1, -3.7172691807634135, 5.151807542290241, -3.1518075422902405, 0.7172691807634135}
+	dt := 0.022067595844186595
+	sys, err := NewFromSlices(4, 1, 1,
+		[]float64{0, 0, 0, -0.7172691807634135, 1, 0, 0, 3.1518075422902405, 0, 1, 0, -5.151807542290241, 0, 0, 1, 3.7172691807634135},
+		[]float64{-0.055150540391457045, 0.05561793864532625, 0, 0}, []float64{0, 0, 0, 1}, []float64{0}, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), sys, PidtunePIDF, PIDTuningOptions{})
+	if !pidCheckZPoleResult(t, "triple pole PIDF", num, den, dt, r, err) {
+		t.Fatalf("no design: %v", err)
+	}
+	pidCheckUndelayedMarginAndS(t, "triple pole PIDF", num, den, dt, r)
+	if !slices.ContainsFunc(r.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "lowered to 4.146") }) {
+		t.Errorf("no back-off to 4.146 rad/s in %q", r.Evidence.Warnings)
+	}
+}
