@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 )
@@ -620,7 +621,7 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 		}
 		p := pidtuneBackoffPlant(t, num, den, dt, 0)
 		am, err := AllMargin(p)
-		if err != nil || len(am.GainCrossFreqs) > 0 {
+		if err != nil || slices.ContainsFunc(am.GainCrossFreqs, func(w float64) bool { return w > pidtuneMinCrossover(p) }) {
 			continue
 		}
 		kept++

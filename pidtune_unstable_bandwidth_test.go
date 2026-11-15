@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -239,7 +240,7 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		}
 		p := pidtuneBackoffPlant(t, num, den, dt, 0)
 		am, err := AllMargin(p)
-		if err != nil || len(am.GainCrossFreqs) > 0 {
+		if err != nil || slices.ContainsFunc(am.GainCrossFreqs, func(w float64) bool { return w > pidtuneMinCrossover(p) }) {
 			continue
 		}
 		poles, err := p.Poles()
@@ -415,5 +416,28 @@ func TestPidtuneRolloffDelayKeepsBandwidth(t *testing.T) {
 	}
 	if rolloff < 20 {
 		t.Fatalf("sweep kept %d rolloff plants", rolloff)
+	}
+}
+
+// Pidtune's alternate crossover (A2OX65 ruling (c)): a displaced
+// integrator 1e-15 below z = 1 whose AllMargin crossing 1.249e-9 rad/s
+// lies above pidtuneMinCrossover, where the PI, PID and PIDF designs give
+// unstable closed loops. The selection's alternate, the ½·slowest-pole
+// fallback 0.1987 rad/s, has designs that pass the same checks, so Pidtune
+// returns them, as before the gain crossing was resolved (sweep plant
+// dd0472, amd64 generation). Oracle: exact Schur–Cohn of the closed loop.
+func TestPidtuneAlternateCrossoverDisplacedIntegrator(t *testing.T) {
+	num := Poly{4.487968497711598e-16}
+	den := Poly{1, -5.4760546862420005, 12.558088121781791, -15.528701070525319, 11.063947095302435, -4.459408034277239, 0.9076768549507704, -0.06555496861936155, 6.687628922587585e-06}
+	p := pidtuneBackoffPlant(t, num, den, 0.1, 0)
+	for _, f := range []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF} {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", f, err)
+			continue
+		}
+		if !pidtuneExactSchur(pid, num, den, 0.1) {
+			t.Errorf("%s: %+v unstable", f, pid)
+		}
 	}
 }

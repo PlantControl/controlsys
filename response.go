@@ -428,6 +428,10 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // limit; and where a pole within rounding of DC reads as
 // an integrator, the Inf MATLAB returns, the float model's exact limit
 // being finite. Reduce removes cancelling modes for a certified gain.
+// FreqResponse at DC agrees with a certified gain: for an explicit
+// delay-free model of order up to 16 whose poles within rounding of DC no
+// sample tells from it, it is Inf only where I − A (A) is exactly singular,
+// and the exact gain where it is exactly nonsingular.
 // A delay-free descriptor model whose pencil x0·E − A is singular to
 // working precision takes the exact solve of the pencil for models of
 // order up to 16, after the bound on the balanced pencil, merged as above

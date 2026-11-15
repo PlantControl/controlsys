@@ -1172,7 +1172,10 @@ func tunePIDSystem(ctx context.Context, plant *System, family PidtuneType, opts 
 	// finite, as beside rounded multiple poles at z = 1 or s = 0 where it
 	// resolves the response over decades eval cannot; only a sample neither
 	// resolves fails eval. fellBack records a fallback sample: a search
-	// failing with one tells nothing of its depth, which stays blind.
+	// failing with one tells nothing of its depth, which stays blind. So
+	// does a sample eval takes from the stored model's exact response
+	// inside the dc rounding disk (sisoEval.diskExact), where its plain
+	// double solve fails as before (A2OX65 recorded scope departure).
 	pp := &pidtunePlantPoint{}
 	fellBack := false
 	resp := func(w float64) complex128 {
@@ -1183,6 +1186,8 @@ func tunePIDSystem(ctx context.Context, plant *System, family PidtuneType, opts 
 			if h, err := pp.at(plant, w); err == nil && pidFiniteComplex(h) {
 				g, eval.err, fellBack = h, nil, true
 			}
+		} else if eval.diskExact {
+			fellBack = true
 		}
 		if saved != nil {
 			eval.err = saved

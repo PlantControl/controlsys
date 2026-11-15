@@ -120,6 +120,17 @@ type sisoEval struct {
 	// atPole records that at's last evaluation found the double-double
 	// response at a pole (ddGate.atPole), which resolve need not repeat.
 	atPole bool
+	// disk caches the dc rounding disk of sys for the snap gate and the
+	// gain search (dcRoundingDisk).
+	disk dcDiskCache
+	// limited records that at's last value is a pole limit (or snap)
+	// rather than a solved response, and exactHit that it is exactAt's
+	// double-double response; neither is a bracket end of the gain
+	// search unless solved (A2OX65).
+	limited, exactHit bool
+	// diskExact records that at's last value is exactResponseAt's, off DC
+	// within the dc rounding disk, where the plain double solve fails.
+	diskExact bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -143,12 +154,21 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
-	e.atPole = false
-	if h, ok := e.exactAt(pt); ok {
+	e.atPole, e.limited, e.exactHit, e.diskExact = false, false, false, false
+	ps, inDisk := e.diskScope(pt)
+	if inDisk && e.exact {
+		g, _, ok := exactResponseAt(ps, pt)
+		if !ok {
+			return e.fail(w, errPoleLimitDisk)
+		}
+		e.dst[0] = g[0]
+		e.diskExact = true
+	} else if h, ok := e.exactAt(pt); ok {
 		e.dst[0] = h
-	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w, atPole: &e.atPole}); err != nil {
+		e.exactHit = true
+	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w, atPole: &e.atPole, disk: &e.disk, limited: &e.limited}); err != nil {
 		h, ok := complex(0, 0), false
-		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) && !errors.Is(err, errPoleUnresolved) {
+		if !inDisk && e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) && !errors.Is(err, errPoleUnresolved) {
 			h, ok = ddSISOResponse(e.sys, pt)
 			e.ddSolves++
 		}
@@ -156,6 +176,9 @@ func (e *sisoEval) at(w float64) complex128 {
 			return e.fail(w, err)
 		}
 		e.dst[0] = h
+	}
+	if e.limited && diskResponseResolved(e.sys, pt.value()) {
+		e.diskExact = true
 	}
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
@@ -199,7 +222,18 @@ func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, g, 1, 1, e.delay)
 	}
+	e.limited, e.exactHit = false, false
 	return g[0], true
+}
+
+// diskScope reports whether pt lies off DC within the dc rounding disk of
+// e.sys in exactResponseAt's scope (inExactDiskScope), where at takes the
+// exact response in place of exactAt's and ddSISOResponse's.
+func (e *sisoEval) diskScope(pt frequencyPoint) (*poleSchurData, bool) {
+	if e.sys.internalDelayCount() > 0 || !e.disk.inside(e.sys, pt.value()) {
+		return nil, false
+	}
+	return inExactDiskScope(e.sys, pt.value())
 }
 
 func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
@@ -754,6 +788,10 @@ func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error)
 		return 0, err
 	}
 	if err == nil {
+		loop.firstCrossing = true
+		if certified && loop.eval.sys == sys && !newDescriptorPolicy(sys).isDescriptor() {
+			loop.dcGain, loop.dcDone, loop.dcOK = dcMag, true, true
+		}
 		gamma := math.Pow(10, threshold/20)
 		if bw, err, ok := loop.coarsePencilBandwidth(dc, dbDrop, certified); ok {
 			return bw, err
@@ -1008,6 +1046,13 @@ type rationalLoop struct {
 	// gainRejected records that the last gainCrossings rejected a pencil
 	// root in polish, for Bandwidth's scan below its first crossing.
 	gainRejected bool
+	// firstCrossing marks Bandwidth's search, which reports only the first
+	// crossing from DC, so endCrossings may skip unresolved responses
+	// above the dc rounding disk to reach one inside it (diskScan).
+	firstCrossing bool
+	// dcGain caches certifiedDC.
+	dcGain       float64
+	dcDone, dcOK bool
 }
 
 type resonancePoleSet struct{ pairs, reals, cluster []float64 }
@@ -1274,15 +1319,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 		return nil, err
 	}
 	lg := math.Log(gamma)
-	f := func(w float64) float64 {
-		h := r.eval.at(w)
-		if cmplx.IsInf(h) && r.offDCPole(w) {
-			if g, ok := r.eval.resolve(w); ok {
-				h = g
-			}
-		}
-		return math.Log(cmplx.Abs(h)) - lg
-	}
+	f := r.gainLog(lg)
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
 	out := r.polish(cands, f, 1e-9, false)
@@ -1295,10 +1332,47 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 			r.eval.extended, r.eval.exact = true, exact
 		}
 	}
-	return r.endCrossings(out, f, 1e-9), nil
+	return r.endCrossings(out, lg, 1e-9)
 }
 
-// endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
+// gainLog is log|L(ω)| − lg, taking the resolved response at a snapped pole
+// off DC. It is NaN, no bracket end, where L(ω) is not a solved response
+// (A2OX65): a pole limit or snap, also where resolve keeps it, or exactAt's
+// double-double response within the dc rounding disk (dcRoundingDisk) that
+// ddAtPole places at a pole. Off DC within the disk in exactResponseAt's
+// scope the response is exactly solved (diskResponseResolved), a plain
+// end (Q1 ruling (c)).
+func (r *rationalLoop) gainLog(lg float64) func(float64) float64 {
+	return func(w float64) float64 {
+		h := r.eval.at(w)
+		limited, exact := r.eval.limited, r.eval.exactHit
+		if cmplx.IsInf(h) && r.offDCPole(w) {
+			if g, ok := r.eval.resolve(w); ok {
+				h, limited, exact = g, r.eval.limited, r.eval.exactHit
+			}
+		}
+		if limited && diskResponseResolved(r.eval.sys, r.eval.td.frequencyPoint(w).value()) {
+			limited, exact = false, false
+		}
+		if limited || exact && r.exactVetoed(w, h) {
+			return math.NaN()
+		}
+		return math.Log(cmplx.Abs(h)) - lg
+	}
+}
+
+// exactVetoed reports whether exactAt's response h at ω lies within the dc
+// rounding disk and ddAtPole places a pole there.
+func (r *rationalLoop) exactVetoed(w float64, h complex128) bool {
+	s := r.eval.td.frequencyPoint(w).value()
+	if !r.eval.disk.inside(r.eval.sys, s) {
+		return false
+	}
+	sp, err := poleSpacing(r.eval.sys, s)
+	return err != nil || ddAtPole(r.eval.sys, s, sp, []complex128{h})
+}
+
+// endCrossings adds a crossing of f = log|L| − lg that the pencil missed
 // below the first crossing ws[0], or above the last: |L| → ∞ at a pole, and
 // else |L| at ω = 0, at Nyquist or, continuous, at highFrequency, fixes the
 // sign of f there, and a differing sign next to the outer crossing brackets
@@ -1311,68 +1385,39 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 // bracket is a crossing. Next to the cluster the response carries relative
 // rounding of order eps/θⁿ, so a root is accepted on its bisected finite
 // sign bracket rather than on |f| at the root; a bracket closing on an
-// unevaluable ω is rejected.
-func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
-	ft := func(w float64) float64 {
-		v, ok := tryEval(r.eval, func() float64 { return f(w) })
-		if !ok {
-			return math.NaN()
-		}
-		return v
-	}
-	sgn := func(v float64) int {
-		if math.IsNaN(v) || math.Abs(v) <= tol {
-			return 0
-		}
-		if v > 0 {
-			return 1
-		}
-		return -1
-	}
+// unevaluable ω is rejected. A crossing below DC's bracket that the scan
+// does not reach before its floor is searched on the frequency-scaled loop
+// (belowFloorCrossing). Bracket ends are solved responses (gainLog) or the
+// DC gain DCGain certifies (certifiedDC), a certified 0 included; where DC
+// is such an end and the scan below pLo does not close on one, the
+// crossing exists but is unresolved, ErrAccuracyUnverified (A2OX65). So is
+// it where DC reads only as a snapped pole: that is no end, and no
+// crossing below pLo is then claimed either way. Discrete, a crossing between fl(π)/Dt and
+// the exact Nyquist frequency is nyquistGapCrossing's.
+func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, error) {
+	cs := crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol, split: r.diskSplit, resolved: r.diskResolved(lg)}
+	dcEnd, dcSnap := false, false
 	endSign := func(w float64) int {
 		h, ok := r.eval.try(w)
-		if !ok || cmplx.IsInf(h) {
-			return 1
-		}
-		return sgn(f(w))
-	}
-	find := func(a, b float64) (float64, bool) {
-		fa, fb := ft(a), ft(b)
-		for range 64 {
-			m := geoMean(a, b)
-			if m <= a || m >= b {
-				break
+		if w == 0 {
+			if v := cs.ft(0); ok && !math.IsNaN(v) && cs.sgn(v) != 0 {
+				dcEnd = true
+				return cs.sgn(v)
 			}
-			if fm := ft(m); fa*fm <= 0 {
-				b, fb = m, fm
-			} else {
-				a, fa = m, fm
-			}
-		}
-		finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
-		return geoMean(a, b), finite && fa*fb <= 0
-	}
-	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
-		step := 10.0
-		for range 2000 {
-			tn := t / step
-			w, wn := at(t), at(tn)
-			if tn < 1e-300 || wn == w {
-				break
-			}
-			switch v := ft(wn); {
-			case sgn(v) == want:
-				return find(min(w, wn), max(w, wn))
-			case !math.IsNaN(v):
-				t = tn
-			default:
-				if step = math.Sqrt(step); step < 1+1e-9 {
-					return 0, false
+			if v, certified := r.certifiedDC(); certified {
+				if sg := cs.sgn(math.Log(v) - lg); sg != 0 {
+					dcEnd = true
+					return sg
 				}
 			}
 		}
-		return 0, false
+		if !ok || cmplx.IsInf(h) {
+			dcSnap = dcSnap || w == 0
+			return 1
+		}
+		return cs.sgn(cs.f(w))
 	}
+	ident := func(t float64) float64 { return t }
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
@@ -1385,27 +1430,309 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
 	}
 	if !math.IsInf(pLo, 0) {
-		if s0, s := endSign(0), sgn(ft(pLo)); s0 != 0 && s != 0 && s != s0 {
-			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
+		if s0, s := endSign(0), cs.sgn(cs.ft(pLo)); s0 != 0 && s != 0 && s != s0 {
+			c, ok, floor := cs.scan(pLo, ident, s0)
+			if !ok && floor == 0 && r.firstCrossing {
+				c, ok = r.diskScan(cs, s0, s)
+			}
+			if !ok && floor > 0 {
+				var err error
+				if c, err = r.belowFloorCrossing(floor, s0, lg, tol); err != nil {
+					return nil, err
+				}
+				ok = true
+			}
+			if !ok && (dcEnd || dcSnap) {
+				return nil, fmt.Errorf("gain crossing below ω=%g does not close on an evaluable frequency: %w", pLo, ErrAccuracyUnverified)
+			}
+			if ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
 				ws = append([]float64{c}, ws...)
 			}
 		}
 	}
 	if r.discrete() && pHi < wTop {
-		if sTop, s := endSign(wTop), sgn(ft(pHi)); sTop != 0 && s != 0 && s != sTop {
-			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
+		sTop, s := endSign(wTop), cs.sgn(cs.ft(pHi))
+		switch {
+		case sTop != 0 && s != 0 && s != sTop:
+			if c, ok, _ := cs.scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
+				ws = append(ws, c)
+			}
+		case s != 0 && sTop == s:
+			c, err := r.nyquistGapCrossing(s, lg, tol)
+			if err != nil {
+				return nil, err
+			}
+			if c > 0 && (len(ws) == 0 || c > ws[len(ws)-1]) {
 				ws = append(ws, c)
 			}
 		}
 	}
 	if wInf := r.highFrequency(); !r.discrete() && len(ws) > 0 && pHi < wInf {
-		if sInf, s := sgn(ft(wInf)), sgn(ft(pHi)); sInf != 0 && s != 0 && s != sInf {
-			if c, ok := scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
+		if sInf, s := cs.sgn(cs.ft(wInf)), cs.sgn(cs.ft(pHi)); sInf != 0 && s != 0 && s != sInf {
+			if c, ok, _ := cs.scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
 				ws = append(ws, c)
 			}
 		}
 	}
-	return ws
+	return ws, nil
+}
+
+// diskSplit reports whether exactly one of ω = a, b lies in
+// exactResponseAt's scope (diskResponseResolved).
+func (r *rationalLoop) diskSplit(a, b float64) bool {
+	in := func(w float64) bool {
+		return diskResponseResolved(r.eval.sys, r.eval.td.frequencyPoint(w).value())
+	}
+	return in(a) != in(b)
+}
+
+// diskResolved reports whether f = log|L| − lg read v at ω: in
+// exactResponseAt's scope, where v is exact, always; outside it where the
+// stored model's exact response there gives f the same sign as v, zero
+// included.
+func (r *rationalLoop) diskResolved(lg float64) func(w, v float64) bool {
+	return func(w, v float64) bool {
+		pt := r.eval.td.frequencyPoint(w)
+		if diskResponseResolved(r.eval.sys, pt.value()) {
+			return true
+		}
+		ps, ok := cachedPoleSchur(r.eval.sys)
+		if !ok || ps.n > exactDetMaxOrder || math.IsNaN(v) {
+			return false
+		}
+		g, _, ok := exactResponseAt(ps, pt)
+		if !ok {
+			return false
+		}
+		fe := math.Log(cmplx.Abs(g[0])) - lg
+		return (fe > 0) == (v > 0) && (fe < 0) == (v < 0)
+	}
+}
+
+// diskScan is the scan of endCrossings restarted at the edge of the dc
+// rounding disk, where the scan from above stopped on unsolved responses
+// between the disk and its start: off DC within the disk, in
+// exactResponseAt's scope, the responses are exactly solved (Q1 ruling
+// (c)). It applies where f at the edge already has sign s, the side away
+// from DC; ok is false otherwise or where the scan does not close. Only
+// Bandwidth's search takes it (firstCrossing): the skipped interval lies
+// above the crossing it finds, so it cannot hide the first crossing from
+// DC, while AllMargin, reporting every crossing, stays unverified there.
+func (r *rationalLoop) diskScan(cs crossingScan, s0, s int) (float64, bool) {
+	sys := r.eval.sys
+	rad, inside := r.eval.disk.get(sys)
+	if !inside || rad <= 0 {
+		return 0, false
+	}
+	t := rad
+	if r.discrete() {
+		t = 2 * math.Asin(min(rad/2, 1)) / r.dt
+	}
+	for range 4 {
+		t *= 1 - 1e-6
+		if _, ok := inExactDiskScope(sys, r.eval.td.frequencyPoint(t).value()); ok {
+			break
+		}
+	}
+	if _, ok := inExactDiskScope(sys, r.eval.td.frequencyPoint(t).value()); !ok || cs.sgn(cs.ft(t)) != s {
+		return 0, false
+	}
+	c, ok, _ := cs.scan(t, func(u float64) float64 { return u }, s0)
+	return c, ok
+}
+
+// certifiedDC is |L| at DC as DCGain certifies it (nil error), finite:
+// solveDCRegular's certified solve or, up to exactDetMaxOrder, the exact
+// one, computed once per loop. Where DCGain keeps a convention instead, as
+// the signed Inf of a pole within rounding of DC whose exact limit is
+// finite, an explicit delay-free loop of order up to exactDetMaxOrder with
+// dc·I − A exactly nonsingular takes the stored model's exact G(dc)
+// (poleSchurData.exactDC), the certified value CORE-CONFLICT ruling (A)
+// sets above any convention.
+func (r *rationalLoop) certifiedDC() (float64, bool) {
+	if !r.dcDone {
+		r.dcDone = true
+		sys := r.eval.sys
+		if sys.internalDelayCount() == 0 && !newDescriptorPolicy(sys).isDescriptor() {
+			if g, err := sys.DCGain(); err == nil {
+				v := math.Abs(g.At(0, 0))
+				r.dcGain, r.dcOK = v, !math.IsInf(v, 0)
+			} else if ps, ok := cachedPoleSchur(sys); ok && ps.n <= exactDetMaxOrder {
+				if g, overflow, singular := ps.exactDC(dcPoint(sys)); !singular && !overflow {
+					r.dcGain, r.dcOK = math.Abs(g.At(0, 0)), true
+				}
+			}
+		}
+	}
+	return r.dcGain, r.dcOK
+}
+
+// nyquistGapCrossing is the crossing of log|L| − lg between fl(π)/Dt, where
+// it has sign s, and the exact Nyquist z = −1, which no float64 ω reaches:
+// fl(π)/Dt, the nearest, where nyquistResponse puts |L(−1)| on the other
+// side of γ by more than four times its solve noise, else
+// ErrAccuracyUnverified; 0 where |L(−1)| is on the side s or unresolved.
+func (r *rationalLoop) nyquistGapCrossing(s int, lg, tol float64) (float64, error) {
+	h, solve, _, ok := r.nyquistResponse()
+	if !ok || cmplx.IsNaN(h) {
+		return 0, nil
+	}
+	v := math.Log(cmplx.Abs(h)) - lg
+	if math.IsNaN(v) || math.Abs(v) <= tol || (v > 0) == (s > 0) {
+		return 0, nil
+	}
+	if math.Abs(cmplx.Abs(h)-math.Exp(lg)) > 4*solve {
+		return r.nyquist(), nil
+	}
+	return 0, fmt.Errorf("gain crossing between ω=%g and the exact Nyquist frequency not resolved: %w", r.nyquist(), ErrAccuracyUnverified)
+}
+
+// endScanFloor is the smallest step endCrossings' scan takes; below it
+// belowFloorCrossing rescales the loop's frequency.
+const endScanFloor = 1e-300
+
+// crossingScan is the bracketing scan of endCrossings on f, which evaluates
+// through eval.
+type crossingScan struct {
+	eval *sisoEval
+	f    func(float64) float64
+	tol  float64
+	// split, when set, reports a bracket whose ends straddle the edge of
+	// exactResponseAt's scope: an exact end inside the dc rounding disk
+	// beside a double one outside it, whose rounding beside the disk's
+	// poles is unbounded (OXOAL6), so bisecting toward it may close on
+	// noise. Such a bracket stands only where resolved, every final end
+	// outside the scope having the sign of f in the stored model's exact
+	// response there; otherwise it is rejected.
+	split    func(a, b float64) bool
+	resolved func(w float64, v float64) bool
+}
+
+func (cs crossingScan) ft(w float64) float64 {
+	v, ok := tryEval(cs.eval, func() float64 { return cs.f(w) })
+	if !ok {
+		return math.NaN()
+	}
+	return v
+}
+
+func (cs crossingScan) sgn(v float64) int {
+	if math.IsNaN(v) || math.Abs(v) <= cs.tol {
+		return 0
+	}
+	if v > 0 {
+		return 1
+	}
+	return -1
+}
+
+func (cs crossingScan) find(a, b float64) (float64, bool) {
+	split := cs.split != nil && cs.split(a, b)
+	fa, fb := cs.ft(a), cs.ft(b)
+	for range 64 {
+		m := geoMean(a, b)
+		if m <= a || m >= b {
+			break
+		}
+		if fm := cs.ft(m); fa*fm <= 0 {
+			b, fb = m, fm
+		} else {
+			a, fa = m, fm
+		}
+	}
+	finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
+	if split && !(cs.resolved(a, fa) && cs.resolved(b, fb)) {
+		return geoMean(a, b), false
+	}
+	return geoMean(a, b), finite && fa*fb <= 0
+}
+
+// scan steps t down by decades until f at at(t) has sign want, and bisects
+// that bracket. floor is the last t when the next step falls below
+// endScanFloor, else 0.
+func (cs crossingScan) scan(t float64, at func(float64) float64, want int) (c float64, ok bool, floor float64) {
+	step := 10.0
+	for range 2000 {
+		tn := t / step
+		w, wn := at(t), at(tn)
+		if tn < endScanFloor {
+			return 0, false, t
+		}
+		if wn == w {
+			break
+		}
+		switch v := cs.ft(wn); {
+		case cs.sgn(v) == want:
+			c, ok = cs.find(min(w, wn), max(w, wn))
+			return c, ok, 0
+		case !math.IsNaN(v):
+			t = tn
+		default:
+			if step = math.Sqrt(step); step < 1+1e-9 {
+				return 0, false, 0
+			}
+		}
+	}
+	return 0, false, 0
+}
+
+// belowFloorCrossing is the crossing in (0, t) of f = log|L| − lg, whose sign
+// is want at DC and differs at t, which endCrossings' scan could not reach.
+// It scans the loop with frequency scaled by an exact power of two 2ᵏ that
+// puts t near 1: continuous A and B times 2ᵏ, so L'(jω) = L(jω/2ᵏ), discrete
+// Dt over 2ᵏ, so ω'·Dt' = ω·Dt exactly. One pass reaches below the float64
+// range. Where the scaled data overflow, the scaled scan fails, or the
+// crossing is subnormal (in ω·Dt/2 when
+// discrete), it returns ErrAccuracyUnverified: the crossing exists but is
+// not resolved in float64.
+func (r *rationalLoop) belowFloorCrossing(t float64, want int, lg, tol float64) (float64, error) {
+	unverified := func() (float64, error) {
+		return 0, fmt.Errorf("gain crossing below ω=%g not resolved in float64: %w", t, ErrAccuracyUnverified)
+	}
+	k := -math.Ilogb(t)
+	e, ok := r.frequencyScaledEval(k)
+	if !ok {
+		return unverified()
+	}
+	e.exact, e.extended, e.exactFallback = r.eval.exact, true, r.eval.exactFallback
+	rs := &rationalLoop{dt: e.sys.Dt, eval: e}
+	cs := crossingScan{eval: e, f: rs.gainLog(lg), tol: tol, split: rs.diskSplit, resolved: rs.diskResolved(lg)}
+	c, ok, _ := cs.scan(math.Ldexp(t, k), func(u float64) float64 { return u }, want)
+	w := math.Ldexp(c, -k)
+	// 0x1p-1022 is float64's normal limit, not a search floor: a subnormal
+	// crossing is not representable to working precision, so it is unverified.
+	if !ok || w < 0x1p-1022 || r.discrete() && w*r.dt/2 < 0x1p-1022 {
+		return unverified()
+	}
+	return w, nil
+}
+
+// frequencyScaledEval is the evaluator of the loop with frequency scaled by
+// 2ᵏ; ok is false where the scaled data leave the finite range.
+func (r *rationalLoop) frequencyScaledEval(k int) (*sisoEval, bool) {
+	s := r.eval.sys.Copy()
+	if s.IsDiscrete() {
+		s.Dt = math.Ldexp(s.Dt, -k)
+		// 0x1p-1022 and 0x1p1000 below are float64 representability limits,
+		// not search floors; leaving them makes the caller unverified.
+		if !(s.Dt > 0x1p-1022) {
+			return nil, false
+		}
+	} else {
+		for _, m := range []*mat.Dense{s.A, s.B} {
+			raw := m.RawMatrix()
+			for i := range raw.Rows {
+				row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+				for j, v := range row {
+					if row[j] = math.Ldexp(v, k); math.Abs(row[j]) > 0x1p1000 {
+						return nil, false
+					}
+				}
+			}
+		}
+	}
+	e, err := newSISOEval(s)
+	return e, err == nil
 }
 
 // geoMean is √(a·b), from √a·√b where a·b leaves the normal range: an

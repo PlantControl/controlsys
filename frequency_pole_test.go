@@ -862,7 +862,9 @@ func TestPoleLimitOffOriginClusterPublicAPIs(t *testing.T) {
 // solve error replaced +Inf: s²(s+1)(s+1e−9) at ω = 0, and (z−1)³, whose
 // computed poles spread by eps^{1/3}, so δ was a fraction of 7e−6. Ungated,
 // the samples fall back to dd and, if still singular, δ steps past the
-// cluster. At ω = 1e−14 the stored response is finite and dd resolves it. A
+// cluster. At ω = 1e−14 the stored response is finite and dd resolves it.
+// (z−1)³ at ω = 1e−9, inside the triple pole's rounding disk but off DC, is
+// no pole of the stored model: its exact response (A2OX65 Q1 ruling (c)). A
 // gated caller keeps the double failure. Oracle: big.Float solve of the
 // stored realization.
 func TestPoleLimitSamplesBesideOriginCluster(t *testing.T) {
@@ -875,7 +877,7 @@ func TestPoleLimitSamplesBesideOriginCluster(t *testing.T) {
 		finiteTol float64
 	}{
 		{"s²(s+1)(s+1e-9)", cont, []float64{0}, []float64{1e-14, 1e-10, 1e-3}, 1e-9},
-		{"(z-1)³", disc, []float64{0, 1e-9}, []float64{1e-5, 1e-4, 1e-3}, 1e-8},
+		{"(z-1)³", disc, []float64{0}, []float64{1e-9, 1e-5, 1e-4, 1e-3}, 1e-8},
 	} {
 		if _, raw, _ := poleLimitAt(c.sys, 0); raw == nil {
 			t.Fatalf("%s: double solve succeeded at ω=0; case no longer exercises the pole limit", c.name)

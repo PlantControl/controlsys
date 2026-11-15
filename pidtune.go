@@ -167,7 +167,7 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
 	}
 	auto := wc == 0
-	wc, src, err := autoCrossoverSource(plant, wc, pm)
+	wc, src, alt, err := autoCrossoverChoice(plant, wc, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -190,7 +190,27 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if first == nil {
 		return pid, nil
 	}
+	// The selection's alternate crossover, tried only where the primary has
+	// no design that passes, under the same exact checks (A2OX65 ruling (c)).
+	if alt != nil && errors.Is(first, ErrPIDTuningTargetUnattainable) {
+		if w, s, ok := alt(); ok {
+			if pid, err := pidtuneAt(plant, eval, screen, pidType, pm, explicit, w, s, hasI); err == nil {
+				return pid, nil
+			}
+		}
+	}
 	return nil, fmt.Errorf("Pidtune: %w", first)
+}
+
+// pidtuneAt is pidtune's automatic design at the crossover wc from src.
+func pidtuneAt(plant *System, eval *sisoEval, screen *pidStabilityScreen, pidType PidtuneType, pm float64, explicit bool, wc float64, src pidtuneCrossover, hasI bool) (*PID, error) {
+	eval.err = nil
+	sign, rule := pidtuneGainSign(plant, eval.try, wc, hasI)
+	if eval.err != nil {
+		return nil, eval.err
+	}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: true, wc: wc, src: src, fromPole: src != pidtuneCrossGain, mirror: rule != pidtuneSignFixed, rule: rule, pd: pidtunePDPlaced}
+	return run.pipeline(sign)
 }
 
 // pipeline designs at r.wc, backing an automatic crossover off as
@@ -1720,21 +1740,41 @@ const (
 )
 
 func autoCrossoverSource(plant *System, wcTarget, pm float64) (float64, pidtuneCrossover, error) {
+	wc, src, _, err := autoCrossoverChoice(plant, wcTarget, pm)
+	return wc, src, err
+}
+
+// autoCrossoverChoice is autoCrossoverSource with plantCrossoverChoice's
+// alternate, nil for an explicit wcTarget, both capped by the delay alike.
+func autoCrossoverChoice(plant *System, wcTarget, pm float64) (float64, pidtuneCrossover, pidtuneAltCrossover, error) {
 	if wcTarget > 0 {
-		return wcTarget, pidtuneCrossGain, nil
+		return wcTarget, pidtuneCrossGain, nil, nil
 	}
-	wc, src, err := plantCrossoverSource(plant)
+	wc, src, alt, err := plantCrossoverChoice(plant)
 	if err != nil {
-		return 0, pidtuneCrossGain, err
+		return 0, pidtuneCrossGain, nil, err
 	}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
 	}
-	if tau > 0 {
-		wc = math.Min(wc, (180-pm)*math.Pi/180/(2*tau))
+	capped := func(w float64) float64 {
+		if tau > 0 {
+			return math.Min(w, (180-pm)*math.Pi/180/(2*tau))
+		}
+		return w
 	}
-	return wc, src, nil
+	var capAlt pidtuneAltCrossover
+	if alt != nil {
+		capAlt = func() (float64, pidtuneCrossover, bool) {
+			w, s, ok := alt()
+			if w = capped(w); ok && w == capped(wc) {
+				ok = false
+			}
+			return w, s, ok
+		}
+	}
+	return capped(wc), src, capAlt, nil
 }
 
 func plantCrossoverFreq(plant *System) (float64, error) {
@@ -1743,7 +1783,8 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 }
 
 // plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
-// crossover came from a pole fallback: G has no gain crossover and a
+// crossover came from a pole fallback: G has no usable gain crossover,
+// none above pidtuneMinCrossover, and a
 // finite DC gain that is 0 (a zero at the integrator, whose rounded DC gain
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
 // bandwidth, as for a high-pass plant with |G| < 1, both taking half the
@@ -1761,14 +1802,79 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	return wc, src != pidtuneCrossGain, err
 }
 
+// pidtuneMinCrossover is the lowest usable gain crossover of plant: a
+// design crossing at or below it cannot pass pidTuningPolesStable's exact
+// |z| < 1 − poleStabilityTolerance(1) test, and inside the dc rounding disk
+// (dcRoundingDisk) the poles do not resolve. It is the larger of that
+// disk's edge, as a frequency, and poleStabilityTolerance(1)/Dt, or the
+// tolerance itself for a continuous plant (A2OX65 Pidtune ruling, layer 1).
+func pidtuneMinCrossover(plant *System) float64 {
+	tol := poleStabilityTolerance(1)
+	edge := 0.0
+	if r, ok := dcRoundingDisk(plant); ok {
+		edge = r
+		if plant.Dt > 0 {
+			edge = 2 * math.Asin(min(r/2, 1)) / plant.Dt
+		}
+	}
+	if plant.Dt > 0 {
+		tol /= plant.Dt
+	}
+	return max(edge, tol)
+}
+
 func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
+	wc, src, _, err := plantCrossoverChoice(plant)
+	return wc, src, err
+}
+
+// pidtuneAltCrossover is the alternate crossover of plantCrossoverChoice,
+// ok false where there is none.
+type pidtuneAltCrossover func() (wc float64, src pidtuneCrossover, ok bool)
+
+// plantCrossoverChoice is plantCrossoverSource with, where the selection
+// had a choice, the alternate: for a gain crossing at or below
+// pidtuneMinCrossover that the fallback replaced, that true crossing; for
+// a usable crossing beside a pole cluster or a displaced integrator at the
+// integrator (pidtuneIntegratorCluster, pidtuneDisplacedIntegrator), the
+// fallback pidtuneNoCrossoverSource gives. Pidtune designs at the
+// alternate only where the primary has no design passing its exact checks
+// (A2OX65 ruling (c)), so a primary that passes is unchanged.
+func plantCrossoverChoice(plant *System) (float64, pidtuneCrossover, pidtuneAltCrossover, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
-		return 0, pidtuneCrossGain, err
+		return 0, pidtuneCrossGain, nil, err
 	}
-	if len(all.GainCrossFreqs) > 0 {
-		return all.GainCrossFreqs[0], pidtuneCrossGain, nil
+	wcMin := pidtuneMinCrossover(plant)
+	for _, w := range all.GainCrossFreqs {
+		if w > wcMin {
+			alt := func() (float64, pidtuneCrossover, bool) {
+				poles, err := plant.Poles()
+				if err != nil {
+					return 0, pidtuneCrossGain, false
+				}
+				at, tol := pidtuneIntegratorCluster(plant, poles)
+				if !(tol > 0) && pidtuneDisplacedIntegrator(plant, poles, at) == 0 {
+					return 0, pidtuneCrossGain, false
+				}
+				wc, src, err := pidtuneNoCrossoverSource(plant)
+				return wc, src, err == nil && wc != w
+			}
+			return w, pidtuneCrossGain, alt, nil
+		}
 	}
+	wc, src, err := pidtuneNoCrossoverSource(plant)
+	var alt pidtuneAltCrossover
+	if len(all.GainCrossFreqs) > 0 && err == nil {
+		w := all.GainCrossFreqs[0]
+		alt = func() (float64, pidtuneCrossover, bool) { return w, pidtuneCrossGain, w > 0 && w != wc }
+	}
+	return wc, src, alt, err
+}
+
+// pidtuneNoCrossoverSource is plantCrossoverSource's crossover for a plant
+// without a usable gain crossover.
+func pidtuneNoCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 	dc, err := plant.integratingDCGain()
 	if err == nil && (math.IsInf(dc.At(0, 0), 0) || dc.At(0, 0) == 0 && pidtuneRoundedIntegrator(plant)) {
 		wc, err := pidtuneIntegratingCrossover(plant)

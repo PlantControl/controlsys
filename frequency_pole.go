@@ -1,12 +1,14 @@
 package controlsys
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
 	"slices"
+	"sync/atomic"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
@@ -19,6 +21,8 @@ var poleResponse = complex(math.Inf(1), 0)
 
 const (
 	poleStepFraction = 1e-5
+	// poleResidueTol and poleResidueFloor are the tuned residue test of
+	// legacyPoleLimit, outside certifiedPoleLimit's scope.
 	poleResidueTol   = 1e-6
 	poleResidueFloor = 1e-10
 	poleRelativeTol  = 1e-3
@@ -91,6 +95,13 @@ type ddGate struct {
 	// pt and ddAtPole put a pole there, for a caller that would repeat
 	// that check.
 	atPole *bool
+	// disk, when set, is the dc rounding disk of sys (dcRoundingDisk):
+	// beside a pole that is not off DC, snap keeps the pole limit only
+	// inside it and takes the double-double response outside (A2OX65).
+	disk *dcDiskCache
+	// limited, when set, records that the response came from the pole
+	// limit (or snap) rather than a solve.
+	limited *bool
 }
 
 // errPoleUnresolved rejects a point the double-double response resolved
@@ -114,7 +125,8 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	delayFree := sys.internalDelayCount() == 0
 	dc := s == 0 || !sys.IsContinuous() && s == 1
 	ddPole := false
-	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && (!gate.snap || sp.offDC) && !dc) {
+	outsideDisk := gate.disk != nil && gate.disk.outside(sys, s)
+	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && (!gate.snap || sp.offDC || outsideDisk) && !dc) {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
@@ -138,7 +150,25 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	// The double-double response resolved pt and placed a pole there, so a
 	// pole limit finite in every entry contradicts it: neither that
 	// extrapolation from samples ρ away nor the response at pt is verified.
+	setLimited := func(v bool) {
+		if gate.limited != nil {
+			*gate.limited = v
+		}
+	}
+	exactHit := false
+	pl := func(ev func(frequencyPoint, []complex128) error, r float64) error {
+		lerr := poleLimitInto(ev, sys, pt, r, dst, err)
+		if lerr == errExactOffDC {
+			exactHit = true
+			return nil
+		}
+		return lerr
+	}
 	limit := func(lerr error) error {
+		setLimited(true)
+		if exactHit {
+			return lerr
+		}
 		if lerr == nil && ddPole && finiteResponse(dst) == nil {
 			return errPoleUnresolved
 		}
@@ -155,11 +185,12 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 			}
 			return nil
 		}
-		return poleLimitInto(sample, s, rho, dst, err)
+		setLimited(true)
+		return poleLimitInto(sample, sys, pt, rho, dst, err)
 	}
 	if !delayFree || gate.limit || gate.allow != nil {
-		lerr := limit(poleLimitInto(eval, s, rho, dst, err))
-		if lerr == nil && gate.limit && delayFree && sp.offDC && finiteResponse(dst) != nil {
+		lerr := limit(pl(eval, rho))
+		if lerr == nil && !exactHit && gate.limit && delayFree && sp.offDC && finiteResponse(dst) != nil {
 			return verifyOffDCPole(sys, pt, sp, err)
 		}
 		return lerr
@@ -175,10 +206,10 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		}
 		return nil
 	}
-	if lerr := poleLimitInto(sample, s, rho, dst, err); lerr == nil || wide <= rho {
+	if lerr := pl(sample, rho); lerr == nil || wide <= rho {
 		return limit(lerr)
 	}
-	return limit(poleLimitInto(sample, s, wide, dst, err))
+	return limit(pl(sample, wide))
 }
 
 // originResponseInto sets dst to the response at s = 0 of the continuous
@@ -560,19 +591,244 @@ func verifyOffDCPole(sys *System, pt frequencyPoint, sp poleGeometry, singularEr
 	return fmt.Errorf("%w (%w)", errOffDCPoleUnverified, singularErr)
 }
 
+// legacyResidueCount and certifiedResidueCount count the pole limits
+// decided by the legacy residue test (legacyPoleLimit; tag legacy-residue,
+// 7BNFBQ) and by certifiedPoleLimit, for the census.
+var legacyResidueCount, certifiedResidueCount atomic.Int64
+
+// poleLimitTau is the documented accuracy of a finite pole-limit entry,
+// FreqResponse's "about 1e-12 relative accuracy (1e-9 at a repeated pole)"
+// (frequency.go), which certifiedPoleLimit requires of its bound.
+const (
+	poleLimitTauSimple   = 1e-12
+	poleLimitTauRepeated = 1e-9
+)
+
 // poleLimitInto sets dst to the response at s, a numerical pole of the
-// realization at which eval fails. Each entry is the quadratic extrapolation
-// to s of eval at s+kδ, k = 1, 2, 3, unless kδ·G(s+kδ) extrapolates to a
-// nonzero residue, in which case the entry is poleResponse. A residue below
-// poleResidueFloor times the largest one is rounding from the solve's large
-// state and marks a channel the pole does not reach. δ is a fraction of rho,
-// the distance from s to the nearest other singularity, so finite entries
-// carry an extrapolation error of order (δ/rho)³ plus rounding of order
-// eps·(rho/δ)^q from a pole of order q; for q > 1 they are instead quartic
-// extrapolations from five points with δ = rho·eps^{1/(q+5)}, which balances
-// the two. When eval also fails off s the model is singular everywhere and
-// singularErr is returned.
-func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, rho float64, dst []complex128, singularErr error) error {
+// realization at which eval fails. Within the rounding disk of DC (s = 0,
+// or z = 1 discrete) of an explicit delay-free sys it is
+// certifiedPoleLimit where that decides every entry; everywhere else, and
+// where it leaves an entry undecided, it is legacyPoleLimit, counted in
+// legacyResidueCount. When eval also fails
+// off s the model is singular everywhere and singularErr is returned.
+// poleStepFraction sets the step only; on the certified path it decides
+// no value.
+func poleLimitInto(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, rho float64, dst []complex128, singularErr error) error {
+	s := pt.value()
+	if done, err := certifiedPoleLimit(eval, sys, pt, rho, dst, singularErr); done {
+		certifiedResidueCount.Add(1)
+		return err
+	}
+	legacyResidueCount.Add(1)
+	return legacyPoleLimit(eval, sys, s, rho, dst, singularErr)
+}
+
+// errPoleLimitDisk rejects a point inside the dc rounding disk, off DC,
+// where pI + qA is exactly singular (A2OX65).
+// errExactOffDC is certifiedPoleLimit's success with the stored model's
+// exact response off DC (exactResponseAt): a solved value, which
+// evalWithPoleLimitGated returns without the double-double demotion.
+var errExactOffDC = errors.New("exact response off DC")
+
+var errPoleLimitDisk = fmt.Errorf("pole limit inside the dc rounding disk: response not resolved: %w", ErrAccuracyUnverified)
+
+// certifiedPoleLimit is the structured residue test (structuredResidue,
+// A2OX65) of an explicit delay-free sys with an eigenvalue inside its own
+// rounding disk of DC, at s within that disk (poleCluster.disk): DC itself
+// or a point the data cannot tell from it. Five samples at s + kδ,
+// δ = poleStepFraction·rho0 the scale of the residue at DC (growCluster),
+// make each entry a pole (poleResponse) or finite (the quadratic
+// extrapolation of its first three samples, within poleLimitTau of
+// itself), in double or else on double-double samples. Where the core
+// (eigenvalues samples cannot tell from DC) is nonempty and dc·I − A is
+// exactly nonsingular, the response at DC is instead the stored model's
+// exact one (exactDC), where DCGain certifies that value too (CORE-CONFLICT
+// ruling). A point off DC inside the disk is no pole of the stored model:
+// its response is the exact one there (exactResponseAt, Q1 ruling (c)),
+// Inf only where that exact value overflows float64, and
+// ErrAccuracyUnverified where pI + qA is exactly singular. Where
+// DCGain instead keeps the rounded integrator's signed Inf (N4GQHT), the
+// structured test stands, so the two agree. done is false, leaving dst unchanged, outside
+// that scope (n > exactDetMaxOrder included) or where any entry stays
+// undecided. A
+// finite entry beside a pole inside its own rounding disk, n ≤
+// exactDetMaxOrder, is checked against the stored model's response at DC
+// (dcPoleLimitCheck).
+func certifiedPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, rho float64, dst []complex128, singularErr error) (done bool, err error) {
+	s := pt.value()
+	if sys.internalDelayCount() > 0 {
+		return false, nil
+	}
+	ps, ok := cachedPoleSchur(sys)
+	if !ok || ps.n > exactDetMaxOrder {
+		return false, nil
+	}
+	dc := dcPoint(sys)
+	cl, ok := ps.dcCluster(dc)
+	if !ok || !(cmplx.Abs(s-dc) <= cl.disk) {
+		return false, nil
+	}
+	if s != dc {
+		g, _, ok := exactResponseAt(ps, pt)
+		if !ok {
+			return true, fmt.Errorf("%w (%w)", errPoleLimitDisk, singularErr)
+		}
+		copy(dst, g)
+		return true, errExactOffDC
+	}
+	if gain, overflow, _ := ps.exactDC(dc); exactDCScope(ps, cl, sys) {
+		if overflow {
+			return true, fmt.Errorf("response at DC overflows float64: %w", ErrOverflow)
+		}
+		raw := gain.RawMatrix()
+		for j := range dst {
+			dst[j] = complex(raw.Data[(j/raw.Cols)*raw.Stride+j%raw.Cols], 0)
+		}
+		return true, nil
+	}
+	tau := poleLimitTauSimple
+	if cl.q0 > 1 {
+		tau = poleLimitTauRepeated
+	}
+	k := len(dst)
+	delta := poleStepFraction * cl.rho0
+	g := make([]complex128, 5*k)
+	for i := range 5 {
+		if err := eval(pointAt(s+complex(float64(i+1)*delta, 0)), g[i*k:(i+1)*k]); err != nil {
+			return false, nil
+		}
+	}
+	key := dcLimitKey(s, delta, g)
+	if r, hit := ps.dcLimitMemo(key); hit {
+		if r.done {
+			copy(dst, r.dst)
+		}
+		return r.done, nil
+	}
+	done = certifiedDCLimit(ps, cl, sys, s, delta, tau, g, dst)
+	ps.storeDCLimit(key, done, dst)
+	return done, nil
+}
+
+// certifiedDCLimit is certifiedPoleLimit at DC from its double samples g,
+// a function of the model, s, δ and g alone, which ps memoizes
+// (dcLimitMemo); done is false where an entry stays undecided.
+func certifiedDCLimit(ps *poleSchurData, cl *poleCluster, sys *System, s complex128, delta, tau float64, g, dst []complex128) bool {
+	k := len(dst)
+	rt := structuredResidue(ps, cl, s, delta, g, unitRoundoff, tau)
+	if rt == nil {
+		return false
+	}
+	b3 := slices.Clone(rt.b3)
+	pole := make([]bool, k)
+	var gd []complex128
+	for j := range k {
+		if rt.pole[j] || rt.finite[j] {
+			pole[j] = rt.pole[j]
+			continue
+		}
+		if gd == nil {
+			gd = make([]complex128, 5*k)
+			for i := range 5 {
+				if ddResponse(sys, pointAt(s+complex(float64(i+1)*delta, 0)), gd[i*k:(i+1)*k]) != nil {
+					return false
+				}
+			}
+			if rt = structuredResidue(ps, cl, s, delta, gd, ddUnitRoundoff, tau); rt == nil {
+				return false
+			}
+		}
+		if !rt.pole[j] && !rt.finite[j] {
+			return false
+		}
+		pole[j] = rt.pole[j]
+		b3[j] = rt.b3[j]
+		for i := range 5 {
+			g[i*k+j] = gd[i*k+j]
+		}
+	}
+	for j := range dst {
+		if pole[j] {
+			dst[j] = poleResponse
+			continue
+		}
+		var v complex128
+		for i, w := range poleExtrap3 {
+			v += complex(w, 0) * g[i*k+j]
+		}
+		dst[j] = v
+	}
+	if slices.Contains(pole, false) {
+		dcPoleLimitCheck(ps, sys, s, b3, pole, dst)
+	}
+	return true
+}
+
+// dcLimitKey is certifiedDCLimit's memo key: the bits of s, δ and the
+// samples.
+func dcLimitKey(s complex128, delta float64, g []complex128) string {
+	b := make([]byte, 0, 8*(3+2*len(g)))
+	put := func(v float64) { b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v)) }
+	put(real(s))
+	put(imag(s))
+	put(delta)
+	for _, v := range g {
+		put(real(v))
+		put(imag(v))
+	}
+	return string(b)
+}
+
+type dcLimitResult struct {
+	done bool
+	dst  []complex128
+}
+
+func (ps *poleSchurData) dcLimitMemo(key string) (dcLimitResult, bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	r, ok := ps.dcLimit[key]
+	return r, ok
+}
+
+func (ps *poleSchurData) storeDCLimit(key string, done bool, dst []complex128) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.dcLimit == nil {
+		ps.dcLimit = make(map[string]dcLimitResult)
+	}
+	ps.dcLimit[key] = dcLimitResult{done: done, dst: slices.Clone(dst)}
+}
+
+// exactDCScope reports whether certifiedPoleLimit takes the stored
+// model's exact response at DC: the core of cl is nonempty, dc·I − A
+// exactly nonsingular and DCGain certifies the exact value.
+func exactDCScope(ps *poleSchurData, cl *poleCluster, sys *System) bool {
+	_, _, singular := ps.exactDC(dcPoint(sys))
+	return cl.q0 > 0 && !singular && ps.dcGainCertified(sys)
+}
+
+// diskResponseResolved reports whether certifiedPoleLimit's value at s,
+// off DC inside the dc rounding disk of the explicit delay-free sys of
+// order up to exactDetMaxOrder, is exactly solved (exactResponseAt)
+// rather than a pole limit.
+func diskResponseResolved(sys *System, s complex128) bool {
+	_, ok := inExactDiskScope(sys, s)
+	return ok
+}
+
+// legacyPoleLimit is the pole limit by the legacy residue test (tag
+// legacy-residue): each entry is the quadratic extrapolation to s of eval
+// at s+kδ, k = 1, 2, 3, δ = poleStepFraction·rho, unless kδ·G(s+kδ)
+// extrapolates to a nonzero residue, in which case the entry is
+// poleResponse. A residue below poleResidueFloor times the largest one is
+// rounding from the solve's large state and marks a channel the pole does
+// not reach. Finite entries carry an extrapolation error of order (δ/rho)³
+// plus rounding of order eps·(rho/δ)^q from a pole of order q; for q > 1
+// they are instead quartic extrapolations from five points with
+// δ = rho·eps^{1/(q+5)}, which balances the two. It is base's rule
+// unchanged, internal-delay models included.
+func legacyPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, s complex128, rho float64, dst []complex128, singularErr error) error {
 	k := len(dst)
 	g := make([]complex128, 5*k)
 	sample := func(points int, delta float64) error {
@@ -622,6 +878,129 @@ func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, 
 		dst[j] = v
 	}
 	return nil
+}
+
+// dcPoleLimitCheck is step 2 of poleLimitInto: at DC, n ≤
+// exactDetMaxOrder and a pole inside its own rounding disk of DC, each
+// finite entry f̂ is replaced by the stored model's response v there where
+// |v − f̂| is within f̂'s bound b3 (residueTerms), and by poleResponse
+// otherwise. v is the double-double response, or where that is singular
+// or underflows the exact one; an exactly singular sE − A leaves the
+// entries.
+func dcPoleLimitCheck(ps *poleSchurData, sys *System, s complex128, b3 []float64, pole []bool, dst []complex128) {
+	n, _, _ := sys.Dims()
+	dc := s == 0 && sys.IsContinuous() || s == 1 && !sys.IsContinuous()
+	if !dc || n > exactDetMaxOrder {
+		return
+	}
+	v, ok := ps.dcCheckValue(sys, s)
+	if !ok {
+		return
+	}
+	for j := range dst {
+		if pole[j] {
+			continue
+		}
+		if cmplx.Abs(v[j]-dst[j]) <= b3[j] {
+			dst[j] = v[j]
+		} else {
+			dst[j] = poleResponse
+		}
+	}
+}
+
+// dcCheckValue is dcPoleLimitCheck's response v of the stored model at DC
+// s, computed once per model: ok is false where no pole lies inside its
+// own rounding disk of DC or the exact solve finds dc·I − A singular.
+func (ps *poleSchurData) dcCheckValue(sys *System, s complex128) (v []complex128, ok bool) {
+	ps.dcCheckOnce.Do(func() {
+		_, m, p := sys.Dims()
+		if _, inside := dcRoundingDisk(sys); !inside {
+			return
+		}
+		v := make([]complex128, p*m)
+		if ddResponse(sys, pointAt(s), v) != nil {
+			gain, overflow, ok := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, real(s))
+			if !ok {
+				return
+			}
+			raw := gain.RawMatrix()
+			for i := range p {
+				for j := range m {
+					v[i*m+j] = complex(raw.Data[i*raw.Stride+j], 0)
+					if overflow {
+						v[i*m+j] = poleResponse
+					}
+				}
+			}
+		}
+		ps.dcCheck, ps.dcCheckOK = v, true
+	})
+	return ps.dcCheck, ps.dcCheckOK
+}
+
+// dcDiskCache memoizes dcRoundingDisk for one system.
+type dcDiskCache struct {
+	done   bool
+	radius float64
+	ok     bool
+}
+
+// outside reports whether s lies outside the dc rounding disk of sys, the
+// disk being defined (explicit delay-free sys, a pole inside its own disk).
+func (c *dcDiskCache) outside(sys *System, s complex128) bool {
+	r, ok := c.get(sys)
+	return ok && cmplx.Abs(s-dcPoint(sys)) > r
+}
+
+// inside reports whether s lies within the dc rounding disk of sys.
+func (c *dcDiskCache) inside(sys *System, s complex128) bool {
+	r, ok := c.get(sys)
+	return ok && cmplx.Abs(s-dcPoint(sys)) <= r
+}
+
+func (c *dcDiskCache) get(sys *System) (float64, bool) {
+	if !c.done {
+		c.radius, c.ok = dcRoundingDisk(sys)
+		c.done = true
+	}
+	return c.radius, c.ok
+}
+
+func dcPoint(sys *System) complex128 {
+	if sys.IsContinuous() {
+		return 0
+	}
+	return 1
+}
+
+// dcRoundingDisk is the dc rounding disk of the explicit delay-free sys:
+// the largest first-order move ε·|y|ᵀ|A||x|/|yᴴx| (eigenvalueRoundingTerms)
+// among the poles within their own move of DC, s = 0 or z = 1. inside is
+// false where no pole is, or sys is a descriptor or internal-delay model or
+// its eigendecomposition fails. A point within it is below the data's
+// resolution of DC: componentwise rounding of A can carry a pole onto it.
+func dcRoundingDisk(sys *System) (radius float64, inside bool) {
+	n, _, _ := sys.Dims()
+	if n == 0 || sys.internalDelayCount() > 0 || newDescriptorPolicy(sys).isDescriptor() {
+		return 0, false
+	}
+	pe, ok := newPoleEigen(sys.A)
+	if !ok {
+		return 0, false
+	}
+	dc := dcPoint(sys)
+	for k, p := range pe.poles {
+		yax, yx := pe.coupling(sys.A, k, k)
+		move := eps() * yax / cmplx.Abs(yx)
+		if math.IsInf(move, 0) || math.IsNaN(move) {
+			continue
+		}
+		if cmplx.Abs(p-dc) <= move {
+			radius, inside = max(radius, move), true
+		}
+	}
+	return radius, inside
 }
 
 // ddLFTSampler evaluates an internal-delay model where its double solve
