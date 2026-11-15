@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -800,18 +801,27 @@ func descriptorTFJudge(sys *System, tf *TransferFunc) (bool, []int) {
 // descriptorTFJudgeCached is descriptorTFJudge with the per-point work on
 // sys, which does not depend on tf, taken from c (nil: none cached).
 func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (bool, []int) {
+	v, ref, _ := descriptorTFJudgeWhy(sys, tf, c)
+	return v, ref
+}
+
+// descriptorTFJudgeWhy is descriptorTFJudgeCached also saying why tf is
+// not verified: the refuting point and its worst ratio, the point at ∞,
+// or the verified count short of the need. It is a diagnostic only.
+func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, []int, string) {
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
-		return true, nil
+		return true, nil, ""
 	}
 	roots, poles, nf, polyDeg, ok := tfShape(tf)
 	if !ok {
-		return false, nil
+		return false, nil, "roots failed"
 	}
 	need := n + nf + polyDeg + 1
 	win := tfPoleWindows(tf, poles, math.Sqrt(eps()))
 	var seen []complex128
 	var refuted []int
+	why := ""
 	verified := 0
 	judge := func(cand []complex128) bool {
 		var pts []complex128
@@ -827,6 +837,7 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 		for k, jp := range judgeDescriptorTFCached(sys, tf, pts, c.response(sys, pts), win, c) {
 			if jp.refuted {
 				refuted = jp.refutedEntries
+				why = fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", pts[k], jp.worst, jp.refutedEntries)
 				return false
 			}
 			if jp.verified {
@@ -836,7 +847,7 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 		return true
 	}
 	if !judge(descriptorTFProbes(sys, roots)) {
-		return false, refuted
+		return false, refuted, why
 	}
 	if sys.Dt == 0 {
 		_, hi := rootBand(sys, roots)
@@ -857,7 +868,7 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 			}
 			jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
 			if jp.refuted {
-				return false, jp.refutedEntries
+				return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
 			}
 			if jp.verified {
 				verified += probeWeight(s)
@@ -865,16 +876,16 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 		}
 	}
 	if sys.Dt == 0 && descriptorTFInfinityRefutesCached(sys, tf, c) {
-		return false, nil
+		return false, nil, "refuted at ∞"
 	}
 	for r := range 3 {
 		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, 4<<r)) {
-			return false, refuted
+			return false, refuted, why
 		}
 	}
 	for r := 0; r < 3 && verified < need; r++ {
 		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, (need-verified+1)/2<<r)) {
-			return false, refuted
+			return false, refuted, why
 		}
 	}
 	lo, _ := rootBand(sys, roots)
@@ -896,13 +907,16 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 		}
 		jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
 		if jp.refuted {
-			return false, jp.refutedEntries
+			return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
 		}
 		if jp.verified {
 			verified += probeWeight(s)
 		}
 	}
-	return verified >= need, nil
+	if verified < need {
+		return false, nil, fmt.Sprintf("short: %d verified of %d needed", verified, need)
+	}
+	return true, nil, ""
 }
 
 // descriptorTFPoints returns the points descriptorTFVerified judges for a

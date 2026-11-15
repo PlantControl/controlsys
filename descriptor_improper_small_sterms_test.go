@@ -135,6 +135,7 @@ func TestIsProperSmallSTermsBesideLargePole(t *testing.T) {
 			if !errors.Is(serr, ErrImproperModel) && !errors.Is(serr, ErrAccuracyUnverified) && !errors.Is(serr, ErrDescriptorSingular) {
 				t.Errorf("%s: Step: %v, want ErrImproperModel, ErrAccuracyUnverified or ErrDescriptorSingular", label, serr)
 			}
+			t.Logf("%s: unverified reading: %s", label, regimeDiag(sys))
 			continue
 		}
 		if err != nil || pr {

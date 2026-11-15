@@ -92,7 +92,9 @@ func TestTransferFunctionImproperChainBesideStiffPole(t *testing.T) {
 // (48) closed; now none is off, 30 (34) fail closed with
 // ErrDescriptorSingular, no improper model reads proper and IsProper,
 // Step and TransferFunction agree. Excepted: improper seed 276 on amd64,
-// 5.1 off on base too, whose reduction keeps a fourth pole.
+// 5.1 off on base too, whose reduction keeps a fourth pole. An unverified
+// improper reading may come with Step failing closed (ErrDescriptorSingular):
+// no certified model is there to simulate.
 func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 	matched, closed := 0, 0
 	for seed := range uint64(300) {
@@ -104,6 +106,7 @@ func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 		if errors.Is(err, ErrAccuracyUnverified) != errors.Is(terr, ErrAccuracyUnverified) {
 			t.Errorf("%s: IsProper %v, TF %v: verdicts differ", label, err, terr)
 		}
+		unv := errors.Is(err, ErrAccuracyUnverified)
 		err, serr, terr = valueErr(err), valueErr(serr), valueErr(terr)
 		if errors.Is(err, ErrDescriptorSingular) {
 			if !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
@@ -118,7 +121,11 @@ func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 		if pr && !proper {
 			t.Errorf("%s: improper model reads proper", label)
 		}
-		if pr == errors.Is(serr, ErrImproperModel) || fzTFImproper(res.TF) == pr {
+		if unv && sys.chainRegime().kind == regimeNone {
+			t.Logf("%s: unverified reading: %s", label, regimeDiag(sys))
+		}
+		stepClosed := unv && !pr && errors.Is(serr, ErrDescriptorSingular)
+		if !stepClosed && pr == errors.Is(serr, ErrImproperModel) || fzTFImproper(res.TF) == pr {
 			t.Errorf("%s: IsProper %v, Step %v, TF improper %v disagree", label, pr, serr, fzTFImproper(res.TF))
 		}
 		if seed == 276 {

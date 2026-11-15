@@ -92,7 +92,9 @@ func largePoleChainDescriptor(t *testing.T, seed uint64, chains []int, bscale fl
 // every determined certificate point below the chain's cluster
 // (withinTermsWorst); an unverified one keeps the oracle check. A proper
 // reading whose Step keeps the float reduction's ErrDescriptorSingular (the
-// exact tier certified the TF) agrees; improper ones keep ErrImproperModel.
+// exact tier certified the TF) agrees; improper ones keep ErrImproperModel,
+// except an unverified reading (neither path certifies) whose Step, with no
+// certified model, fails closed with ErrDescriptorSingular.
 func checkChainDescriptorReading(t *testing.T, label string, sys, oracle *System) (proper bool, closed bool) {
 	t.Helper()
 	pr, perr := sys.IsProper()
@@ -102,6 +104,7 @@ func checkChainDescriptorReading(t *testing.T, label string, sys, oracle *System
 		t.Fatalf("%s: IsProper err %v, TF err %v: verdicts differ", label, perr, terr)
 	}
 	certified := terr == nil
+	unv := errors.Is(perr, ErrAccuracyUnverified)
 	perr, serr, terr = valueErr(perr), valueErr(serr), valueErr(terr)
 	if perr != nil {
 		if !errors.Is(perr, ErrDescriptorSingular) || !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
@@ -110,6 +113,10 @@ func checkChainDescriptorReading(t *testing.T, label string, sys, oracle *System
 		return false, true
 	}
 	stepClosed := pr && errors.Is(serr, ErrDescriptorSingular)
+	if unv && sys.chainRegime().kind == regimeNone {
+		t.Logf("%s: unverified reading: %s", label, regimeDiag(sys))
+		stepClosed = stepClosed || !pr && errors.Is(serr, ErrDescriptorSingular)
+	}
 	if !stepClosed && (pr == errors.Is(serr, ErrImproperModel) || serr != nil && !errors.Is(serr, ErrImproperModel)) {
 		t.Fatalf("%s: IsProper %v but Step err %v", label, pr, serr)
 	}

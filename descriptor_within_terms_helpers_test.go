@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -238,4 +239,17 @@ func oracleTFRatio(sys, oracle *System, tf *TransferFunc, cutoff float64) float6
 		}
 	}
 	return worst
+}
+
+// regimeDiag describes the descriptor regime of sys (chainRegime) for test
+// logs: which path stands, and for an uncertified exact model why its last
+// candidate is not verified.
+func regimeDiag(sys *System) string {
+	rg := sys.chainRegime()
+	names := map[int]string{regimeFloat: "float", regimeExact: "exact", regimeNone: "none"}
+	d := fmt.Sprintf("regime %s, float err %v", names[rg.kind], rg.mainErr)
+	if rg.hasV {
+		d += fmt.Sprintf(", exact: certified %v, climbs %d, ceiling %v, %s", rg.v.certified, rg.v.climbs, rg.v.ceiling, rg.v.why)
+	}
+	return d
 }

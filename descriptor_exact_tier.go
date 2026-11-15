@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math/big"
 	"slices"
 	"sync"
@@ -756,9 +757,11 @@ type chainVerdict struct {
 	certified bool
 	climbs    int
 	ceiling   bool
-	// convDeg holds the convention's numerator degrees (dataDegree), a
-	// diagnostic only.
+	// convDeg holds the convention's numerator degrees (dataDegree), and
+	// why the last candidate is not certified (descriptorTFJudgeWhy);
+	// diagnostics only.
 	convDeg [][]int
+	why     string
 }
 
 // exactChainVerdict returns the verdict of the exact tier, false when it
@@ -818,8 +821,9 @@ func (sys *System) exactChainVerdictCached(c *pencilCache) (chainVerdict, bool) 
 			return chainVerdict{}, false
 		}
 		tf := t.transferFunc(sys)
-		cert, refuted := descriptorTFJudgeCached(sys, tf, c)
-		v := chainVerdict{tf: tf, nf: nf, polyDeg: t.polyDeg, certified: cert, climbs: climbs, convDeg: conv}
+		cert, refuted, why := descriptorTFJudgeWhy(sys, tf, c)
+		v := chainVerdict{tf: tf, nf: nf, polyDeg: t.polyDeg, certified: cert, climbs: climbs, convDeg: conv,
+			why: fmt.Sprintf("nf %d, numerator degrees %v: %s", nf, deg, why)}
 		if cert || len(refuted) == 0 {
 			return v, true
 		}
@@ -827,6 +831,7 @@ func (sys *System) exactChainVerdictCached(c *pencilCache) (chainVerdict, bool) 
 			i, j := e/m, e%m
 			if deg[i][j] >= n {
 				v.ceiling = true
+				v.why += "; ceiling"
 				return v, true
 			}
 			deg[i][j]++
