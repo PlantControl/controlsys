@@ -1395,7 +1395,7 @@ func (r *rationalLoop) exactVetoed(w float64, h complex128) bool {
 // crossing below pLo is then claimed either way. Discrete, a crossing between fl(π)/Dt and
 // the exact Nyquist frequency is nyquistGapCrossing's.
 func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, error) {
-	cs := crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol, split: r.diskSplit, resolved: r.diskResolved(lg)}
+	cs := &crossingScan{eval: r.eval, f: r.gainLog(lg), tol: tol, exact: r.exactGainLog(lg)}
 	dcEnd, dcSnap := false, false
 	endSign := func(w float64) int {
 		h, ok := r.eval.try(w)
@@ -1442,7 +1442,7 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 				}
 				ok = true
 			}
-			if !ok && (dcEnd || dcSnap) {
+			if !ok && (dcEnd || dcSnap || cs.unresolved) {
 				return nil, fmt.Errorf("gain crossing below ω=%g does not close on an evaluable frequency: %w", pLo, ErrAccuracyUnverified)
 			}
 			if ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
@@ -1454,7 +1454,11 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 		sTop, s := endSign(wTop), cs.sgn(cs.ft(pHi))
 		switch {
 		case sTop != 0 && s != 0 && s != sTop:
-			if c, ok, _ := cs.scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
+			c, ok, _ := cs.scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop)
+			if !ok && cs.unresolved {
+				return nil, fmt.Errorf("gain crossing above ω=%g not resolved: %w", pHi, ErrAccuracyUnverified)
+			}
+			if ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
 				ws = append(ws, c)
 			}
 		case s != 0 && sTop == s:
@@ -1469,7 +1473,11 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	}
 	if wInf := r.highFrequency(); !r.discrete() && len(ws) > 0 && pHi < wInf {
 		if sInf, s := cs.sgn(cs.ft(wInf)), cs.sgn(cs.ft(pHi)); sInf != 0 && s != 0 && s != sInf {
-			if c, ok, _ := cs.scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
+			c, ok, _ := cs.scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf)
+			if !ok && cs.unresolved {
+				return nil, fmt.Errorf("gain crossing above ω=%g not resolved: %w", pHi, ErrAccuracyUnverified)
+			}
+			if ok && c > ws[len(ws)-1]*(1+1e-9) {
 				ws = append(ws, c)
 			}
 		}
@@ -1477,35 +1485,26 @@ func (r *rationalLoop) endCrossings(ws []float64, lg, tol float64) ([]float64, e
 	return ws, nil
 }
 
-// diskSplit reports whether exactly one of ω = a, b lies in
-// exactResponseAt's scope (diskResponseResolved).
-func (r *rationalLoop) diskSplit(a, b float64) bool {
-	in := func(w float64) bool {
-		return diskResponseResolved(r.eval.sys, r.eval.td.frequencyPoint(w).value())
+// exactGainLog is f = log|L| − lg from the stored model's exact response
+// at ω (exactResponseAt), ok false where pI + qA is exactly singular or the
+// model does not factorize (cachedPoleSchur, formed on first use); nil
+// outside that solve's scope: order above exactDetMaxOrder, a descriptor
+// or internal-delay loop. |L| does not depend on input and output delays.
+func (r *rationalLoop) exactGainLog(lg float64) func(float64) (float64, bool) {
+	sys := r.eval.sys
+	if n, _, _ := sys.Dims(); n == 0 || n > exactDetMaxOrder || sys.internalDelayCount() > 0 || newDescriptorPolicy(sys).isDescriptor() {
+		return nil
 	}
-	return in(a) != in(b)
-}
-
-// diskResolved reports whether f = log|L| − lg read v at ω: in
-// exactResponseAt's scope, where v is exact, always; outside it where the
-// stored model's exact response there gives f the same sign as v, zero
-// included.
-func (r *rationalLoop) diskResolved(lg float64) func(w, v float64) bool {
-	return func(w, v float64) bool {
-		pt := r.eval.td.frequencyPoint(w)
-		if diskResponseResolved(r.eval.sys, pt.value()) {
-			return true
-		}
-		ps, ok := cachedPoleSchur(r.eval.sys)
-		if !ok || ps.n > exactDetMaxOrder || math.IsNaN(v) {
-			return false
-		}
-		g, _, ok := exactResponseAt(ps, pt)
+	return func(w float64) (float64, bool) {
+		ps, ok := cachedPoleSchur(sys)
 		if !ok {
-			return false
+			return 0, false
 		}
-		fe := math.Log(cmplx.Abs(g[0])) - lg
-		return (fe > 0) == (v > 0) && (fe < 0) == (v < 0)
+		g, _, ok := exactResponseAt(ps, r.eval.td.frequencyPoint(w))
+		if !ok {
+			return 0, false
+		}
+		return math.Log(cmplx.Abs(g[0])) - lg, true
 	}
 }
 
@@ -1518,7 +1517,7 @@ func (r *rationalLoop) diskResolved(lg float64) func(w, v float64) bool {
 // Bandwidth's search takes it (firstCrossing): the skipped interval lies
 // above the crossing it finds, so it cannot hide the first crossing from
 // DC, while AllMargin, reporting every crossing, stays unverified there.
-func (r *rationalLoop) diskScan(cs crossingScan, s0, s int) (float64, bool) {
+func (r *rationalLoop) diskScan(cs *crossingScan, s0, s int) (float64, bool) {
 	sys := r.eval.sys
 	rad, inside := r.eval.disk.get(sys)
 	if !inside || rad <= 0 {
@@ -1597,18 +1596,16 @@ type crossingScan struct {
 	eval *sisoEval
 	f    func(float64) float64
 	tol  float64
-	// split, when set, reports a bracket whose ends straddle the edge of
-	// exactResponseAt's scope: an exact end inside the dc rounding disk
-	// beside a double one outside it, whose rounding beside the disk's
-	// poles is unbounded (OXOAL6), so bisecting toward it may close on
-	// noise. Such a bracket stands only where resolved, every final end
-	// outside the scope having the sign of f in the stored model's exact
-	// response there; otherwise it is rejected.
-	split    func(a, b float64) bool
-	resolved func(w float64, v float64) bool
+	// exact is f from the stored model's exact response at ω
+	// (exactResponseAt), ok false where pI + qA is exactly singular; nil
+	// outside that solve's scope (rationalLoop.exactGainLog).
+	exact func(w float64) (float64, bool)
+	// unresolved records that the last scan stopped on a bracket end
+	// whose sign no exact response certifies.
+	unresolved bool
 }
 
-func (cs crossingScan) ft(w float64) float64 {
+func (cs *crossingScan) ft(w float64) float64 {
 	v, ok := tryEval(cs.eval, func() float64 { return cs.f(w) })
 	if !ok {
 		return math.NaN()
@@ -1616,7 +1613,19 @@ func (cs crossingScan) ft(w float64) float64 {
 	return v
 }
 
-func (cs crossingScan) sgn(v float64) int {
+// read is f at ω as the scan reads it: the double solve's ft, or where
+// that is no solved response the exact one, which is.
+func (cs *crossingScan) read(w float64) float64 {
+	v := cs.ft(w)
+	if math.IsNaN(v) && cs.exact != nil {
+		if x, ok := cs.exact(w); ok {
+			return x
+		}
+	}
+	return v
+}
+
+func (cs *crossingScan) sgn(v float64) int {
 	if math.IsNaN(v) || math.Abs(v) <= cs.tol {
 		return 0
 	}
@@ -1626,32 +1635,98 @@ func (cs crossingScan) sgn(v float64) int {
 	return -1
 }
 
-func (cs crossingScan) find(a, b float64) (float64, bool) {
-	split := cs.split != nil && cs.split(a, b)
-	fa, fb := cs.ft(a), cs.ft(b)
+// endSign is the sign of f at ω that a bracket end carries: that of the
+// stored model's exact response, 0 within tol of the level. The double
+// solve's reading is no end: beside poles near DC its rounding is
+// unbounded, |L| reading 19 or 0.016 where it is 0.013 (OXOAL6), and a
+// bracket on it may hold no crossing (standing rule, A2OX65 round 3: bracket
+// ends are resolved evaluations; CONFIRMED: an end whose sign the exact
+// solve certifies is one). ok is false where that solve fails.
+func (cs *crossingScan) endSign(w float64) (int, bool) {
+	if cs.exact == nil {
+		cs.unresolved = true
+		return 0, false
+	}
+	v, ok := cs.exact(w)
+	if !ok {
+		cs.unresolved = true
+		return 0, false
+	}
+	return cs.sgn(v), true
+}
+
+// find bisects f on [a, b], whose ends' signs endSign certifies differ or
+// vanish, and returns the crossing where the final ends' signs are
+// certified too; otherwise it bisects again on exact responses.
+func (cs *crossingScan) find(a, b float64) (float64, bool) {
+	a0, b0 := a, b
+	fa, fb := cs.read(a), cs.read(b)
 	for range 64 {
 		m := geoMean(a, b)
 		if m <= a || m >= b {
 			break
 		}
-		if fm := cs.ft(m); fa*fm <= 0 {
+		if fm := cs.read(m); fa*fm <= 0 {
 			b, fb = m, fm
 		} else {
 			a, fa = m, fm
 		}
 	}
 	finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
-	if split && !(cs.resolved(a, fa) && cs.resolved(b, fb)) {
+	if finite && fa*fb <= 0 {
+		sa, okA := cs.endSign(a)
+		sb, okB := cs.endSign(b)
+		if !okA || !okB {
+			return geoMean(a, b), false
+		}
+		if sa*sb <= 0 {
+			return geoMean(a, b), true
+		}
+	}
+	if cs.exact == nil {
 		return geoMean(a, b), false
 	}
-	return geoMean(a, b), finite && fa*fb <= 0
+	return cs.exactFind(a0, b0)
+}
+
+// exactFind bisects f on [a, b] on the stored model's exact responses.
+func (cs *crossingScan) exactFind(a, b float64) (float64, bool) {
+	fa, okA := cs.exact(a)
+	fb, okB := cs.exact(b)
+	if !okA || !okB {
+		cs.unresolved = true
+		return geoMean(a, b), false
+	}
+	for range 64 {
+		m := geoMean(a, b)
+		if m <= a || m >= b {
+			break
+		}
+		fm, ok := cs.exact(m)
+		if !ok {
+			cs.unresolved = true
+			return geoMean(a, b), false
+		}
+		if fa*fm <= 0 {
+			b, fb = m, fm
+		} else {
+			a, fa = m, fm
+		}
+	}
+	return geoMean(a, b), fa*fb <= 0
 }
 
 // scan steps t down by decades until f at at(t) has sign want, and bisects
 // that bracket. floor is the last t when the next step falls below
-// endScanFloor, else 0.
-func (cs crossingScan) scan(t float64, at func(float64) float64, want int) (c float64, ok bool, floor float64) {
+// endScanFloor, else 0. Both ends of the bracket carry endSign's sign: a
+// step the exact response puts on the other side is passed, and where it
+// puts the step above on side want too the bracket moves up to the nearest
+// step it does not. unresolved records a scan stopped on an end endSign
+// cannot certify.
+func (cs *crossingScan) scan(t float64, at func(float64) float64, want int) (c float64, ok bool, floor float64) {
+	cs.unresolved = false
 	step := 10.0
+	above := []float64{t}
 	for range 2000 {
 		tn := t / step
 		w, wn := at(t), at(tn)
@@ -1661,11 +1736,34 @@ func (cs crossingScan) scan(t float64, at func(float64) float64, want int) (c fl
 		if wn == w {
 			break
 		}
-		switch v := cs.ft(wn); {
+		switch v := cs.read(wn); {
 		case cs.sgn(v) == want:
-			c, ok = cs.find(min(w, wn), max(w, wn))
-			return c, ok, 0
+			s, ok := cs.endSign(wn)
+			if !ok {
+				return 0, false, 0
+			}
+			if s == -want {
+				above = append(above, tn)
+				t = tn
+				continue
+			}
+			lo := wn
+			for len(above) > 0 {
+				u := at(above[len(above)-1])
+				su, ok := cs.endSign(u)
+				if !ok {
+					return 0, false, 0
+				}
+				if su != want {
+					c, ok = cs.find(min(lo, u), max(lo, u))
+					return c, ok, 0
+				}
+				lo = u
+				above = above[:len(above)-1]
+			}
+			return 0, false, 0
 		case !math.IsNaN(v):
+			above = append(above, tn)
 			t = tn
 		default:
 			if step = math.Sqrt(step); step < 1+1e-9 {
@@ -1696,7 +1794,7 @@ func (r *rationalLoop) belowFloorCrossing(t float64, want int, lg, tol float64) 
 	}
 	e.exact, e.extended, e.exactFallback = r.eval.exact, true, r.eval.exactFallback
 	rs := &rationalLoop{dt: e.sys.Dt, eval: e}
-	cs := crossingScan{eval: e, f: rs.gainLog(lg), tol: tol, split: rs.diskSplit, resolved: rs.diskResolved(lg)}
+	cs := &crossingScan{eval: e, f: rs.gainLog(lg), tol: tol, exact: rs.exactGainLog(lg)}
 	c, ok, _ := cs.scan(math.Ldexp(t, k), func(u float64) float64 { return u }, want)
 	w := math.Ldexp(c, -k)
 	// 0x1p-1022 is float64's normal limit, not a search floor: a subnormal
