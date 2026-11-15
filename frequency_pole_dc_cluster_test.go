@@ -93,12 +93,14 @@ func TestFreqResponseDCPoleLimitZeroResidue(t *testing.T) {
 // inside the dc rounding disk 2.2e-16, where the stored model's exact
 // responses close the bracket from the certified DC gain (A2OX65 Q1 ruling
 // (c)); 320-bit oracle 6.0002999244552604e-18. At p = 1e-305 it lies
-// outside the disk among snapped responses, so the bracket does not close:
-// ErrAccuracyUnverified.
+// outside the disk among snapped responses, where the scan takes the
+// stored model's exact responses in their place and closes on ends whose
+// signs they certify (OXOAL6); 320-bit oracle 6.0002999985688122e-16.
 func TestAllMarginDCPoleClusterUnverified(t *testing.T) {
 	sys, _ := dcPairModel(t, 1e-305)
-	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
-		t.Errorf("p=1e-305 AllMargin = %v, %v; want ErrAccuracyUnverified", res, err)
+	const want305 = 6.0002999985688122e-16
+	if res, err := AllMargin(sys); err != nil || !sameCrossings(res.GainCrossFreqs, []float64{want305}, 1e-9) {
+		t.Errorf("p=1e-305 AllMargin = %v, %v; want GainCrossFreqs [%g]", res, err, want305)
 	}
 	sys, _ = dcPairModel(t, 1e-307)
 	const want = 6.0002999244552604e-18
