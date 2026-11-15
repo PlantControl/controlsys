@@ -4,6 +4,8 @@ import (
 	"errors"
 	"math"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // Loops beside poles near DC whose double |L| below the first pencil
@@ -118,16 +120,13 @@ func TestCrossingScanCertifiedEnds(t *testing.T) {
 	}
 }
 
-// dover-grid a=0.7,b=0.99,k=5.1 with 14 unobservable states added: the
-// loop is the same, but at order 17 > exactDetMaxOrder no exact response
-// certifies a bracket end of the scan below the pencil crossing, so
-// AllMargin is ErrAccuracyUnverified (plain rejection out of the exact
-// scope, OXOAL6 ruling 2). Main returned the noise-bracketed
-// [1.0691800428606525e-12 0.0060107292292177926] with nil; A2OX65 320-bit
-// gcf oracle [3.7007434156454433e-13 0.0060107292303075814].
-func TestAllMarginGainCrossBelowScanOutOfExactScope(t *testing.T) {
+// paddedDoverGrid is dover-grid a=0.7,b=0.99,k=5.1 (discrete, Dt 0.1) with
+// n−3 unobservable states added: the loop, and so its crossings, are the
+// order-3 core's. A2OX65 320-bit gcf oracle [3.7007434156454433e-13
+// 0.0060107292303075814].
+func paddedDoverGrid(t *testing.T, n int) *System {
+	t.Helper()
 	core := []float64{1, 0, 0, 1.5350000000000001, 0, -0.69299999999999995, -1.5500000000000003, 1, 1.6899999999999999}
-	const n = 17
 	a, b, c := make([]float64, n*n), make([]float64, n), make([]float64, n)
 	for i := range 3 {
 		copy(a[i*n:i*n+3], core[i*3:i*3+3])
@@ -141,7 +140,143 @@ func TestAllMarginGainCrossBelowScanOutOfExactScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res, err := AllMargin(sys); !errors.Is(err, ErrAccuracyUnverified) {
+	return sys
+}
+
+// Above marginEndMaxOrder, the padding mixed into the core (mixPadding) so
+// that no exactly zero block drops it (structuralCore), no exact response
+// certifies a bracket end of the scan below the pencil crossing, so
+// AllMargin is ErrAccuracyUnverified (plain rejection out of the exact
+// scope, OXOAL6 ruling 2; n moved from 17 to 25 by CISC3B ruling 4). Main returned the noise-bracketed
+// [1.0691800428606525e-12 0.0060107292292177926] with nil at order 17.
+func TestAllMarginGainCrossBelowScanOutOfExactScope(t *testing.T) {
+	if res, err := AllMargin(mixPadding(t, paddedDoverGrid(t, 25), 3)); !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatalf("AllMargin = %v, %v; want ErrAccuracyUnverified", res, err)
+	}
+}
+
+// Past exactDetMaxOrder, within marginEndMaxOrder, the bracket ends carry
+// the exact response's sign: the order-17 padding returns the core's
+// crossings with nil (CISC3B). Both lie within the gain search's 1e-9 of
+// log|L| = 0 at the oracle: 320-bit log|L| −1.8e-10 at 0.0060107292292,
+// 2.6e-10 at the order-3 core's 0.0060107292319.
+func TestAllMarginGainCrossBelowScanPaddedWithinMarginCap(t *testing.T) {
+	want := []float64{3.7007434156454433e-13, 0.0060107292303075814}
+	for _, n := range []int{3, 17} {
+		res, err := AllMargin(paddedDoverGrid(t, n))
+		if err != nil {
+			t.Fatalf("n=%d: AllMargin: %v", n, err)
+		}
+		got := res.GainCrossFreqs
+		if len(got) != len(want) {
+			t.Fatalf("n=%d: GainCrossFreqs = %v, want %v", n, got, want)
+		}
+		for i, w := range want {
+			if math.Abs(got[i]-w) > 1e-8*w {
+				t.Errorf("n=%d: GainCrossFreqs[%d] = %.17g, want %.17g within 1e-8", n, i, got[i], w)
+			}
+		}
+	}
+}
+
+// mixPadding rotates each state past the first n0 of sys with state 0 by a
+// fixed Givens rotation: the transfer function within rounding, with no
+// exactly zero coupling left for structuralCore to drop.
+func mixPadding(t *testing.T, sys *System, n0 int) *System {
+	t.Helper()
+	n, _, _ := sys.Dims()
+	a := mat.DenseCopyOf(sys.A)
+	b := mat.DenseCopyOf(sys.B)
+	c := mat.DenseCopyOf(sys.C)
+	const cs, sn = 0.8, 0.6
+	for k := n0; k < n; k++ {
+		for j := range n {
+			x, y := a.At(0, j), a.At(k, j)
+			a.Set(0, j, cs*x-sn*y)
+			a.Set(k, j, sn*x+cs*y)
+		}
+		for i := range n {
+			x, y := a.At(i, 0), a.At(i, k)
+			a.Set(i, 0, cs*x-sn*y)
+			a.Set(i, k, sn*x+cs*y)
+		}
+		x, y := b.At(0, 0), b.At(k, 0)
+		b.Set(0, 0, cs*x-sn*y)
+		b.Set(k, 0, sn*x+cs*y)
+		x, y = c.At(0, 0), c.At(0, k)
+		c.Set(0, 0, cs*x-sn*y)
+		c.Set(0, k, sn*x+cs*y)
+	}
+	out, err := New(a, b, c, mat.DenseCopyOf(sys.D), sys.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// padUnobservable adds n−n0 stable states that the output does not see to
+// the SISO core (a0, b0, c0): the loop is the core's.
+func padUnobservable(n0, n int, a0, b0, c0 []float64, dt float64) (a, b, c []float64) {
+	a, b, c = make([]float64, n*n), make([]float64, n), make([]float64, n)
+	for i := range n0 {
+		copy(a[i*n:i*n+n0], a0[i*n0:i*n0+n0])
+		b[i], c[i] = b0[i], c0[i]
+	}
+	for k := n0; k < n; k++ {
+		if dt == 0 {
+			a[k*n+k] = -0.5 - 0.37*float64(k-n0)
+		} else {
+			a[k*n+k] = 0.05 + 0.04*float64(k-n0)
+		}
+		b[k] = 1
+	}
+	return
+}
+
+// Loops with a pole at DC whose residue DCGain cannot tell from rounding
+// (ErrAccuracyUnverified), padded past exactDetMaxOrder (CISC3B, A2OX65
+// census series1/232.1 and dpar0 a=0.1,b=0.7,k=5). Main returned [] with
+// nil: its DC end took the double solve's failed reading, the legacy
+// residue (0.963 for series1, −3.5e-10 for dpar0), on the side of the level
+// the pencil crossings start from, so no scan ran. The DC end is now the
+// exact DC limit (a pole: |L| above every level), and up to
+// marginEndMaxOrder the scan's ends carry the exact response's sign: the
+// 320-bit oracle crossing with nil. Past marginDCMaxOrder no end certifies
+// and AllMargin is ErrAccuracyUnverified, never [] with nil.
+func TestAllMarginPaddedPoleAtDCResidueBelowRounding(t *testing.T) {
+	cases := []struct {
+		name    string
+		n0      int
+		a, b, c []float64
+		dt      float64
+		want    float64
+	}{
+		{"series1", 2, []float64{0, 0, -203.40831141013936, -14.532107196753987}, []float64{1, 0}, []float64{13.997165631669324, 1}, 0, 3.0506121242022132e-15},
+		{"dpar0", 3, []float64{0, -0.69999999999999996, 0, 1, 1.7, 0, 0, 0, 1}, []float64{-3.5, 5, -5}, []float64{0, 1, 1}, 0.1, 7.401486830834376e-15},
+	}
+	for _, tc := range cases {
+		for _, n := range []int{tc.n0, 17, marginEndMaxOrder, marginDCMaxOrder + 1} {
+			a, b, c := padUnobservable(tc.n0, n, tc.a, tc.b, tc.c, tc.dt)
+			sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, tc.dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n > marginDCMaxOrder {
+				sys = mixPadding(t, sys, tc.n0)
+			}
+			res, err := AllMargin(sys)
+			if n > marginDCMaxOrder {
+				if !errors.Is(err, ErrAccuracyUnverified) {
+					t.Errorf("%s n=%d: AllMargin = %v, %v; want ErrAccuracyUnverified", tc.name, n, res, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s n=%d: AllMargin: %v", tc.name, n, err)
+			}
+			if got := res.GainCrossFreqs; len(got) != 1 || math.Abs(got[0]-tc.want) > 1e-8*tc.want {
+				t.Errorf("%s n=%d: GainCrossFreqs = %.17g, want [%.17g]", tc.name, n, got, tc.want)
+			}
+		}
 	}
 }
