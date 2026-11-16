@@ -132,7 +132,7 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		}
 		ddErr := errDDSingular
 		if !errors.Is(err, errStallUnresolved) {
-			ddErr = ddResponse(sys, pt, dst)
+			ddErr = ddResponseResolved(sys, pt, dst)
 		}
 		if errors.Is(ddErr, errStateUnderflow) {
 			return ddErr
@@ -1147,14 +1147,15 @@ func (d *ddLFTSampler) lftInto(pt frequencyPoint, dst []complex128) bool {
 // poleClusterSpread·eps of the spectral scale. A simple pole p with residue
 // r has 1/G(z) ≈ (z−p)/r, so G at s and at s+h, h ≪ the distance to the
 // next pole, give r = h/(1/G(s+h) − 1/G(s)) and s−p = r/G(s), in the
-// largest entry. A multiple pole fits nearer than it is. A dd failure at
-// s+h counts as a pole, except a lost state (errStateUnderflow), which says
-// nothing of the pencil there.
+// largest entry. A multiple pole fits nearer than it is. The response at
+// s+h is ddResponseResolved's, as g's is; its failure counts as a pole,
+// except a lost state (errStateUnderflow), which says nothing of the pencil
+// there.
 func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 	tol := poleClusterSpread * eps() * sp.scale
 	h := max(2*sp.gap, tol)
 	gh := make([]complex128, len(g))
-	if err := ddResponse(sys, pointAt(s+complex(h, 0)), gh); err != nil {
+	if err := ddResponseResolved(sys, pointAt(s+complex(h, 0)), gh); err != nil {
 		return !errors.Is(err, errStateUnderflow)
 	}
 	j := 0
@@ -1447,6 +1448,40 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 	}
 	copy(dst, g)
 	return nil
+}
+
+// ddResponseResolved is ddResponse where the balanced solve verifies
+// componentwise (ddRealizationInto with verify), bit for bit. Where it does
+// not, or its pencil fails, it takes the verified solve of the realization
+// permuted to block upper triangular form: GEPP then pivots within the
+// diagonal blocks, where on the given order a large entry below a pivot
+// within rounding of a pole becomes the pivot and its fill swamps the
+// double-double pivots that follow (R77HNK, BTZKPE). Where neither
+// verifies it is ddResponse.
+func ddResponseResolved(sys *System, pt frequencyPoint, dst []complex128) error {
+	n, m, p := sys.Dims()
+	if n == 0 || sys.internalDelayCount() > 0 {
+		return ddResponse(sys, pt, dst)
+	}
+	verified := func(s *System) bool {
+		br := newBalancedRealization(s, n, m, p)
+		g := make([]complex128, p*m)
+		bad, err := ddRealizationInto(&br, pt, g, true)
+		if err != nil {
+			return false
+		}
+		for _, e := range bad {
+			if e != nil {
+				return false
+			}
+		}
+		copy(dst, g)
+		return true
+	}
+	if verified(sys) || verified(blockTriangularSystem(sys)) {
+		return nil
+	}
+	return ddResponse(sys, pt, dst)
 }
 
 // errDDSingular is ddRealizationInto's failure other than a lost state: a
