@@ -179,17 +179,30 @@ func TestC2DFitLeastSquaresClosedGridWhereSlowPoleIsResolved(t *testing.T) {
 // DCGain's certified G(0) = 2.384283283e6 of the stored model, not the
 // pole limit's +Inf (FKYKOG), so the free fit samples the closed grid, as
 // for fz 12571, with DC in it, and returns nil. Main held 2 integrators.
+// The fit's error stays held to NSYMIV's open-grid fit, measured off DC,
+// and the DC sample is DCGain's value.
 func TestC2DFitLeastSquaresClosedGridWhereDCGainIsFinite(t *testing.T) {
-	checkLeastSquaresFrozenFit(t, []leastSquaresFrozenCase{
-		// base (main, arm64 model) k>0: MaxRelativeError 6.26e-06, exact 3.39e-06; NSYMIV k=0 open grid: 2.5e-06; FKYKOG k=0 closed grid: 9.5727e-06.
-		{
-			name: "fz/13418",
-			n:    6,
-			a:    []float64{0x1.453f7c319b18fp+16, 0x1.18e9ef834be13p+16, 0x1.f9a0e714742a7p+13, 0x1.5b647040326cbp+17, 0x1.4c87569af3c3fp+19, -0x1.419d42820d1e9p+18, 0x1.886d9725e3ea5p+11, 0x1.52efc979737eep+11, 0x1.31087c5a8e5ecp+09, 0x1.532451117226cp+12, 0x1.e65bc804b65e8p+14, -0x1.f28d06a664effp+12, 0x1.e5c3081b509c6p+15, 0x1.a38c5742bbfb3p+15, 0x1.7994c8c648706p+13, 0x1.0516e8258db84p+17, 0x1.ed1391ce4f7dap+18, -0x1.e622b1c515df2p+17, 0x1.4909dbca0d707p+14, 0x1.1c3009dd86763p+14, 0x1.ff85707064f21p+11, 0x1.546e64667077cp+15, 0x1.582e3c957d639p+17, -0x1.36cf2ada3005p+16, 0x1.2248db526c849p+14, 0x1.f56eb6cae0994p+13, 0x1.c3464f8a3f88ep+11, 0x1.2fbbf5c79b059p+15, 0x1.2ce001865be0ep+17, -0x1.1779bf56fdaf4p+16, 0x1.2cf8eb9f6ec9fp+15, 0x1.03f2789429066p+15, 0x1.d3e3c74b1f4b2p+12, 0x1.3c14d9c9052dp+16, 0x1.377bfb5bcdfa5p+18, -0x1.22a980a00a4fp+17},
-			b:    []float64{0x1.de66f5b235fc9p-01, 0x1.2fbd634d66a85p-01, -0x1.3be6f07be269ep-01, -0x1.d8bf26a8cc686p-01, 0x1.f7deb26ec98a4p-04, 0x1.fa715db8cd433p-01},
-			c:    []float64{0x1.f1a2ae2e09c89p-18, 0x1.d281dc9064a4bp-17, -0x1.1339ce1eedbfep-16, -0x1.ba6312c503d4dp-19, 0x1.36fb071be5f0bp-16, -0x1.238ce3f1f7ce6p-17},
-			d:    0x1.9909f1fcb57b5p+01,
-			ceil: 9.582e-06,
-		},
-	})
+	// base (main, arm64 model) k>0: MaxRelativeError 6.26e-06, exact 3.39e-06; NSYMIV k=0, fit on the open grid: 2.5e-06. MaxRelativeError is measured on the open grid, without DC.
+	fz13418 := leastSquaresFrozenCase{
+		name: "fz/13418",
+		n:    6,
+		a:    []float64{0x1.453f7c319b18fp+16, 0x1.18e9ef834be13p+16, 0x1.f9a0e714742a7p+13, 0x1.5b647040326cbp+17, 0x1.4c87569af3c3fp+19, -0x1.419d42820d1e9p+18, 0x1.886d9725e3ea5p+11, 0x1.52efc979737eep+11, 0x1.31087c5a8e5ecp+09, 0x1.532451117226cp+12, 0x1.e65bc804b65e8p+14, -0x1.f28d06a664effp+12, 0x1.e5c3081b509c6p+15, 0x1.a38c5742bbfb3p+15, 0x1.7994c8c648706p+13, 0x1.0516e8258db84p+17, 0x1.ed1391ce4f7dap+18, -0x1.e622b1c515df2p+17, 0x1.4909dbca0d707p+14, 0x1.1c3009dd86763p+14, 0x1.ff85707064f21p+11, 0x1.546e64667077cp+15, 0x1.582e3c957d639p+17, -0x1.36cf2ada3005p+16, 0x1.2248db526c849p+14, 0x1.f56eb6cae0994p+13, 0x1.c3464f8a3f88ep+11, 0x1.2fbbf5c79b059p+15, 0x1.2ce001865be0ep+17, -0x1.1779bf56fdaf4p+16, 0x1.2cf8eb9f6ec9fp+15, 0x1.03f2789429066p+15, 0x1.d3e3c74b1f4b2p+12, 0x1.3c14d9c9052dp+16, 0x1.377bfb5bcdfa5p+18, -0x1.22a980a00a4fp+17},
+		b:    []float64{0x1.de66f5b235fc9p-01, 0x1.2fbd634d66a85p-01, -0x1.3be6f07be269ep-01, -0x1.d8bf26a8cc686p-01, 0x1.f7deb26ec98a4p-04, 0x1.fa715db8cd433p-01},
+		c:    []float64{0x1.f1a2ae2e09c89p-18, 0x1.d281dc9064a4bp-17, -0x1.1339ce1eedbfep-16, -0x1.ba6312c503d4dp-19, 0x1.36fb071be5f0bp-16, -0x1.238ce3f1f7ce6p-17},
+		d:    0x1.9909f1fcb57b5p+01,
+		ceil: 2.5e-06,
+	}
+	checkLeastSquaresFrozenFit(t, []leastSquaresFrozenCase{fz13418})
+	sys := fz13418.system(t)
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr, err := sys.FreqResponse([]float64{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fr.At(0, 0, 0), complex(g.At(0, 0), 0); got != want {
+		t.Errorf("FreqResponse(0) = %v, DCGain %v", got, want)
+	}
 }
