@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -141,4 +143,62 @@ func TestFreqResponseWithinTermsCancellingOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkWithinTerms(t, sys, ws, resp, 0)
+}
+
+// FKYKOG: both delay-free explicit solvers, MIMO, continuous and discrete,
+// against the term-bound oracle on the stressed sweep models.
+func TestFreqResponseWithinTermsSweepSolvers(t *testing.T) {
+	for kind := range sweepModelKinds {
+		for _, dt := range []float64{0, 0.1} {
+			for _, n := range []int{5, 24} {
+				rng := rand.New(rand.NewPCG(uint64(n), uint64(kind)<<1|map[bool]uint64{false: 0, true: 1}[dt > 0]))
+				sys, _ := randomSweepRealization(rng, kind, dt, false, n, 2, 2)
+				if sys == nil {
+					continue
+				}
+				var ws []float64
+				for k, w := range withinTermsGrid(dt) {
+					if k%3 == 0 {
+						ws = append(ws, w)
+					}
+				}
+				e := newFrequencyEvaluator(sys)
+				for _, solver := range []frequencyPointSolver{newBalancedDense(sys, n, 2, 2), newHessenbergSweep(sys, n, 2, 2)} {
+					name := fmt.Sprintf("%v/dt=%g/n=%d/%T", kind, dt, n, solver)
+					data := make([]complex128, len(ws)*4)
+					if err := e.sweepInto(ws, data, solver); err != nil {
+						t.Errorf("%s: %v", name, err)
+						continue
+					}
+					t.Run(name, func(t *testing.T) {
+						checkWithinTerms(t, sys, ws, newFreqResponseMatrix(data, ws, 2, 2, nil, nil), 0)
+					})
+				}
+			}
+		}
+	}
+}
+
+// FKYKOG: the discrete DC point z = 1 is DCGain's too, at an integrator
+// and off one.
+func TestFreqResponseAtDCIsDCGainDiscrete(t *testing.T) {
+	for _, a22 := range []float64{1, -0.3} {
+		sys := withinTermsModel(t, 2, []float64{0.5, 0.25, 0, a22}, []float64{1, 1}, []float64{1, 0.5}, []float64{0.125}, 0.1)
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := complex(g.At(0, 0), 0)
+		resp, err := sys.FreqResponse([]float64{0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := sys.EvalFr(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resp.At(0, 0, 0); got != want || h[0][0] != want {
+			t.Errorf("a22=%v: FreqResponse(0) = %v, EvalFr(1) = %v, DCGain %v", a22, got, h[0][0], want)
+		}
+	}
 }

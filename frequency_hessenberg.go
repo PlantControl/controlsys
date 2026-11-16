@@ -590,10 +590,15 @@ func (bd *balancedDense) certifyTerms(pt frequencyPoint, dst []complex128) bool 
 	}
 	br := &bd.balancedRealization
 	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+	refined := false
 	for step := 0; !rowsOK && step < maxRefineSteps; step++ {
 		bd.refineStep()
 		compensatedOutput(br, bd.x, bd.m, 1, dst)
 		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+		refined = true
+	}
+	if ok && refined {
+		termsRefinedCount.Add(1)
 	}
 	return ok
 }

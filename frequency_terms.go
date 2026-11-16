@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"sync/atomic"
 )
 
 // FreqResponse's within-terms contract (FKYKOG) for an explicit model
@@ -44,6 +45,9 @@ type termsCert struct {
 	xc, r   []complex128
 	xm, s   []float64
 	t, t2   []float64
+	// undriven marks, at k*m+j, a state input j cannot reach (undrivenStates):
+	// exactly zero in x, where the solve leaves only roundoff fill.
+	undriven []bool
 }
 
 func newTermsCert(br *balancedRealization) *termsCert {
@@ -60,14 +64,20 @@ func newTermsCert(br *balancedRealization) *termsCert {
 	for i, v := range br.a {
 		tc.absA[i] = math.Abs(v)
 	}
+	tc.undriven = br.undrivenStates()
 	return tc
 }
 
 // load sets tc.xc and tc.xm to column j of x (entry k at x[k*ks+j*js])
-// and its moduli.
+// and its moduli, with the states input j cannot reach set to their exact
+// 0: their rows then hold exactly, and the output check measures what
+// their fill added to the value.
 func (tc *termsCert) load(x []complex128, ks, js, j int) {
 	for k := range tc.n {
 		v := x[k*ks+j*js]
+		if tc.undriven[k*tc.m+j] {
+			v = 0
+		}
 		tc.xc[k] = v
 		tc.xm[k] = termsAbs(v)
 	}
@@ -236,26 +246,40 @@ func evalWithinTerms(solver termsSolver, sys *System, pt frequencyPoint, dst []c
 	}
 	err := solver.evalInto(pt, dst)
 	if err == nil && solver.certifyTerms(pt, dst) {
+		termsPassCount.Add(1)
 		return nil
 	}
 	if errors.Is(err, errNonFinitePencil) || errors.Is(err, errStateUnderflow) {
 		return err
 	}
 	if ddResponseVerified(sys, pt, dst) {
+		termsDDCount.Add(1)
 		return nil
 	}
 	n, _, _ := sys.Dims()
-	if n > exactDetMaxOrder {
-		return errTermsUnverified
-	}
 	ps, ok := cachedPoleSchur(sys)
-	if !ok {
+	if n > exactDetMaxOrder || !ok {
+		termsUnverifiedCount.Add(1)
 		return errTermsUnverified
 	}
 	g, _, ok := exactResponseAt(ps, pt)
 	if !ok {
-		return evalWithPoleLimit(solver.evalInto, sys, pt, dst)
+		termsPoleCount.Add(1)
+		return evalWithPoleLimit(func(at frequencyPoint, d []complex128) error {
+			if at == pt {
+				return errSingularPencil
+			}
+			return solver.evalInto(at, d)
+		}, sys, pt, dst)
 	}
+	termsExactCount.Add(1)
 	copy(dst, g)
 	return nil
 }
+
+// termsPassCount, termsDDCount, termsExactCount, termsPoleCount and
+// termsUnverifiedCount count how evalWithinTerms settled each point: the
+// certified double solve (refined where termsRefinedCount also counts it),
+// the verified double-double response, the exact response, the pole limit
+// at an exactly singular pencil, or errTermsUnverified; for the census.
+var termsPassCount, termsRefinedCount, termsDDCount, termsExactCount, termsPoleCount, termsUnverifiedCount atomic.Int64

@@ -643,11 +643,7 @@ func applyIODelayPhase(sys *System, omega []float64, data []complex128, p, m int
 	pm := p * m
 	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
-		pt := td.frequencyPoint(w)
-		if pt.value() == dcPoint(sys) {
-			continue
-		}
-		applyIODelayMatrixAtS(sys, pt, data[k*pm:(k+1)*pm], p, m, delay)
+		applyIODelayMatrixAtS(sys, td.frequencyPoint(w), data[k*pm:(k+1)*pm], p, m, delay)
 	}
 }
 
