@@ -593,18 +593,59 @@ func (bd *balancedDense) certifyTerms(pt frequencyPoint, dst []complex128) bool 
 		bd.cert = newTermsCert(&bd.balancedRealization)
 	}
 	br := &bd.balancedRealization
-	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd)
+	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd, nil)
 	refined := false
 	for step := 0; !rowsOK && step < maxRefineSteps; step++ {
 		bd.refineStep()
 		compensatedOutput(br, bd.x, bd.m, 1, dst)
-		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd)
+		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd, nil)
 		refined = true
+	}
+	if !ok && rowsOK {
+		ok = bd.certifyInverse(pt, bd.x, dst)
+		if ok {
+			termsInverseCount.Add(1)
+		}
 	}
 	if ok && refined {
 		termsRefinedCount.Add(1)
 	}
 	return ok
+}
+
+// certifyInverse runs termsCert on x and dst with |M| from the
+// approximate-inverse tier (inverseBound) of evalInto's factors at pt.
+func (bd *balancedDense) certifyInverse(pt frequencyPoint, x, dst []complex128) bool {
+	n := bd.n
+	ib := newInverseBound(&bd.balancedRealization, bd.cert.absA, pt, func(y []complex128) {
+		cLUSolve(bd.pencil, bd.piv, y, n, n)
+	})
+	if ib == nil {
+		return false
+	}
+	_, ok := bd.cert.certify(&bd.balancedRealization, pt, x, bd.m, 1, dst, bd, ib)
+	return ok
+}
+
+// factorAt overwrites bd.pencil with the GEPP factors of the explicit sÎ − Â
+// at pt, as evalInto forms it, failing only at an exactly zero pivot; it
+// leaves no solution.
+func (bd *balancedDense) factorAt(pt frequencyPoint) bool {
+	n := bd.n
+	if pt.isPlain() {
+		bd.fillPencil(pt.value())
+	} else {
+		bd.fillPencilAt(pt)
+	}
+	if !cLUFactor(bd.pencil, bd.piv, n) {
+		return false
+	}
+	for i := range n {
+		bd.inv[i] = crecip(bd.pencil[i*n+i])
+		bd.last[i] = n - 1
+	}
+	bd.pt, bd.via, bd.absOK = pt, viaSolve, false
+	return true
 }
 
 // refineStep applies one correction to bd.x against the exact pencil at
@@ -1487,7 +1528,7 @@ func (hs *hessenbergSweep) certifyTerms(pt frequencyPoint, dst []complex128) boo
 		for i, v := range hs.x {
 			hs.xf[i] += v
 		}
-		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs); ok {
+		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs, nil); ok {
 			return true
 		}
 		if hs.denseRetry(pt, dst) != nil {

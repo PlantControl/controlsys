@@ -1518,17 +1518,22 @@ func ddVerifiedInto(sys *System, pt frequencyPoint, dst []complex128, certify bo
 
 // certifyStates reports whether g, the response at pt of the explicit
 // balanced realization br from its state solution x (row-major n×m),
-// passes termsCert, with N and ΔF from br's own double GEPP factors there.
+// passes termsCert with br's own double GEPP factors there: through their
+// comparison matrices, else the approximate-inverse tier, whose residual
+// against the stored pencil is compensated as x's rows are.
 func certifyStates(br balancedRealization, pt frequencyPoint, x, g []complex128) bool {
 	if br.e != nil {
 		return false
 	}
 	bd := newBalancedDenseOf(br)
-	if bd.evalInto(pt, make([]complex128, br.p*br.m)) != nil {
+	if !bd.factorAt(pt) {
 		return false
 	}
-	_, ok := newTermsCert(&bd.balancedRealization).certify(&bd.balancedRealization, pt, x, br.m, 1, g, bd)
-	return ok
+	bd.cert = newTermsCert(&bd.balancedRealization)
+	if _, ok := bd.cert.certify(&bd.balancedRealization, pt, x, br.m, 1, g, bd, nil); ok {
+		return true
+	}
+	return bd.certifyInverse(pt, x, g)
 }
 
 // errDDSingular is ddRealizationInto's failure other than a lost state: a

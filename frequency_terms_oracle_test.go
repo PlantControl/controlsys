@@ -94,7 +94,7 @@ func frTermsExact(sys *System, pt frequencyPoint) (h []bandwidthDipC, delta []fl
 			h[ii*m+jj] = acc
 		}
 	}
-	u := float64(n) * eps()
+	u := 4 * float64(n+5) * eps()
 	absMb := make([]float64, n*m)
 	amb := make([]float64, n*m)
 	for i := range n {

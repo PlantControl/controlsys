@@ -60,8 +60,9 @@ type termsCert struct {
 	n, m, p int
 	absA    []float64
 	nnz     []int
-	xc      []complex128
-	xm, s   []float64
+	xc      []complex128 // n×m column blocks: column j at [j*n:(j+1)*n]
+	xm, s   []float64    // likewise
+	sAll    []float64
 	t, t2   []float64
 	w       []float64
 	// undriven marks, at k*m+j, a state input j cannot reach (undrivenStates):
@@ -73,6 +74,10 @@ type termsCert struct {
 // read it per row.
 const termsEps = 0x1p-52
 
+// termsU is the contract's u = 4(n+5)·eps() = 4(n+5)·2⁻⁵² of an n-state
+// model; θ = u/2.
+func termsU(n int) float64 { return 4 * float64(n+5) * termsEps }
+
 // comparisonBounds bounds the inverse of a factored pencil (step 3):
 // nsolve overwrites the nonnegative y with Ny, and factorError sets dst
 // to an upper bound on |ΔF|y.
@@ -82,16 +87,16 @@ type comparisonBounds interface {
 }
 
 func newTermsCert(br *balancedRealization) *termsCert {
-	n := br.n
-	f := make([]float64, n*n+5*n)
-	tc := &termsCert{
-		n: n, m: br.m, p: br.p,
-		absA: f[: n*n : n*n],
-		nnz:  make([]int, n),
-		xc:   make([]complex128, n),
-		xm:   f[n*n : n*n+n : n*n+n], s: f[n*n+n : n*n+2*n : n*n+2*n],
-		t: f[n*n+2*n : n*n+3*n : n*n+3*n], t2: f[n*n+3*n : n*n+4*n : n*n+4*n], w: f[n*n+4*n:],
+	n, m := br.n, br.m
+	f := make([]float64, n*n+2*n*m+5*n)
+	take := func(k int) []float64 {
+		out := f[:k:k]
+		f = f[k:]
+		return out
 	}
+	tc := &termsCert{n: n, m: m, p: br.p, nnz: make([]int, n), xc: make([]complex128, n*m)}
+	tc.absA, tc.xm, tc.s = take(n*n), take(n*m), take(n*m)
+	tc.sAll, tc.t, tc.t2, tc.w = take(n), take(n), take(n), take(n)
 	for i, v := range br.a {
 		tc.absA[i] = math.Abs(v)
 		if v != 0 {
@@ -102,18 +107,19 @@ func newTermsCert(br *balancedRealization) *termsCert {
 	return tc
 }
 
-// load sets tc.xc and tc.xm to column j of x (entry k at x[k*ks+j*js])
-// and its moduli, with the states input j cannot reach set to their exact
-// 0: their rows then hold exactly, and the output check measures what
-// their fill added to the value.
+// load sets column j of tc.xc and tc.xm to column j of x (entry k at
+// x[k*ks+j*js]) and its moduli, with the states input j cannot reach set to
+// their exact 0: their rows then hold exactly, and the output check
+// measures what their fill added to the value.
 func (tc *termsCert) load(x []complex128, ks, js, j int) {
-	for k := range tc.n {
+	n := tc.n
+	for k := range n {
 		v := x[k*ks+j*js]
 		if tc.undriven[k*tc.m+j] {
 			v = 0
 		}
-		tc.xc[k] = v
-		tc.xm[k] = termsAbs(v)
+		tc.xc[j*n+k] = v
+		tc.xm[j*n+k] = termsAbs(v)
 	}
 }
 
@@ -127,12 +133,13 @@ func termsAbs(z complex128) float64 {
 }
 
 // rows reports whether column j, loaded, passes the row test of step 1 at
-// pt, leaving s in tc.s, and returns the smallest θ' ≤ θ the bounds on
+// pt, leaving s in column j of tc.s, and returns the θ' ≤ θ the bounds on
 // |rᵢ|/sᵢ prove, with cheap reporting whether a row passed on its
 // working-precision residual alone. compensated skips that tier.
 func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, compensated bool) (ok bool, thetaR float64, cheap bool) {
 	n, m := tc.n, tc.m
-	theta := float64(n) / 2 * termsEps
+	theta := termsU(n) / 2
+	xc, xm, sv := tc.xc[j*n:(j+1)*n], tc.xm[j*n:(j+1)*n], tc.s[j*n:(j+1)*n]
 	kappa := complex(1, 0)
 	if !pt.isPlain() {
 		kappa = pt.scale()
@@ -150,15 +157,15 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 			if a == 0 {
 				continue
 			}
-			s += a * tc.xm[k]
-			x := tc.xc[k]
+			s += a * xm[k]
+			x := xc[k]
 			ar += row[k] * real(x)
 			ai += row[k] * imag(x)
 			sum += a * cabs1(x)
 		}
-		tc.s[i] = s
-		xi := tc.xc[i]
-		if !compensated && tc.nnz[i]+5 <= n {
+		sv[i] = s
+		xi := xc[i]
+		if !compensated {
 			r := kappa*complex(bi, 0) - pt.p*xi - pt.q*complex(ar, ai)
 			bound := float64(tc.nnz[i]+5) * termsEps / 2 * (ka*math.Abs(bi) + pa*cabs1(xi) + qa*sum)
 			if rb := (termsAbs(r) + bound) * (1 + 2*termsEps) / km; rb <= theta*s {
@@ -169,11 +176,11 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 				continue
 			}
 		}
-		rc := pencilResidualRow(tc.xc, row, i, bi, pt.p, pt.q, kappa)
+		rc := pencilResidualRow(xc, row, i, bi, pt.p, pt.q, kappa)
 		if kappa != 1 {
 			rc *= crecip(kappa)
 		}
-		rb := termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*tc.xm[i]+cabs1(xi))
+		rb := termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*xm[i]+cabs1(xi))
 		if !(rb <= theta*s) {
 			return false, 0, cheap
 		}
@@ -215,39 +222,46 @@ func pencilResidualRow(x []complex128, row []float64, i int, b float64, p, q, ka
 	return complex(re.value(), im.value())
 }
 
-// mBound sets y to an upper bound on |M|y (step 3) and reports false where
-// the q check fails.
-func (tc *termsCert) mBound(y []float64, cb comparisonBounds) bool {
-	cb.nsolve(y)
-	cb.factorError(tc.w, y)
-	cb.nsolve(tc.w)
-	q := 0.0
-	for i, v := range y {
-		if tc.w[i] == 0 {
-			continue
+// mUpper overwrites the nonnegative y with an upper bound on |M|y and
+// reports false where it has none.
+type mUpper func(y []float64) bool
+
+// comparisonUpper is step 3's mUpper from the factors' comparison
+// matrices: v = Ny, then the q check N(|ΔF|v) ≤ q·v, q < 1, gives
+// |M|y ≤ v/(1−q).
+func (tc *termsCert) comparisonUpper(cb comparisonBounds) mUpper {
+	return func(y []float64) bool {
+		cb.nsolve(y)
+		cb.factorError(tc.w, y)
+		cb.nsolve(tc.w)
+		q := 0.0
+		for i, v := range y {
+			if tc.w[i] == 0 {
+				continue
+			}
+			if !(v > 0) {
+				return false
+			}
+			q = max(q, tc.w[i]/v)
 		}
-		if !(v > 0) {
+		q *= 1 + 8*float64(tc.n)*termsEps
+		if !(q < 1) {
 			return false
 		}
-		q = max(q, tc.w[i]/v)
+		f := 1 / (1 - q) * (1 + 2*termsEps)
+		for i := range y {
+			y[i] *= f
+		}
+		return true
 	}
-	q *= 1 + 8*float64(tc.n)*termsEps
-	if !(q < 1) {
-		return false
-	}
-	f := 1 / (1 - q) * (1 + 2*termsEps)
-	for i := range y {
-		y[i] *= f
-	}
-	return true
 }
 
-// tail sets tc.t2 to an upper bound on |M||Â||M|s of step 2 and reports
-// false where a q check fails.
-func (tc *termsCert) tail(cb comparisonBounds) bool {
+// tail sets tc.t2 to an upper bound on |M||Â||M|sAll of step 2, shared by
+// every column, and reports false where up has no bound.
+func (tc *termsCert) tail(up mUpper) bool {
 	n := tc.n
-	copy(tc.t, tc.s)
-	if !tc.mBound(tc.t, cb) {
+	copy(tc.t, tc.sAll)
+	if !up(tc.t) {
 		return false
 	}
 	for i := range n {
@@ -257,27 +271,29 @@ func (tc *termsCert) tail(cb comparisonBounds) bool {
 		}
 		tc.t2[i] = v
 	}
-	return tc.mBound(tc.t2, cb)
+	return up(tc.t2)
 }
 
 // output reports whether each entry of column j of dst passes steps 4–5,
-// column j of x̂ loaded and its tail formed.
-func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, theta float64) bool {
+// column j of x̂ loaded and the tail formed, with ib's lower bound on X
+// where ib is not nil.
+func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, theta float64, ib *inverseBound) bool {
 	n, m := tc.n, tc.m
-	u := float64(n) * termsEps
+	u := termsU(n)
 	grow := 1 + 8*float64(n)*termsEps
+	xc, xm := tc.xc[j*n:(j+1)*n], tc.xm[j*n:(j+1)*n]
 	for i := range tc.p {
 		cr := br.c[i*n : (i+1)*n]
 		h := dst[i*m+j]
 		var re, im compensatedSum
 		var l, ct, mag float64
 		for k, c := range cr {
-			re.addProd(c, real(tc.xc[k]))
-			im.addProd(c, imag(tc.xc[k]))
+			re.addProd(c, real(xc[k]))
+			im.addProd(c, imag(xc[k]))
 			ac := math.Abs(c)
-			l += ac * tc.xm[k]
+			l += ac * xm[k]
 			ct += ac * tc.t2[k]
-			mag += ac * cabs1(tc.xc[k])
+			mag += ac * cabs1(xc[k])
 		}
 		d := 0.0
 		if br.d != nil {
@@ -292,6 +308,9 @@ func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, th
 			return false
 		}
 		lo := max(l*(1-2*float64(n)*termsEps)-t2, 0) / (1 + theta)
+		if ib != nil {
+			lo = max(lo, ib.xLow(br, i, j))
+		}
 		if !(o+t2 <= ((u-theta)*lo+u*math.Abs(d))*(1-4*termsEps)) {
 			return false
 		}
@@ -299,29 +318,228 @@ func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, th
 	return true
 }
 
-// certify runs steps 1–5 on x (entry (k, j) at x[k*ks+j*js]) and dst.
-// rowsOK reports step 1 alone, which refinement can still fix.
-func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []complex128, ks, js int, dst []complex128, cb comparisonBounds) (rowsOK, ok bool) {
+// certify runs steps 1–5 on x (entry (k, j) at x[k*ks+j*js]) and dst, with
+// |M| bounded by the comparison matrices of cb, or by ib where ib is not
+// nil. The tail is formed once per point on s summed over the columns, and
+// θ' is the largest over the columns. rowsOK reports step 1 alone, which
+// refinement can still fix.
+func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []complex128, ks, js int, dst []complex128, cb comparisonBounds, ib *inverseBound) (rowsOK, ok bool) {
+	n := tc.n
+	clear(tc.sAll)
+	thetaR, cheap := 0.0, false
 	for j := range tc.m {
 		tc.load(x, ks, js, j)
-		rowsOK, thetaR, cheap := tc.rows(br, pt, j, false)
-		if !rowsOK {
+		ok, th, ch := tc.rows(br, pt, j, false)
+		if !ok {
 			return false, false
 		}
-		if !tc.tail(cb) {
-			return true, false
-		}
-		if tc.output(br, dst, j, thetaR) {
-			continue
-		}
-		if !cheap {
-			return true, false
-		}
-		if _, thetaR, _ = tc.rows(br, pt, j, true); !tc.output(br, dst, j, thetaR) {
-			return true, false
+		thetaR, cheap = max(thetaR, th), cheap || ch
+		for i, v := range tc.s[j*n : (j+1)*n] {
+			tc.sAll[i] += v
 		}
 	}
-	return true, true
+	up := tc.comparisonUpper(cb)
+	if ib != nil {
+		up = ib.upper
+	}
+	if !tc.tail(up) {
+		return true, false
+	}
+	pass := func(th float64) bool {
+		for j := range tc.m {
+			if !tc.output(br, dst, j, th, ib) {
+				return false
+			}
+		}
+		return true
+	}
+	if pass(thetaR) {
+		return true, true
+	}
+	if !cheap {
+		return true, false
+	}
+	thetaR = 0
+	for j := range tc.m {
+		_, th, _ := tc.rows(br, pt, j, true)
+		thetaR = max(thetaR, th)
+	}
+	return true, pass(thetaR)
+}
+
+// inverseBound is the approximate-inverse tier of step 3 at a point the
+// comparison matrices do not certify. Y ≈ (λI − Â)⁻¹ comes from the LU
+// factors; R̄ ≥ |I − Y(λI − Â)| bounds the residual against the stored
+// pencil, its rounding included. Where R̄𝟙 ≤ q𝟙 with q < 1,
+// M = (I − R)⁻¹Y gives |M| ≤ (I − R̄)⁻¹|Y| (upper) and
+// |M| ≥ |Y| − (I − R̄)⁻¹R̄|Y| (Mlow, clamped at 0); each Neumann tail
+// beyond its first term is bounded by its largest entry times q/(1−q).
+// X ≥ |c|Mlow|Â|Mlow|b| + |c|Mlow|b| (xLow), as every factor is
+// nonnegative.
+type inverseBound struct {
+	n    int
+	q    float64
+	rbar []float64 // n×n
+	yUp  []float64 // n×n, ≥ |Y|
+	mLow []float64 // n×n, ≤ |M|
+	absA []float64
+	w, z []float64
+	r1   []float64
+}
+
+// newInverseBound builds the tier at pt for br, with solve overwriting the
+// row-major n×n identity with Y; nil where q ≥ 1/2 or a bound is not
+// finite.
+func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint, solve func(y []complex128)) *inverseBound {
+	n := br.n
+	y := make([]complex128, n*n)
+	for i := range n {
+		y[i*n+i] = 1
+	}
+	solve(y)
+	lam := pt.value()
+	la := cabs1(lam)
+	ib := &inverseBound{n: n, rbar: make([]float64, n*n), yUp: make([]float64, n*n), mLow: make([]float64, n*n), absA: absA,
+		w: make([]float64, n), z: make([]float64, n), r1: make([]float64, n)}
+	gamma := float64(n+8) * termsEps
+	for i := range n {
+		yi := y[i*n : (i+1)*n]
+		for j := range n {
+			var re, im, ya float64
+			for k, v := range yi {
+				a := br.a[k*n+j]
+				if a == 0 {
+					continue
+				}
+				re += real(v) * a
+				im += imag(v) * a
+				ya += cabs1(v) * absA[k*n+j]
+			}
+			r := complex(re, im) - lam*yi[j]
+			if i == j {
+				r += 1
+			}
+			e := gamma * (la*cabs1(yi[j]) + ya)
+			if i == j {
+				e += gamma
+			}
+			ib.rbar[i*n+j] = cabs1(r)*(1+2*termsEps) + e
+		}
+	}
+	for i := range n {
+		var rs float64
+		for _, v := range ib.rbar[i*n : (i+1)*n] {
+			rs += v
+		}
+		ib.q = max(ib.q, rs*(1+float64(n)*termsEps))
+	}
+	if !(ib.q < 0.5) {
+		return nil
+	}
+	for i, v := range y {
+		ib.yUp[i] = cabs1(v)
+	}
+	e0 := make([]float64, n*n)
+	for i := range n {
+		for k, r := range ib.rbar[i*n : (i+1)*n] {
+			if r == 0 {
+				continue
+			}
+			for j, v := range ib.yUp[k*n : (k+1)*n] {
+				e0[i*n+j] += r * v
+			}
+		}
+	}
+	f := ib.q / (1 - ib.q)
+	grow := 1 + 4*float64(n)*termsEps
+	for j := range n {
+		cm := 0.0
+		for i := range n {
+			cm = max(cm, e0[i*n+j])
+		}
+		for i := range n {
+			e := (e0[i*n+j] + cm*f) * grow
+			ib.mLow[i*n+j] = max(termsAbs(y[i*n+j])*(1-2*termsEps)-e, 0)
+		}
+	}
+	for _, v := range ib.yUp {
+		if !(v <= math.MaxFloat64) {
+			return nil
+		}
+	}
+	return ib
+}
+
+// upper is inverseBound's mUpper: (I − R̄)⁻¹|Y|y ≤ w + R̄w + max(R̄w)·q/(1−q),
+// w = |Y|y.
+func (ib *inverseBound) upper(y []float64) bool {
+	n := ib.n
+	for i := range n {
+		var v float64
+		for k, a := range ib.yUp[i*n : (i+1)*n] {
+			v += a * y[k]
+		}
+		ib.w[i] = v
+	}
+	mx := 0.0
+	for i := range n {
+		var v float64
+		for k, r := range ib.rbar[i*n : (i+1)*n] {
+			v += r * ib.w[k]
+		}
+		ib.z[i] = v
+		mx = max(mx, v)
+	}
+	f := mx * ib.q / (1 - ib.q)
+	grow := 1 + 4*float64(n)*termsEps
+	for i := range n {
+		y[i] = (ib.w[i] + ib.z[i] + f) * grow
+		if !(y[i] <= math.MaxFloat64) {
+			return false
+		}
+	}
+	return true
+}
+
+// xLow is the lower bound |cᵢ|Mlow|Â|Mlow|bⱼ| + |cᵢ|Mlow|bⱼ| on entry
+// (i, j)'s X, rounded down.
+func (ib *inverseBound) xLow(br *balancedRealization, i, j int) float64 {
+	n, m := ib.n, br.m
+	r1, w, z := ib.r1, ib.w, ib.z
+	clear(r1)
+	for k, c := range br.c[i*n : (i+1)*n] {
+		if c == 0 {
+			continue
+		}
+		ac := math.Abs(c)
+		for l, v := range ib.mLow[k*n : (k+1)*n] {
+			r1[l] += ac * v
+		}
+	}
+	clear(w)
+	for k, v := range r1 {
+		if v == 0 {
+			continue
+		}
+		for l, a := range ib.absA[k*n : (k+1)*n] {
+			w[l] += v * a
+		}
+	}
+	clear(z)
+	for k, v := range w {
+		if v == 0 {
+			continue
+		}
+		for l, a := range ib.mLow[k*n : (k+1)*n] {
+			z[l] += v * a
+		}
+	}
+	var x float64
+	for k := range n {
+		b := math.Abs(br.b[k*m+j])
+		x += (z[k] + r1[k]) * b
+	}
+	return x * (1 - 8*float64(n)*termsEps)
 }
 
 // compensatedOutput sets dst = Ĉx + D, each entry rounded once.
@@ -484,7 +702,8 @@ func blockSingularAt(sys *System, pt frequencyPoint) bool {
 
 // termsPassCount, termsDDCount, termsExactCount, termsPoleCount and
 // termsUnverifiedCount count how evalWithinTerms settled each point: the
-// certified double solve (refined where termsRefinedCount also counts it),
+// certified double solve (refined where termsRefinedCount also counts it,
+// through the approximate-inverse tier where termsInverseCount does),
 // the verified double-double response, the exact response, the pole limit
 // at an exactly singular pencil, or errTermsUnverified; for the census.
-var termsPassCount, termsRefinedCount, termsDDCount, termsExactCount, termsPoleCount, termsUnverifiedCount atomic.Int64
+var termsPassCount, termsRefinedCount, termsInverseCount, termsDDCount, termsExactCount, termsPoleCount, termsUnverifiedCount atomic.Int64
