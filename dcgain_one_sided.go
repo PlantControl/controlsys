@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
@@ -22,11 +23,14 @@ import (
 // x0·I − A_rr nonsingular rather than assuming it, so K holds every pole
 // at x0. An entry whose terms all have a B_kj (C_ik) of exactly 0 has no
 // pole there and is the gain of (A_rr, B_r, C_r, D), certified with
-// dcZeroRule. Otherwise every term with a nonzero B_kj (C_ik) needs a β
-// proven nonzero (|β| beyond its bound) and all terms one sign, the sign
-// of ρ as a product of signs; the entry is that infinity, the one-sided
-// limit σ → 0⁺ of exactDCGainLimit. A β whose bound reaches 0 leaves the
-// coefficient and any derivative term undecided, and ok is false.
+// dcZeroRule. Otherwise ρ̂ = Σ_k B_kj·β̂_ik, summed exactly, must exceed
+// Σ_k |B_kj|·(2τ_ik + ½ulp(β̂_ik)), an isolated integrator's β exact with
+// τ = 0: one τ covers the certificate's error, the other keeps |ρ| beyond
+// ε of its own terms, where exactDCGainLimitRounded reads it as no
+// cancellation. The entry is the infinity of ρ̂'s sign, the one-sided
+// limit σ → 0⁺ of exactDCGainLimit. A ρ̂ within that bound leaves the
+// coefficient and any derivative term undecided, and ok is false; so does
+// a zero-row integrator beside a zero-column one (a second-order pole).
 func (sys *System) dcGainOneSidedCertified(x0 float64) (*mat.Dense, bool) {
 	n, _, _ := sys.Dims()
 	aRaw := sys.A.RawMatrix()
@@ -41,6 +45,15 @@ func (sys *System) dcGainOneSidedCertified(x0 float64) (*mat.Dense, bool) {
 		}
 		if nk == 0 {
 			continue
+		}
+		mixed := false
+		for k := range n {
+			mixed = mixed || !inK[k] && aRaw.Data[k*aRaw.Stride+k] == x0 && zeroOffDiagonalLine(aRaw, k, !rows)
+		}
+		if mixed {
+			// A zero-row and a zero-column integrator chained through the
+			// regular states make a second-order pole.
+			return nil, false
 		}
 		if g, ok := sys.dcGainOneSidedIntegrators(x0, inK, nk, rows); ok {
 			return g, true
@@ -121,44 +134,84 @@ func (sys *System) dcGainOneSidedIntegrators(x0 float64, inK []bool, nk int, row
 	if beta == nil {
 		return nil, false
 	}
+	isolated := make([]bool, nk)
+	aRaw := a.RawMatrix()
+	for kk, k := range ks {
+		isolated[kk] = zeroOffDiagonalLine(aRaw, k, !rows)
+	}
+	bcols := beta.RawMatrix().Cols
 	var fin *mat.Dense
 	var ftau []float64
+	var rho, bound, tr big.Rat
 	gain := mat.NewDense(p, m, nil)
 	for i := range p {
 		for j := range m {
-			sign := 0
+			terms, single := 0, 0
 			for kk, k := range ks {
-				w, bi, bj := b.At(k, j), i, kk
+				w, bi := b.At(k, j), i
 				if !rows {
-					w, bi, bj = c.At(i, k), j, kk
+					w, bi = c.At(i, k), j
 				}
 				if w == 0 {
 					continue
 				}
-				v, t := beta.At(bi, bj), btau[bi*beta.RawMatrix().Cols+bj]
-				if v == 0 || !dcZeroRule(v, t) {
-					return nil, false
+				terms++
+				single = kk
+				if isolated[kk] {
+					btau[bi*bcols+kk] = 0
 				}
-				s := signInt(w) * signInt(v)
-				if sign == -s {
-					return nil, false
-				}
-				sign = s
 			}
-			if sign != 0 {
-				gain.Set(i, j, math.Inf(sign))
+			if terms == 0 {
+				if fin == nil {
+					if fin, ftau = dcCertifiedGainOf(pick(a, rs, rs), pick(b, rs, ins), pick(c, outs, rs), denseCopySafe(sys.D, p, m), p, m, x0); fin == nil {
+						return nil, false
+					}
+				}
+				v := fin.At(i, j)
+				if !dcZeroRule(v, ftau[i*m+j]) {
+					return nil, false
+				}
+				gain.Set(i, j, v)
 				continue
 			}
-			if fin == nil {
-				if fin, ftau = dcCertifiedGainOf(pick(a, rs, rs), pick(b, rs, ins), pick(c, outs, rs), denseCopySafe(sys.D, p, m), p, m, x0); fin == nil {
+			bi := i
+			if !rows {
+				bi = j
+			}
+			if terms == 1 {
+				v, t := beta.At(bi, single), btau[bi*bcols+single]
+				w := b.At(ks[single], j)
+				if !rows {
+					w = c.At(i, ks[single])
+				}
+				if v == 0 || !(math.Abs(v)*(1-0x1p-52) > 2*t) {
 					return nil, false
 				}
+				gain.Set(i, j, math.Inf(signInt(w)*signInt(v)))
+				continue
 			}
-			v := fin.At(i, j)
-			if !dcZeroRule(v, ftau[i*m+j]) {
+			rho.SetInt64(0)
+			bound.SetInt64(0)
+			for kk, k := range ks {
+				w := b.At(k, j)
+				if !rows {
+					w = c.At(i, k)
+				}
+				if w == 0 {
+					continue
+				}
+				v, t := beta.At(bi, kk), btau[bi*bcols+kk]
+				tr.SetFloat64(w)
+				tr.Mul(&tr, new(big.Rat).SetFloat64(v))
+				rho.Add(&rho, &tr)
+				tr.SetFloat64(math.Abs(w))
+				tr.Mul(&tr, new(big.Rat).SetFloat64(2*t+math.Abs(v)*0x1p-52))
+				bound.Add(&bound, &tr)
+			}
+			if new(big.Rat).Abs(&rho).Cmp(&bound) <= 0 {
 				return nil, false
 			}
-			gain.Set(i, j, v)
+			gain.Set(i, j, math.Inf(rho.Sign()))
 		}
 	}
 	return gain, true

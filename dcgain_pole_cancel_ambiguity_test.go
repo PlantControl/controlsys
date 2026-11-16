@@ -45,6 +45,7 @@ func TestDCGainPoleCancelAmbiguityUnverified(t *testing.T) {
 	}
 	rows := []row{
 		{"over-cancelled Series a=0.1 b=0.7", 3, 1, 1, []float64{1, 0, 0, 0.93000000000000005, 0, -0.069999999999999993, -1.2000000000000002, 1, 0.79999999999999993}, []float64{1, 0, 0}, []float64{1, 0, 1}, []float64{0}, 0.1},
+		{"over-cancelled Series PCG row", 3, 1, 1, []float64{1, 0, 0, 43.146116550661567, 0, -0.47070270576561263, -51.179027658665589, 1, 1.3721585387766906}, []float64{1, 0, 0}, []float64{81.515845670571821, 0, 1}, []float64{0}, 0.1},
 		{"over-cancelled Series, other order", 3, 1, 1, []float64{0, -0.45000000000000001, 0, 1, 1.3999999999999999, 0, 0, 1, 1}, []float64{0.055, -0.060000000000000026, 0.10000000000000001}, []float64{0, 0, 1}, []float64{0}, 0.1},
 		{"Parallel residue cancellation", 3, 1, 1, []float64{1, 0, 0, 0, 0, -0.90000000000000002, 0, 1, 1.8999999999999999}, []float64{1, -0.099999999999999978, 0}, []float64{1, 0, 1}, []float64{0}, 0.1},
 		{"Parallel zero-gain cancellation", 3, 1, 1, []float64{0, -0.90000000000000002, 0, 1, 1.8999999999999999, 0, 0, 0, 1}, []float64{-0.90000000000000002, 1, -1}, []float64{0, 1, 1}, []float64{0}, 0.1},
@@ -182,26 +183,4 @@ func TestBandwidthOnInfiniteExactDCGain(t *testing.T) {
 	if bw, err := Bandwidth(over, -3); !errors.Is(err, ErrInvalidArgument) || errors.Is(err, ErrAccuracyUnverified) {
 		t.Errorf("Bandwidth on an infinite exact DC gain = %v, %v; want ErrInvalidArgument alone", bw, err)
 	}
-}
-
-// The over-cancelled discrete Series PCG row of INGGF2 has a zero-row
-// integrator whose certified residue β = 5.54e-14 exceeds its own terms'
-// bound τ = 3.62e-14: rounded and strict exact limits agree on +Inf, so
-// under the within-terms contract (user decision 2026-11-16; ONYZO7
-// ruling) the pole is determined and DCGain returns it with nil.
-func TestDCGainOverCancelledSeriesCertifiedPole(t *testing.T) {
-	a := []float64{1, 0, 0, 43.146116550661567, 0, -0.47070270576561263, -51.179027658665589, 1, 1.3721585387766906}
-	b, c, d := []float64{1, 0, 0}, []float64{81.515845670571821, 0, 1}, []float64{0}
-	sys, err := NewFromSlices(3, 1, 1, a, b, c, d, 0.1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g, err := sys.DCGain()
-	if err != nil {
-		t.Fatalf("DCGain: %v", err)
-	}
-	if v := g.At(0, 0); !math.IsInf(v, 1) {
-		t.Errorf("DCGain = %v, want +Inf", v)
-	}
-	checkDCGainExactLimitEntries(t, "over-cancelled Series PCG row", 3, 1, 1, a, b, c, d, g.RawMatrix().Data, 0.1)
 }

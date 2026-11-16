@@ -1328,6 +1328,10 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		absA, absB = abs.a.RawMatrix(), abs.b.RawMatrix()
 	}
 	var sol, tmp *mat.Dense
+	// lossy reports a product of nonzero factors below the normal range: a
+	// term rounded to 0 or subnormal, so a coefficient read as exactly 0 or
+	// its same-signed bound may have lost it (ONYZO7).
+	lossy := false
 	for bi, blk := range blocks {
 		r := len(blk)
 		rd, rm := make([]float64, r*nord*m), make([]float64, r*nord*m)
@@ -1348,7 +1352,9 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 					}
 					wl, ml := at(w, ord, l), at(mag, ord, l)
 					for j := range m {
-						row[j] += a * wl[j]
+						t := a * wl[j]
+						lossy = lossy || wl[j] != 0 && math.Abs(t) < 0x1p-1022
+						row[j] += t
 						mrow[j] += am * ml[j]
 					}
 				}
@@ -1415,7 +1421,9 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 				g, bound := 0.0, 0.0
 				for k, c := range crow {
 					if cm := math.Abs(cmag[k]); cm != 0 {
-						g += c * at(w, ord, k)[j]
+						t := c * at(w, ord, k)[j]
+						lossy = lossy || at(w, ord, k)[j] != 0 && math.Abs(t) < 0x1p-1022
+						g += t
 						bound += cm * at(mag, ord, k)[j]
 					}
 				}
@@ -1440,7 +1448,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 			}
 		}
 	}
-	return gain, true, skipped, !inexact
+	return gain, true, skipped, !inexact && !lossy
 }
 
 // hasExactSingularBlock reports whether a block of a, at most
