@@ -58,8 +58,10 @@ import (
 // from it beyond tol relative to the larger of the response and the
 // entry's own terms (classifyProbe), and the model's data resolution enters
 // only in what a point inside a shared-pole window can refute.
-// Across a resolved spectral gap the count is not sufficient, and
-// frequencyAxisCutAcrossGap adds one per side of the gap.
+// Nor is the count sufficient when the verified points lie far above a
+// group of poles, a cluster near the axis or unresolved slow poles:
+// poleScalesCovered counts per pole scale. Across a resolved spectral gap
+// frequencyAxisCutAcrossGap adds one count per side of the gap.
 // False also when the eigenvalues of A or of red do not converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
 	return frequencyAxisCutAcrossGap(sys, red, removed, tol, 0)
