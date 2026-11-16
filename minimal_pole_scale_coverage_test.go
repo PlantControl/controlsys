@@ -77,7 +77,8 @@ func TestReduceRefusesCutWithUncoveredClusterGap(t *testing.T) {
 // TestPoleScalesCoveredCountsFarPointsByScale checks the count of
 // poleScalesCovered: points beyond a group's scale σ fix at most
 // 1 + ⌊ln(1/tol)/ln(d/σ)⌋ of its coefficients however many there are,
-// points at or below σ count fully, and a shared pole counts once.
+// points at or below σ count fully, a shared pole counts once, and at
+// tol ≥ 1 the count per scale does not apply.
 func TestPoleScalesCoveredCountsFarPointsByScale(t *testing.T) {
 	tol := math.Sqrt(eps())
 	all := func(n int) []bool {
@@ -104,5 +105,8 @@ func TestPoleScalesCoveredCountsFarPointsByScale(t *testing.T) {
 	}
 	if poleScalesCovered(false, []complex128{-1, -2}, poleWindows{cutPoles: []complex128{-1, -2}}, pts, all(1), tol) {
 		t.Error("four unshared poles covered by one point")
+	}
+	if !poleScalesCovered(false, group, win, far, all(len(far)), 2) {
+		t.Error("count per scale applied at tol 2")
 	}
 }

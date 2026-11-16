@@ -254,8 +254,13 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 // the group needs as many as it has poles. Without this the global count
 // n + nr can be met by points far above a cluster of poles near the axis
 // (matched C2D near z = 1) or above unresolved slow poles that leave no
-// resolved gap, while every point at their scale is uninformative.
+// resolved gap, while every point at their scale is uninformative. At
+// tol ≥ 1 no point resolves a coefficient beyond the leading one at any
+// distance, so the count per scale adds nothing to the global one.
 func poleScalesCovered(discrete bool, evG []complex128, win poleWindows, pts []complex128, verified []bool, tol float64) bool {
+	if !(tol < 1) {
+		return true
+	}
 	poleScale := func(ev complex128) float64 {
 		if !discrete {
 			return cmplx.Abs(ev)
