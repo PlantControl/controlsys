@@ -1174,12 +1174,10 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) dcLaurent {
 			return dcLaurent{g: exactDCGainLimit(sys.A, sys.B, sys.C, sys.D, x0), ok: true}
 		}
 	}
-	g, ok, _, exact := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven)
-	if !exact {
-		if cg, cok := sys.dcGainOneSidedCertified(x0); cok {
-			return dcLaurent{g: cg, ok: true, exact: true}
-		}
+	if cg, cok := sys.dcGainOneSidedCertified(x0); cok {
+		return dcLaurent{g: cg, ok: true, exact: true}
 	}
+	g, ok, _, exact := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven)
 	if ok {
 		return dcLaurent{g: g, ok: true, exact: exact}
 	}
