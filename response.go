@@ -415,8 +415,13 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // C(I−A)⁻¹B to rounding returns the float model's gain, not 0.
 // Where I−A (A) is singular to working precision, a nil error
 // means the exact limit of the float model at DC, entry by entry (a signed
-// Inf at its poles), for models of order up to 16; beyond that, only where
-// the pole is exactly decoupled or structurally exact, or no computed pole
+// Inf at its poles), for models of order up to 16, except that an entry
+// the exact zero pattern decouples from every pole at DC (an exactly
+// decoupled integrator mode, or states no path joins to the entry's input
+// and output) carries the regular-path promise above, certified by the
+// same bound and with the same rule for a 0 (ONYZO7); an Inf is certified
+// only by a pole coefficient that no cancellation can zero. Beyond order
+// 16, only those certified entries and Infs, or where no computed pole
 // is near DC and the regular-path bound proves the solve on the balanced
 // realization; with no computed pole near DC an unproven gain is solved in
 // double-double as FreqResponse evaluates it, with ErrAccuracyUnverified
@@ -776,25 +781,35 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) dcRoute {
 		return r
 	}
 	scaled, inScale, outScale := sys.dcGainIOScaled()
-	if gain, ok, sure, finiteCertified := scaled.dcGainByDecoupledSingularModes(); ok {
+	if gain, ok, sure, finiteProven := scaled.dcGainByDecoupledSingularModes(); ok {
 		gain = sys.dcGainUnscale(gain, scaled, inScale, outScale)
 		if offPole && !sure {
 			if lg, ok, skipped, _ := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven); ok && !skipped {
 				gain = dcGainWithInfSigns(gain, lg)
 			}
 		}
-		n, _, _ := sys.Dims()
-		return dcRoute{g: gain, certain: sure && (allInf(gain) || finiteCertified && n > exactDetMaxOrder)}
+		return dcRoute{g: gain, certain: sure && finiteProven}
 	}
-	if gain, ok, err := sys.dcGainByStructuralEntries(offPole); ok {
-		n, _, _ := sys.Dims()
-		return dcRoute{g: gain, err: err, certain: n > exactDetMaxOrder || err == nil && allInf(gain)}
+	if gain, ok, unproven, err := sys.dcGainByStructuralEntries(offPole); ok {
+		return dcRoute{g: gain, err: err, certain: err == nil && !unproven}
 	}
 	if l := sys.dcGainByBlockLaurent(offPole); l.ok {
 		return dcRoute{g: l.g, certain: l.exact, deflated: l.deflated, singular: true, lim: l.lim}
 	}
 	g, err := sys.dcGainPastBlockLaurent(scaled, inScale, outScale)
 	return dcRoute{g: g, err: err, deflated: true}
+}
+
+// dcZeroRule reports that a certified gain g with certificate term tau
+// (dcRegularSolve.tau) is no 0 within its bound: g = 0 with tau = 0, or
+// |g| beyond tau and its own half ulp. A value whose bound reaches 0 has
+// no correct digit and asserts a zero gain, which only the exact solve
+// decides.
+func dcZeroRule(g, tau float64) bool {
+	if g == 0 {
+		return tau == 0
+	}
+	return math.Abs(g)*(1-0x1p-52) > tau
 }
 
 // allInf reports whether every entry of g is infinite.
@@ -1028,8 +1043,11 @@ func (sys *System) dcGainTimeScaled(offPole bool) (dcRoute, bool) {
 // dcGainByStructuralEntries evaluates each entry on the states reachable
 // from its input and observable from its output by the exact sparsity of A,
 // B and C (MATLAB sminreal per channel). ok is false when no entry loses a
-// state, so the reduced channels never recurse back into it.
-func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, error) {
+// state, so the reduced channels never recurse back into it. A channel
+// nonsingular in double takes solveDCRegular's certified gain; unproven
+// reports one the certificate or dcZeroRule did not prove. A singular
+// channel takes DCGain's own value for it.
+func (sys *System) dcGainByStructuralEntries(offPole bool) (gain *mat.Dense, ok, unproven bool, err error) {
 	n, m, p := sys.Dims()
 	aRaw, bRaw, cRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
 	reach := make([][]bool, m)
@@ -1059,9 +1077,13 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 		}
 	}
 	if !reduced {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
-	gain := denseCopySafe(sys.D, p, m)
+	gain = denseCopySafe(sys.D, p, m)
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
+	}
 	var unverified error
 	keep := make([]int, 0, n)
 	for i := range p {
@@ -1089,17 +1111,25 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 				crData[ii] = cRaw.Data[i*cRaw.Stride+k]
 			}
 			sub := &System{A: ar, B: br, C: cr, D: mat.NewDense(1, 1, nil), Dt: sys.Dt}
+			if rs := solveDCRegular(nil, ar, br, cr, nil, x0, true); rs.solveErr == nil && !rs.overflow {
+				v := rs.g.At(0, 0)
+				if !rs.certified || !dcZeroRule(v, rs.tau[0]) {
+					unproven = true
+				}
+				gain.Set(i, j, gain.At(i, j)+v)
+				continue
+			}
 			g, err := sub.dcGain(offPole)
 			if err != nil {
 				if g == nil || !errors.Is(err, ErrAccuracyUnverified) {
-					return nil, true, err
+					return nil, true, false, err
 				}
 				unverified = err
 			}
 			gain.Set(i, j, gain.At(i, j)+g.At(0, 0))
 		}
 	}
-	return gain, true, unverified
+	return gain, true, unproven, unverified
 }
 
 // dcGainByBlockLaurent expands G(x0+σ) = D + C(σI + P)⁻¹B, P = x0·I − A,
@@ -1156,8 +1186,8 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) dcLaurent {
 }
 
 // dcLaurent is a dcGainByBlockLaurent result: exact reports the expansion
-// as given with every pole coefficient it read as zero of zero magnitude
-// scale (structurally zero), deflated a deflated expansion; lim holds the
+// as given with every entry infinite by a proven pole coefficient
+// (blockLaurentGain's exact), deflated a deflated expansion; lim holds the
 // exact limits where an exactly singular block took them. Every ok result
 // has an exact pole at x0: a 1×1 block A_kk = x0 or an exactly singular
 // block.
@@ -1195,9 +1225,10 @@ func absDense(m *mat.Dense) *mat.Dense {
 // blockLaurentGain takes abs nil for |A|, |B|, |C|. skipped reports an
 // infinite entry whose sign comes after a more singular coefficient of
 // nonzero magnitude scale read as rounding; exact reports that no entry
-// read such a coefficient as rounding and that every infinite entry's
-// coefficient is a sum of same-signed exact terms (its magnitude scale is
-// its own size), so no cancellation can make it zero. The 100·n·ε gate is
+// read such a coefficient as rounding, that every entry is infinite (a
+// finite σ⁰ coefficient carries no certificate) and that each infinite
+// entry's coefficient is a sum of same-signed exact terms (its magnitude
+// scale is its own size), so no cancellation can make it zero. The 100·n·ε gate is
 // a reading, not a bound: an exact pole coefficient that cancels leaves
 // LU roundoff up to κ·ε of the terms (ONYZO7).
 func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (gain *mat.Dense, ok, skipped, exact bool) {
@@ -1390,7 +1421,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 						return nil, false, false, false
 					}
 					gain.Set(i, j, v)
-					inexact = inexact || read
+					inexact = true
 					break
 				}
 				if math.Abs(g) > tol*bound {
@@ -2326,10 +2357,11 @@ func applyIOScales(b, c *mat.Dense, inScale, outScale []float64) {
 // dcGainMatrixTol of x0 and row and column below it as decoupled integrators.
 // sure reports that every such mode is exactly x0 and exactly decoupled, no
 // term was dropped as below the tolerance, and no residue sum mixes signs,
-// so its Inf signs are those of the float model. finiteCertified reports
-// that solveDCRegular certified the regular part, so each finite entry is
-// the float model's gain to within its own terms' rounding.
-func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure, finiteCertified bool) {
+// so its Inf signs are those of the float model. finiteProven reports
+// that solveDCRegular certified the regular part and every finite entry
+// passes dcZeroRule, so each is the float model's gain to within its own
+// terms' rounding.
+func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure, finiteProven bool) {
 	n, m, p := sys.Dims()
 	target := 0.0
 	if sys.IsDiscrete() {
@@ -2359,6 +2391,7 @@ func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure, 
 	}
 
 	gain = denseCopySafe(sys.D, p, m)
+	var tau []float64
 	if regularCount > 0 {
 		Areg := mat.NewDense(regularCount, regularCount, nil)
 		Breg := mat.NewDense(regularCount, m, nil)
@@ -2375,13 +2408,14 @@ func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure, 
 			}
 		}
 
-		r := solveDCRegular(nil, Areg, Breg, Creg, gain, target, n > exactDetMaxOrder)
+		r := solveDCRegular(nil, Areg, Breg, Creg, gain, target, true)
 		if r.solveErr != nil || r.overflow || r.g == nil {
 			return nil, false, false, false
 		}
-		gain, finiteCertified = r.g, r.certified
+		gain, tau = r.g, r.tau
+		finiteProven = r.certified
 	} else {
-		finiteCertified = true
+		finiteProven = true
 	}
 
 	residue := mat.NewDense(p, m, nil)
@@ -2419,7 +2453,17 @@ func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure, 
 			}
 		}
 	}
-	return gain, true, sure, finiteCertified
+	if finiteProven && tau != nil {
+		raw := gain.RawMatrix()
+		for i := range p {
+			for j := range m {
+				if v := raw.Data[i*raw.Stride+j]; !math.IsInf(v, 0) && !dcZeroRule(v, tau[i*m+j]) {
+					finiteProven = false
+				}
+			}
+		}
+	}
+	return gain, true, sure, finiteProven
 }
 
 // hasZeroLine reports whether a − shift·I has an exactly zero row or column.
