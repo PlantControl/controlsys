@@ -325,7 +325,19 @@ type balancedDense struct {
 	// src, when set, is the model balanced into the realization, which
 	// underflowResponseInto solves unbalanced.
 	src *System
+	// via records how evalInto last formed its value: from bd.x, the
+	// verified unbalanced solve, or the unverified double-double response.
+	via  solveVia
+	cert *termsCert
 }
+
+type solveVia uint8
+
+const (
+	viaSolve solveVia = iota
+	viaUnderflow
+	viaDD
+)
 
 // refineCondition is the error amplification, relative to ε, above which
 // the frequency solvers refine against the exact pencil: balancedDense
@@ -444,7 +456,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if tol == 0 {
 		tol = 1e-15
 	}
-	bd.pt, bd.tol, bd.stalled = pt, tol, false
+	bd.pt, bd.tol, bd.stalled, bd.via = pt, tol, false, viaSolve
 	refineBelow, refine := max(scale/refineCondition, tol), false
 
 	// last[i] bounds the nonzeros of row i, so banded and block-triangular
@@ -535,9 +547,11 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 	}
 	if belowNormal(x, bd.screen.mask) && bd.screen.confirm(&bd.balancedRealization, x, m, 1) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+		bd.via = viaUnderflow
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
+		bd.via = viaDD
 		if err := ddResponse(bd.sys, pt, dst); errors.Is(err, errStateUnderflow) {
 			return err
 		} else if err != nil {
@@ -557,6 +571,81 @@ func (bd *balancedDense) stallInaccurate(dst []complex128) bool {
 		}
 	}
 	return false
+}
+
+// certifyTerms checks dst, evalInto's value at pt of an explicit model,
+// with termsCert, and where only the row test fails refines bd.x with the
+// same factors and forms the output again, each entry rounded once. A value
+// from the verified unbalanced solve passes; one from the unverified
+// double-double response fails.
+func (bd *balancedDense) certifyTerms(pt frequencyPoint, dst []complex128) bool {
+	if bd.e != nil || bd.n == 0 || bd.via == viaUnderflow {
+		return true
+	}
+	if bd.via == viaDD {
+		return false
+	}
+	if bd.cert == nil {
+		bd.cert = newTermsCert(&bd.balancedRealization)
+	}
+	br := &bd.balancedRealization
+	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+	for step := 0; !rowsOK && step < maxRefineSteps; step++ {
+		bd.refineStep()
+		compensatedOutput(br, bd.x, bd.m, 1, dst)
+		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+	}
+	return ok
+}
+
+// refineStep applies one correction to bd.x against the exact pencil at
+// bd.pt with evalInto's factors.
+func (bd *balancedDense) refineStep() {
+	pt, n, m, r := bd.pt, bd.n, bd.m, bd.r
+	kappa := complex(1, 0)
+	if !pt.isPlain() {
+		kappa = pt.scale()
+	}
+	for j := range m {
+		pencilResidual(r[j:], bd.x[j:], m, bd.a, nil, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
+	}
+	if kappa != 1 {
+		ik := crecip(kappa)
+		for i := range r {
+			r[i] *= ik
+		}
+	}
+	cLUSolve(bd.pencil, bd.piv, r, n, m)
+	for i, v := range r {
+		bd.x[i] += v
+	}
+}
+
+// comparisonSolve overwrites the nonnegative y with M(Û)⁻¹M(L̂)⁻¹Py for
+// evalInto's factors, an upper bound on |(sI − Â)⁻¹|y.
+func (bd *balancedDense) comparisonSolve(y []float64) {
+	n, a := bd.n, bd.pencil
+	for k, pk := range bd.piv {
+		if pk != k {
+			y[k], y[pk] = y[pk], y[k]
+		}
+	}
+	for k := range n {
+		yk := y[k]
+		if yk == 0 {
+			continue
+		}
+		for i := k + 1; i < n; i++ {
+			y[i] += cabs1(a[i*n+k]) * yk
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		v := y[i]
+		for k := i + 1; k <= bd.last[i]; k++ {
+			v += cabs1(a[i*n+k]) * y[k]
+		}
+		y[i] = v * cabs1(bd.inv[i])
+	}
 }
 
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
@@ -862,7 +951,23 @@ type hessenbergSweep struct {
 	sys       *System
 	dense     *balancedDense // denseRetry's solver, built on first use
 	alt       []complex128
+	// via records how evalInto last formed its value: from x + Qy,
+	// denseRetry, or the verified unbalanced solve.
+	via         sweepVia
+	denseSolved bool
+	cert        *termsCert
+	xf          []complex128
+	absQT       []float64
+	certBuf     []float64
 }
+
+type sweepVia uint8
+
+const (
+	viaSweepSolve sweepVia = iota
+	viaSweepDense
+	viaSweepUnderflow
+)
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	nn := n * n
@@ -1175,6 +1280,7 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
 	err := hs.dense.evalInto(pt, hs.alt)
+	hs.denseSolved = err == nil
 	if errors.Is(err, errSingularPencil) && !errors.Is(err, errStallUnresolved) && hs.dense.sys != nil {
 		if ddErr := ddResponse(hs.sys, pt, hs.alt); ddErr == nil || errors.Is(ddErr, errStateUnderflow) {
 			err = ddErr
@@ -1272,15 +1378,93 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
+	hs.via = viaSweepSolve
 	if belowNormal(x, hs.screen.mask) && hs.screen.confirm(&hs.balancedRealization, x, 1, n) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+		hs.via = viaSweepUnderflow
 		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
 	}
 	if !converged {
+		hs.via = viaSweepDense
 		if err := hs.denseRetry(pt, dst); err != nil {
 			return err
 		}
 	}
 	return finiteResponse(dst)
+}
+
+// certifyTerms checks dst, evalInto's value at pt, with termsCert on the
+// balanced realization: x̂ = x + Qy, N applied as |Q|·N_H·|Qᵀ| with N_H
+// the comparison inverse of the factors of sI − H. Where that fails, or
+// evalInto took denseRetry, the balanced dense solve decides, as
+// balancedDense.certifyTerms does.
+func (hs *hessenbergSweep) certifyTerms(pt frequencyPoint, dst []complex128) bool {
+	n, m := hs.n, hs.m
+	switch {
+	case n == 0 || hs.via == viaSweepUnderflow:
+		return true
+	case hs.via == viaSweepSolve:
+		if hs.cert == nil {
+			hs.cert = newTermsCert(&hs.balancedRealization)
+			hs.xf = make([]complex128, n*m)
+			hs.certBuf = make([]float64, n)
+			hs.absQT = make([]float64, n*n)
+			for i, v := range hs.q {
+				hs.absQT[i] = math.Abs(v)
+			}
+		}
+		qMulCols(hs.xf, hs.y, hs.q, n, m)
+		for i, v := range hs.x {
+			hs.xf[i] += v
+		}
+		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs.comparisonSolve); ok {
+			return true
+		}
+		if hs.denseRetry(pt, dst) != nil {
+			return false
+		}
+	}
+	if hs.dense == nil || !hs.denseSolved {
+		return false
+	}
+	return hs.dense.certifyTerms(pt, dst)
+}
+
+// comparisonSolve overwrites the nonnegative y with |Q|·N_H·|Qᵀ|y, N_H
+// replaying factor's swaps and multipliers and back substitution in
+// magnitudes: an upper bound on |(sI − Â)⁻¹|y to first order in the
+// reduction's and the factorization's backward errors.
+func (hs *hessenbergSweep) comparisonSolve(y []float64) {
+	n, q, t := hs.n, hs.absQT, hs.certBuf
+	clear(t)
+	for k, yk := range y {
+		if yk == 0 {
+			continue
+		}
+		for i, a := range q[k*n : (k+1)*n] {
+			t[i] += a * yk
+		}
+	}
+	for k := range n - 1 {
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+		t[k+1] += cabs1(hs.mult[k]) * t[k]
+	}
+	u := hs.u
+	for i := n - 1; i >= 0; i-- {
+		v := t[i]
+		for k := i + 1; k < n; k++ {
+			v += cabs1(u[i*n+k]) * t[k]
+		}
+		t[i] = v * cabs1(hs.inv[i])
+	}
+	for i := range n {
+		var v float64
+		for k, a := range q[i*n : (i+1)*n] {
+			v += a * t[k]
+		}
+		y[i] = v
+	}
 }
 
 // pencilResidual sets r = κ·b − p·E·x − q·A·x for one right-hand side in

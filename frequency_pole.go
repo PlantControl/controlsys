@@ -1459,9 +1459,27 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 // double-double pivots that follow (R77HNK, BTZKPE). Where neither
 // verifies it is ddResponse.
 func ddResponseResolved(sys *System, pt frequencyPoint, dst []complex128) error {
-	n, m, p := sys.Dims()
+	n, _, _ := sys.Dims()
 	if n == 0 || sys.internalDelayCount() > 0 {
 		return ddResponse(sys, pt, dst)
+	}
+	if ddResponseVerified(sys, pt, dst) {
+		return nil
+	}
+	return ddResponse(sys, pt, dst)
+}
+
+// ddResponseVerified is ddResponseResolved's verified branches alone: it
+// reports false, leaving dst unchanged, where neither the balanced nor the
+// block-triangular solve verifies componentwise. A model without states is
+// its D.
+func ddResponseVerified(sys *System, pt frequencyPoint, dst []complex128) bool {
+	n, m, p := sys.Dims()
+	if n == 0 {
+		return ddResponse(sys, pt, dst) == nil
+	}
+	if sys.internalDelayCount() > 0 {
+		return false
 	}
 	verified := func(s *System) bool {
 		br := newBalancedRealization(s, n, m, p)
@@ -1478,10 +1496,7 @@ func ddResponseResolved(sys *System, pt frequencyPoint, dst []complex128) error 
 		copy(dst, g)
 		return true
 	}
-	if verified(sys) || verified(blockTriangularSystem(sys)) {
-		return nil
-	}
-	return ddResponse(sys, pt, dst)
+	return verified(sys) || verified(blockTriangularSystem(sys))
 }
 
 // errDDSingular is ddRealizationInto's failure other than a lost state: a
