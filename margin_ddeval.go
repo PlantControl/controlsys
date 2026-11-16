@@ -261,6 +261,27 @@ func ddFallbackSystem(sys *System) *System {
 	if n == 0 || m != 1 || p != 1 || sys.internalDelayCount() > 0 {
 		return nil
 	}
+	ps := blockTriangularSystem(sys)
+	br := newBalancedRealization(ps, n, m, p)
+	for _, v := range [][]float64{br.a, br.b, br.c, br.e} {
+		for _, x := range v {
+			if x != 0 && !(math.Abs(x) >= 0x1p-1022 && math.Abs(x) <= math.MaxFloat64) {
+				return nil
+			}
+		}
+	}
+	ps.A, ps.B, ps.C = mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c)
+	if br.e != nil {
+		ps.E = mat.NewDense(n, n, br.e)
+	}
+	return ps
+}
+
+// blockTriangularSystem is sys with its states permuted, exactly, so that
+// the pattern of A and E is block upper triangular (Tarjan blocks in
+// reverse topological order).
+func blockTriangularSystem(sys *System) *System {
+	n, m, p := sys.Dims()
 	pat := blas64.General{Rows: n, Cols: n, Stride: n, Data: make([]float64, n*n)}
 	for i := range n {
 		for j := range n {
@@ -281,18 +302,6 @@ func ddFallbackSystem(sys *System) *System {
 	if sys.E != nil {
 		ps.E = mat.NewDense(n, n, nil)
 		permuteSquare(ps.E, sys.E, perm)
-	}
-	br := newBalancedRealization(ps, n, m, p)
-	for _, v := range [][]float64{br.a, br.b, br.c, br.e} {
-		for _, x := range v {
-			if x != 0 && !(math.Abs(x) >= 0x1p-1022 && math.Abs(x) <= math.MaxFloat64) {
-				return nil
-			}
-		}
-	}
-	ps.A, ps.B, ps.C = mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c)
-	if br.e != nil {
-		ps.E = mat.NewDense(n, n, br.e)
 	}
 	return ps
 }
