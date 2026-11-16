@@ -385,11 +385,6 @@ func (e frequencyEvaluator) evalPoint(pt frequencyPoint, poleLimit bool) ([][]co
 		if err := eval(pt, data); err != nil {
 			return nil, err
 		}
-	} else if done, err := dcResponseInto(e.sys, pt, data); done {
-		if err != nil {
-			return nil, err
-		}
-		return complexFlatToGrid(data, e.p, e.m), nil
 	} else if err := evalWithPoleLimit(eval, e.sys, pt, data); err != nil {
 		if errors.Is(err, errStateUnderflow) || errors.Is(err, errPoleUnresolved) {
 			err = fmt.Errorf("at s = %v: %w", pt.value(), err)
@@ -486,14 +481,7 @@ func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex12
 	pm := e.p * e.m
 	eval := e.pointSolver(len(omega)).evalInto
 	for k, w := range omega {
-		pt := e.pointAt(w)
-		if done, err := dcResponseInto(e.sys, pt, dst[k*pm:(k+1)*pm]); done {
-			if err != nil {
-				return atFrequency(w, err)
-			}
-			continue
-		}
-		if err := evalWithPoleLimit(eval, e.sys, pt, dst[k*pm:(k+1)*pm]); err != nil {
+		if err := evalWithPoleLimit(eval, e.sys, e.pointAt(w), dst[k*pm:(k+1)*pm]); err != nil {
 			return atFrequency(w, err)
 		}
 	}
@@ -826,14 +814,7 @@ func freqResponseLFT(sys *System, omega []float64, p, m int) (*FreqResponseMatri
 	eval := newFrequencyEvaluator(sys).pointEval()
 	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
-		pt := td.frequencyPoint(w)
-		if done, err := dcResponseInto(sys, pt, data[k*p*m:(k+1)*p*m]); done {
-			if err != nil {
-				return nil, atFrequency(w, err)
-			}
-			continue
-		}
-		if err := evalWithPoleLimit(eval, sys, pt, data[k*p*m:(k+1)*p*m]); err != nil {
+		if err := evalWithPoleLimit(eval, sys, td.frequencyPoint(w), data[k*p*m:(k+1)*p*m]); err != nil {
 			return nil, atFrequency(w, err)
 		}
 	}
