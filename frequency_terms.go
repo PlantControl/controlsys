@@ -369,13 +369,15 @@ func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []com
 
 // inverseBound is the approximate-inverse tier of step 3 at a point the
 // comparison matrices do not certify. Y ≈ (λI − Â)⁻¹ comes from the LU
-// factors; R̄ ≥ |I − Y(λI − Â)| bounds the residual against the stored
-// pencil, its rounding included. Where R̄𝟙 ≤ q𝟙 with q < 1,
-// M = (I − R)⁻¹Y gives |M| ≤ (I − R̄)⁻¹|Y| (upper) and
-// |M| ≥ |Y| − (I − R̄)⁻¹R̄|Y| (Mlow, clamped at 0); each Neumann tail
-// beyond its first term is bounded by its largest entry times q/(1−q).
-// X ≥ |c|Mlow|Â|Mlow|b| + |c|Mlow|b| (xLow), as every factor is
-// nonnegative.
+// factors; R̄ ≥ |I − (λI − Â)Y| bounds the right residual against the
+// stored pencil P = λI − Â, its rounding included. GEPP keeps the right
+// residual near ε|L̂||Û||Y| while the left one, I − YP, can exceed 1 beside
+// a pole cluster (hunt-true/496: 12 against 1.6e-12), and M = P⁻¹ =
+// Y(PY)⁻¹ = Y(I − R)⁻¹ needs only the right one. Where R̄𝟙 ≤ q𝟙 with
+// q < 1/2, |M| ≤ |Y|(I − R̄)⁻¹ (upper) and, as M − Y = Y(I − R)⁻¹R,
+// |M| ≥ |Y| − |Y|R̄(I − R̄)⁻¹ (Mlow, clamped at 0); each Neumann tail beyond
+// its first term is bounded by its largest entry times q/(1−q). X ≥
+// |c|Mlow|Â|Mlow|b| + |c|Mlow|b| (xLow), as every factor is nonnegative.
 type inverseBound struct {
 	n    int
 	q    float64
@@ -401,99 +403,100 @@ func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint,
 	la := cabs1(lam)
 	ib := &inverseBound{n: n, rbar: make([]float64, n*n), yUp: make([]float64, n*n), mLow: make([]float64, n*n), absA: absA,
 		w: make([]float64, n), z: make([]float64, n), r1: make([]float64, n)}
+	for i, v := range y {
+		ib.yUp[i] = cabs1(v)
+		if !(ib.yUp[i] <= math.MaxFloat64) {
+			return nil
+		}
+	}
 	gamma := float64(n+8) * termsEps
+	re, im, ya := make([]float64, n), make([]float64, n), make([]float64, n)
 	for i := range n {
-		yi := y[i*n : (i+1)*n]
-		for j := range n {
-			var re, im, ya float64
-			for k, v := range yi {
-				a := br.a[k*n+j]
-				if a == 0 {
-					continue
-				}
-				re += real(v) * a
-				im += imag(v) * a
-				ya += cabs1(v) * absA[k*n+j]
+		clear(re)
+		clear(im)
+		clear(ya)
+		for k, a := range br.a[i*n : (i+1)*n] {
+			if a == 0 {
+				continue
 			}
-			r := complex(re, im) - lam*yi[j]
+			aa := absA[i*n+k]
+			for j, v := range y[k*n : (k+1)*n] {
+				re[j] += a * real(v)
+				im[j] += a * imag(v)
+			}
+			for j, v := range ib.yUp[k*n : (k+1)*n] {
+				ya[j] += aa * v
+			}
+		}
+		for j := range n {
+			r := complex(re[j], im[j]) - lam*y[i*n+j]
+			e := gamma * (la*ib.yUp[i*n+j] + ya[j])
 			if i == j {
 				r += 1
-			}
-			e := gamma * (la*cabs1(yi[j]) + ya)
-			if i == j {
 				e += gamma
 			}
 			ib.rbar[i*n+j] = cabs1(r)*(1+2*termsEps) + e
 		}
 	}
+	cmax := make([]float64, n)
 	for i := range n {
 		var rs float64
-		for _, v := range ib.rbar[i*n : (i+1)*n] {
+		for j, v := range ib.rbar[i*n : (i+1)*n] {
 			rs += v
+			cmax[j] = max(cmax[j], v)
 		}
 		ib.q = max(ib.q, rs*(1+float64(n)*termsEps))
 	}
 	if !(ib.q < 0.5) {
 		return nil
 	}
-	for i, v := range y {
-		ib.yUp[i] = cabs1(v)
-	}
-	e0 := make([]float64, n*n)
-	for i := range n {
-		for k, r := range ib.rbar[i*n : (i+1)*n] {
-			if r == 0 {
-				continue
-			}
-			for j, v := range ib.yUp[k*n : (k+1)*n] {
-				e0[i*n+j] += r * v
-			}
-		}
-	}
 	f := ib.q / (1 - ib.q)
 	grow := 1 + 4*float64(n)*termsEps
-	for j := range n {
-		cm := 0.0
-		for i := range n {
-			cm = max(cm, e0[i*n+j])
+	e := make([]float64, n)
+	for i := range n {
+		clear(e)
+		var tail float64
+		for k, a := range ib.yUp[i*n : (i+1)*n] {
+			if a == 0 {
+				continue
+			}
+			for j, r := range ib.rbar[k*n : (k+1)*n] {
+				e[j] += a * r
+			}
+			tail += a
 		}
-		for i := range n {
-			e := (e0[i*n+j] + cm*f) * grow
-			ib.mLow[i*n+j] = max(termsAbs(y[i*n+j])*(1-2*termsEps)-e, 0)
-		}
-	}
-	for _, v := range ib.yUp {
-		if !(v <= math.MaxFloat64) {
-			return nil
+		for j := range n {
+			ej := (e[j] + tail*cmax[j]*f) * grow
+			ib.mLow[i*n+j] = max(termsAbs(y[i*n+j])*(1-2*termsEps)-ej, 0)
 		}
 	}
 	return ib
 }
 
-// upper is inverseBound's mUpper: (I − R̄)⁻¹|Y|y ≤ w + R̄w + max(R̄w)·q/(1−q),
-// w = |Y|y.
+// upper is inverseBound's mUpper: |Y|(I − R̄)⁻¹y ≤ |Y|(y + z + max(z)·
+// q/(1−q)·𝟙), z = R̄y.
 func (ib *inverseBound) upper(y []float64) bool {
 	n := ib.n
-	for i := range n {
-		var v float64
-		for k, a := range ib.yUp[i*n : (i+1)*n] {
-			v += a * y[k]
-		}
-		ib.w[i] = v
-	}
 	mx := 0.0
 	for i := range n {
 		var v float64
 		for k, r := range ib.rbar[i*n : (i+1)*n] {
-			v += r * ib.w[k]
+			v += r * y[k]
 		}
 		ib.z[i] = v
 		mx = max(mx, v)
 	}
 	f := mx * ib.q / (1 - ib.q)
+	for i := range n {
+		ib.w[i] = y[i] + ib.z[i] + f
+	}
 	grow := 1 + 4*float64(n)*termsEps
 	for i := range n {
-		y[i] = (ib.w[i] + ib.z[i] + f) * grow
+		var v float64
+		for k, a := range ib.yUp[i*n : (i+1)*n] {
+			v += a * ib.w[k]
+		}
+		y[i] = v * grow
 		if !(y[i] <= math.MaxFloat64) {
 			return false
 		}
