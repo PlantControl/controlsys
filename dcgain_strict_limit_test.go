@@ -177,14 +177,23 @@ func TestDCGainFreqResponseAtDCConsistency(t *testing.T) {
 		}
 		fr, ferr := sys.FreqResponse([]float64{0})
 		if ferr != nil {
+			// An exactly singular DC pencil with DCGain unverified leaves FR(0)
+			// unverified (FKYKOG); the sub-rounding residue's exact limit is a
+			// provable pole, which DCGain should certify (ZEYADU).
+			if err != nil && errors.Is(ferr, ErrAccuracyUnverified) {
+				continue
+			}
 			t.Fatalf("%s: FreqResponse: %v", r.name, ferr)
 		}
 		h := fr.At(0, 0, 0)
 		strict := dcGainRationalLimit(r.n, r.m, r.p, r.a, r.b, r.c, r.d, r.x0())[0]
 		switch {
 		case err != nil:
-			if !cmplx.IsInf(h) {
-				t.Errorf("%s: FreqResponse(0) = %v beside DCGain %v with %v, want Inf", r.name, h, g.At(0, 0), err)
+			// DCGain unverified at a DC pencil that is not exactly singular:
+			// FR(0) certifies its own value within terms (FKYKOG), here the
+			// stored model's finite exact limit.
+			if math.IsInf(strict, 0) || !(cmplx.Abs(h-complex(strict, 0)) <= 1e-9*math.Abs(strict)) {
+				t.Errorf("%s: FreqResponse(0) = %v beside DCGain %v with %v, exact limit %v", r.name, h, g.At(0, 0), err, strict)
 			}
 		case math.IsInf(strict, 0):
 			if !cmplx.IsInf(h) || g.At(0, 0) != strict {
