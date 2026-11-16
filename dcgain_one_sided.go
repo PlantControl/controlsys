@@ -190,6 +190,15 @@ func (sys *System) dcGainOneSidedIntegrators(x0 float64, inK []bool, nk int, row
 				gain.Set(i, j, math.Inf(signInt(w)*signInt(v)))
 				continue
 			}
+			if sg, ok := oneSidedSumSign(ks, func(k int) float64 {
+				if rows {
+					return b.At(k, j)
+				}
+				return c.At(i, k)
+			}, beta.RawMatrix().Data[bi*bcols:(bi+1)*bcols], btau[bi*bcols:(bi+1)*bcols]); ok {
+				gain.Set(i, j, math.Inf(sg))
+				continue
+			}
 			rho.SetInt64(0)
 			bound.SetInt64(0)
 			for kk, k := range ks {
@@ -204,8 +213,10 @@ func (sys *System) dcGainOneSidedIntegrators(x0 float64, inK []bool, nk int, row
 				tr.SetFloat64(w)
 				tr.Mul(&tr, new(big.Rat).SetFloat64(v))
 				rho.Add(&rho, &tr)
+				e := new(big.Rat).SetFloat64(2 * t)
+				e.Add(e, new(big.Rat).SetFloat64(math.Abs(v)*0x1p-52))
 				tr.SetFloat64(math.Abs(w))
-				tr.Mul(&tr, new(big.Rat).SetFloat64(2*t+math.Abs(v)*0x1p-52))
+				tr.Mul(&tr, e)
 				bound.Add(&bound, &tr)
 			}
 			if new(big.Rat).Abs(&rho).Cmp(&bound) <= 0 {
@@ -215,6 +226,37 @@ func (sys *System) dcGainOneSidedIntegrators(x0 float64, inK []bool, nk int, row
 		}
 	}
 	return gain, true
+}
+
+// oneSidedSumSign decides sign(ρ), ρ = Σ_k w_k·β_k, against the bound
+// E = Σ_k |w_k|·(2τ_k + |β_k|·2⁻⁵²) in floating point where its rounding
+// is bounded: the sum of K products errs by at most γ_{K+1}·Σ|w_k·β_k| and
+// E by a factor 1 ± γ_{K+4}, so |S| − g·Σ|t| > E·(1 + g), g = (2K + 8)·u,
+// proves |ρ| > E. ok is false where that does not decide it or a product
+// leaves the normal range; the caller then sums exactly.
+func oneSidedSumSign(ks []int, weight func(k int) float64, beta, tau []float64) (sign int, ok bool) {
+	var sum, abs, bound float64
+	terms := 0
+	for kk, k := range ks {
+		w := weight(k)
+		if w == 0 {
+			continue
+		}
+		terms++
+		t := w * beta[kk]
+		e := math.Abs(w) * (2*tau[kk] + math.Abs(beta[kk])*0x1p-52)
+		if !(math.Abs(t) >= 0x1p-900 && math.Abs(t) <= 0x1p900) || e != 0 && !(e >= 0x1p-900 && e <= 0x1p900) {
+			return 0, false
+		}
+		sum += t
+		abs += math.Abs(t)
+		bound += e
+	}
+	g := float64(2*terms+8) * 0x1p-53
+	if math.Abs(sum)-g*abs > bound*(1+g) {
+		return signInt(sum), true
+	}
+	return 0, false
 }
 
 // dcCertifiedGainOf is D + C·(x0·I − A)⁻¹·B certified by solveDCRegular,
