@@ -64,7 +64,7 @@ type termsCert struct {
 	xm, s   []float64    // likewise
 	sAll    []float64
 	t, t2   []float64
-	w       []float64
+	w, yb   []float64
 	// undriven marks, at k*m+j, a state input j cannot reach (undrivenStates):
 	// exactly zero in x, where the solve leaves only roundoff fill.
 	undriven []bool
@@ -256,6 +256,31 @@ func (tc *termsCert) comparisonUpper(cb comparisonBounds) mUpper {
 	}
 }
 
+// minUpper is the entrywise smaller of the bounds of a and b on the same
+// |M|y, either alone where the other has none: the comparison matrices can
+// bound one output's tail far tighter than the inverse tier while the
+// latter alone bounds another's X from below (sweepInt scaled/0.1/false/56
+// at ω = 1e-10: T₂ 2e-19 against 4e-6 on output 1).
+func (tc *termsCert) minUpper(a, b mUpper) mUpper {
+	return func(y []float64) bool {
+		if tc.yb == nil {
+			tc.yb = make([]float64, tc.n)
+		}
+		yb := tc.yb
+		copy(yb, y)
+		okA := a(y)
+		if !b(yb) {
+			return okA
+		}
+		for i, v := range yb {
+			if !okA || v < y[i] {
+				y[i] = v
+			}
+		}
+		return true
+	}
+}
+
 // tail sets tc.t2 to an upper bound on |M||Â||M|sAll of step 2, shared by
 // every column, and reports false where up has no bound.
 func (tc *termsCert) tail(up mUpper) bool {
@@ -340,7 +365,7 @@ func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []com
 	}
 	up := tc.comparisonUpper(cb)
 	if ib != nil {
-		up = ib.upper
+		up = tc.minUpper(up, ib.upper)
 	}
 	if !tc.tail(up) {
 		return true, false
@@ -373,14 +398,19 @@ func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []com
 // stored pencil P = λI − Â, its rounding included. GEPP keeps the right
 // residual near ε|L̂||Û||Y| while the left one, I − YP, can exceed 1 beside
 // a pole cluster (hunt-true/496: 12 against 1.6e-12), and M = P⁻¹ =
-// Y(PY)⁻¹ = Y(I − R)⁻¹ needs only the right one. Where R̄𝟙 ≤ q𝟙 with
-// q < 1/2, |M| ≤ |Y|(I − R̄)⁻¹ (upper) and, as M − Y = Y(I − R)⁻¹R,
-// |M| ≥ |Y| − |Y|R̄(I − R̄)⁻¹ (Mlow, clamped at 0); each Neumann tail beyond
-// its first term is bounded by its largest entry times q/(1−q). X ≥
+// Y(PY)⁻¹ = Y(I − R)⁻¹ needs only the right one. Where R̄v ≤ qv for some
+// v > 0 with q < 1/2, |M| ≤ |Y|(I − R̄)⁻¹ (upper) and, as M − Y =
+// Y(I − R)⁻¹R, |M| ≥ |Y| − |Y|R̄(I − R̄)⁻¹ (Mlow, clamped at 0); a Neumann
+// tail Σₖ≥₁ R̄ᵏz is at most maxₗ(zₗ/vₗ)·q/(1−q)·v. X ≥
 // |c|Mlow|Â|Mlow|b| + |c|Mlow|b| (xLow), as every factor is nonnegative.
+// v = 𝟙 is the plain row-sum test; where it fails, v = 𝟙 + 4R̄v iterated
+// approximates the Perron vector of R̄ (any v > 0 is sound, the weights
+// only sharpen q): R̄'s rounding part γ|Â||Y| makes its row sums reach 6
+// at ρ(R̄) = 8e-13 where Â's rows differ in scale (hunt-false/5123).
 type inverseBound struct {
 	n    int
 	q    float64
+	v    []float64 // > 0, R̄v ≤ qv
 	rbar []float64 // n×n
 	yUp  []float64 // n×n, ≥ |Y|
 	mLow []float64 // n×n, ≤ |M|
@@ -438,19 +468,19 @@ func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint,
 			ib.rbar[i*n+j] = cabs1(r)*(1+2*termsEps) + e
 		}
 	}
-	cmax := make([]float64, n)
-	for i := range n {
-		var rs float64
-		for j, v := range ib.rbar[i*n : (i+1)*n] {
-			rs += v
-			cmax[j] = max(cmax[j], v)
+	if !ib.weigh() {
+		ib.compensatedResidual(br, pt, y)
+		if !ib.weigh() {
+			return nil
 		}
-		ib.q = max(ib.q, rs*(1+float64(n)*termsEps))
 	}
-	if !(ib.q < 0.5) {
-		return nil
+	f := ib.q / (1 - ib.q) * (1 + 4*termsEps)
+	cmax := make([]float64, n)
+	for k := range n {
+		for j, r := range ib.rbar[k*n : (k+1)*n] {
+			cmax[j] = max(cmax[j], r/ib.v[k])
+		}
 	}
-	f := ib.q / (1 - ib.q)
 	grow := 1 + 4*float64(n)*termsEps
 	e := make([]float64, n)
 	for i := range n {
@@ -463,7 +493,7 @@ func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint,
 			for j, r := range ib.rbar[k*n : (k+1)*n] {
 				e[j] += a * r
 			}
-			tail += a
+			tail += a * ib.v[k]
 		}
 		for j := range n {
 			ej := (e[j] + tail*cmax[j]*f) * grow
@@ -473,8 +503,83 @@ func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint,
 	return ib
 }
 
-// upper is inverseBound's mUpper: |Y|(I − R̄)⁻¹y ≤ |Y|(y + z + max(z)·
-// q/(1−q)·𝟙), z = R̄y.
+// weigh sets ib.v and ib.q < 1/2 with R̄v ≤ qv, reporting false where the
+// iteration finds none.
+func (ib *inverseBound) weigh() bool {
+	n := ib.n
+	if ib.v == nil {
+		ib.v = make([]float64, n)
+	}
+	for i := range ib.v {
+		ib.v[i] = 1
+	}
+	rv := ib.z
+	for it := 0; ; it++ {
+		ib.q = 0
+		for i := range n {
+			var r float64
+			for k, a := range ib.rbar[i*n : (i+1)*n] {
+				r += a * ib.v[k]
+			}
+			rv[i] = r
+			ib.q = max(ib.q, r/ib.v[i]*(1+float64(n+2)*termsEps))
+		}
+		if ib.q < 0.5 {
+			return true
+		}
+		if it == n {
+			return false
+		}
+		for i, r := range rv {
+			ib.v[i] = 1 + 4*r
+		}
+		if !(slices.Max(ib.v) <= math.MaxFloat64) {
+			return false
+		}
+	}
+}
+
+// compensatedResidual sets R̄ again from I − (λI − Â)Y formed against the
+// exact pencil in compensated arithmetic, as termsCert.rows forms a row it
+// cannot pass in working precision: the working-precision rounding bound
+// γ(|λ||Y| + |Â||Y|) alone holds ρ(R̄) near η·(n+8)/(4(n+5)) + ε|λ||Y|, above
+// 1/2 as η nears 1 (sweepInt decoupled/0.1/false/3 at ω = 3.2e-13:
+// ρ(R̄) = 0.53 against ‖I − PY‖ = 6e-15).
+func (ib *inverseBound) compensatedResidual(br *balancedRealization, pt frequencyPoint, y []complex128) {
+	n := ib.n
+	kappa := complex(1, 0)
+	if !pt.isPlain() {
+		kappa = pt.scale()
+	}
+	lam := cabs1(pt.value())
+	slack := 2 * float64(n+2) * termsEps * termsEps
+	col := make([]complex128, n)
+	for j := range n {
+		for k := range n {
+			col[k] = y[k*n+j]
+		}
+		for i := range n {
+			b := 0.0
+			if i == j {
+				b = 1
+			}
+			row := br.a[i*n : (i+1)*n]
+			s := b
+			for k, a := range ib.absA[i*n : (i+1)*n] {
+				s += a * ib.yUp[k*n+j]
+			}
+			rc := pencilResidualRow(col, row, i, b, pt.p, pt.q, kappa)
+			if kappa != 1 {
+				rc *= crecip(kappa)
+			}
+			yi := ib.yUp[i*n+j]
+			ib.rbar[i*n+j] = termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*yi+yi)
+		}
+	}
+}
+
+// upper is inverseBound's mUpper: |Y|(I − R̄)⁻¹y ≤ |Y|(y + z + maxₗ(zₗ/vₗ)·
+// q/(1−q)·v), z = R̄y.
 func (ib *inverseBound) upper(y []float64) bool {
 	n := ib.n
 	mx := 0.0
@@ -484,11 +589,11 @@ func (ib *inverseBound) upper(y []float64) bool {
 			v += r * y[k]
 		}
 		ib.z[i] = v
-		mx = max(mx, v)
+		mx = max(mx, v/ib.v[i])
 	}
-	f := mx * ib.q / (1 - ib.q)
+	f := mx * ib.q / (1 - ib.q) * (1 + 4*termsEps)
 	for i := range n {
-		ib.w[i] = y[i] + ib.z[i] + f
+		ib.w[i] = y[i] + ib.z[i] + f*ib.v[i]
 	}
 	grow := 1 + 4*float64(n)*termsEps
 	for i := range n {
