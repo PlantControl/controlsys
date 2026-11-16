@@ -1061,6 +1061,9 @@ type hessenbergSweep struct {
 	// denseRetry, or the verified unbalanced solve.
 	via         sweepVia
 	denseSolved bool
+	absU        []float64
+	absMult     []float64
+	absOK       bool
 	cert        *termsCert
 	normF       float64
 	xf          []complex128
@@ -1166,6 +1169,7 @@ func cabs1(z complex128) float64 { return math.Abs(real(z)) + math.Abs(imag(z)) 
 // right-hand sides. Row k of u holds the not-yet-pivoted row until step k
 // settles it, so the pencil is never formed.
 func (hs *hessenbergSweep) factor(pt frequencyPoint) error {
+	hs.absOK = false
 	s := pt.value()
 	n := hs.n
 	h, u, inv := hs.h, hs.u, hs.inv
@@ -1558,16 +1562,17 @@ func (hs *hessenbergSweep) factorError(dst, y []float64) {
 			t[i] += a * yk
 		}
 	}
-	u := hs.u
+	u, mult := hs.absFactors()
 	for i := range n {
-		v := t[i] * sqrt2 / cabs1(hs.inv[i])
+		row := u[i*n : (i+1)*n]
+		v := t[i] * sqrt2 / row[i]
 		for k := i + 1; k < n; k++ {
-			v += cabs1(u[i*n+k]) * t[k]
+			v += row[k] * t[k]
 		}
 		t[i] = v
 	}
 	for k := n - 2; k >= 0; k-- {
-		t[k+1] += cabs1(hs.mult[k]) * t[k]
+		t[k+1] += mult[k] * t[k]
 		if hs.swapped[k] {
 			t[k], t[k+1] = t[k+1], t[k]
 		}
@@ -1581,6 +1586,26 @@ func (hs *hessenbergSweep) factorError(dst, y []float64) {
 		}
 		dst[i] = g*v + red
 	}
+}
+
+// absFactors returns |·|₁ of factor's U, its diagonal holding |1/uᵢᵢ|₁,
+// and of its multipliers, formed once per factorization.
+func (hs *hessenbergSweep) absFactors() (u, mult []float64) {
+	n := hs.n
+	if hs.absU == nil {
+		hs.absU, hs.absMult = make([]float64, n*n), make([]float64, n)
+	}
+	if !hs.absOK {
+		for i := range n {
+			for k := i + 1; k < n; k++ {
+				hs.absU[i*n+k] = cabs1(hs.u[i*n+k])
+			}
+			hs.absU[i*n+i] = cabs1(hs.inv[i])
+			hs.absMult[i] = cabs1(hs.mult[i])
+		}
+		hs.absOK = true
+	}
+	return hs.absU, hs.absMult
 }
 
 // nsolve overwrites the nonnegative y with |Q|·N_H·|Qᵀ|y, N_H replaying
@@ -1597,19 +1622,20 @@ func (hs *hessenbergSweep) nsolve(y []float64) {
 			t[i] += a * yk
 		}
 	}
+	u, mult := hs.absFactors()
 	for k := range n - 1 {
 		if hs.swapped[k] {
 			t[k], t[k+1] = t[k+1], t[k]
 		}
-		t[k+1] += cabs1(hs.mult[k]) * t[k]
+		t[k+1] += mult[k] * t[k]
 	}
-	u := hs.u
 	for i := n - 1; i >= 0; i-- {
+		row := u[i*n : (i+1)*n]
 		v := t[i]
 		for k := i + 1; k < n; k++ {
-			v += cabs1(u[i*n+k]) * t[k]
+			v += row[k] * t[k]
 		}
-		t[i] = v * cabs1(hs.inv[i])
+		t[i] = v * row[i]
 	}
 	for i := range n {
 		var v float64
