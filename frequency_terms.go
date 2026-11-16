@@ -28,7 +28,9 @@ import (
 //     hold with θ' in place of θ, and θ' is the largest proven |rᵢ|/sᵢ. A row passes first on its
 //     working-precision residual plus that residual's rounding bound
 //     (nnzᵢ+5)(ε/2)Sᵢ, Sᵢ the sum of its terms' magnitudes; the rows that
-//     fail it are formed again in compensated arithmetic.
+//     fail it are formed again in compensated arithmetic. With θ = (n/2)ε
+//     only rows with nnzᵢ + 5 ≤ n can pass that tier (Sᵢ ≥ sᵢ), so denser
+//     rows skip it.
 //  2. e = |x̂ − x| = |Mr| ≤ θ|M|s, and |x̂| ≤ |M||b| + e, so
 //     |c|e ≤ θX + θ|c||M||A|e ≤ θX + T₂, T₂ = θ²|c||M||A||M|s.
 //  3. |M| is bounded through the computed factors F = P⁻¹L̂Û of the
@@ -66,6 +68,10 @@ type termsCert struct {
 	// exactly zero in x, where the solve leaves only roundoff fill.
 	undriven []bool
 }
+
+// termsEps is eps(), 2⁻⁵², as a constant: the certificate's inner loops
+// read it per row.
+const termsEps = 0x1p-52
 
 // comparisonBounds bounds the inverse of a factored pencil (step 3):
 // nsolve overwrites the nonnegative y with Ny, and factorError sets dst
@@ -126,14 +132,14 @@ func termsAbs(z complex128) float64 {
 // working-precision residual alone. compensated skips that tier.
 func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, compensated bool) (ok bool, thetaR float64, cheap bool) {
 	n, m := tc.n, tc.m
-	theta := float64(n) / 2 * eps()
+	theta := float64(n) / 2 * termsEps
 	kappa := complex(1, 0)
 	if !pt.isPlain() {
 		kappa = pt.scale()
 	}
 	ka, km, pa, qa := cabs1(kappa), termsAbs(kappa), cabs1(pt.p), cabs1(pt.q)
 	lam := cabs1(pt.value())
-	slack := 2 * float64(n+2) * eps() * eps()
+	slack := 2 * float64(n+2) * termsEps * termsEps
 	for i := range n {
 		bi := br.b[i*m+j]
 		s := math.Abs(bi)
@@ -152,10 +158,10 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 		}
 		tc.s[i] = s
 		xi := tc.xc[i]
-		r := kappa*complex(bi, 0) - pt.p*xi - pt.q*complex(ar, ai)
-		if !compensated {
-			bound := float64(tc.nnz[i]+5) * eps() / 2 * (ka*math.Abs(bi) + pa*cabs1(xi) + qa*sum)
-			if rb := (termsAbs(r) + bound) * (1 + 2*eps()) / km; rb <= theta*s {
+		if !compensated && tc.nnz[i]+5 <= n {
+			r := kappa*complex(bi, 0) - pt.p*xi - pt.q*complex(ar, ai)
+			bound := float64(tc.nnz[i]+5) * termsEps / 2 * (ka*math.Abs(bi) + pa*cabs1(xi) + qa*sum)
+			if rb := (termsAbs(r) + bound) * (1 + 2*termsEps) / km; rb <= theta*s {
 				if rb > 0 {
 					thetaR = max(thetaR, rb/s)
 				}
@@ -167,7 +173,7 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 		if kappa != 1 {
 			rc *= crecip(kappa)
 		}
-		rb := termsAbs(rc)*(1+4*eps())*(1+2*eps()) + slack*(s+lam*tc.xm[i]+cabs1(xi))
+		rb := termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*tc.xm[i]+cabs1(xi))
 		if !(rb <= theta*s) {
 			return false, 0, cheap
 		}
@@ -225,11 +231,11 @@ func (tc *termsCert) mBound(y []float64, cb comparisonBounds) bool {
 		}
 		q = max(q, tc.w[i]/v)
 	}
-	q *= 1 + 8*float64(tc.n)*eps()
+	q *= 1 + 8*float64(tc.n)*termsEps
 	if !(q < 1) {
 		return false
 	}
-	f := 1 / (1 - q) * (1 + 2*eps())
+	f := 1 / (1 - q) * (1 + 2*termsEps)
 	for i := range y {
 		y[i] *= f
 	}
@@ -258,8 +264,8 @@ func (tc *termsCert) tail(cb comparisonBounds) bool {
 // column j of x̂ loaded and its tail formed.
 func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, theta float64) bool {
 	n, m := tc.n, tc.m
-	u := float64(n) * eps()
-	grow := 1 + 8*float64(n)*eps()
+	u := float64(n) * termsEps
+	grow := 1 + 8*float64(n)*termsEps
 	for i := range tc.p {
 		cr := br.c[i*n : (i+1)*n]
 		h := dst[i*m+j]
@@ -280,13 +286,13 @@ func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, th
 		}
 		re.add(-real(h))
 		im.add(-imag(h))
-		o := termsAbs(complex(re.value(), im.value()))*(1+2*eps()) + 2*float64(n+2)*eps()*eps()*(mag+math.Abs(d)+cabs1(h))
+		o := termsAbs(complex(re.value(), im.value()))*(1+2*termsEps) + 2*float64(n+2)*termsEps*termsEps*(mag+math.Abs(d)+cabs1(h))
 		t2 := theta * theta * ct * grow
 		if !(o <= math.MaxFloat64 && t2 <= math.MaxFloat64) {
 			return false
 		}
-		lo := max(l*(1-2*float64(n)*eps())-t2, 0) / (1 + theta)
-		if !(o+t2 <= ((u-theta)*lo+u*math.Abs(d))*(1-4*eps())) {
+		lo := max(l*(1-2*float64(n)*termsEps)-t2, 0) / (1 + theta)
+		if !(o+t2 <= ((u-theta)*lo+u*math.Abs(d))*(1-4*termsEps)) {
 			return false
 		}
 	}

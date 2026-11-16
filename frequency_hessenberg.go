@@ -329,6 +329,10 @@ type balancedDense struct {
 	// verified unbalanced solve, or the unverified double-double response.
 	via  solveVia
 	cert *termsCert
+	// absLU and absDiag are absFactors' magnitudes of the factors, valid
+	// while absOK.
+	absLU, absDiag []float64
+	absOK          bool
 }
 
 type solveVia uint8
@@ -456,7 +460,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if tol == 0 {
 		tol = 1e-15
 	}
-	bd.pt, bd.tol, bd.stalled, bd.via = pt, tol, false, viaSolve
+	bd.pt, bd.tol, bd.stalled, bd.via, bd.absOK = pt, tol, false, viaSolve, false
 	refineBelow, refine := max(scale/refineCondition, tol), false
 
 	// last[i] bounds the nonzeros of row i, so banded and block-triangular
@@ -630,18 +634,20 @@ func (bd *balancedDense) refineStep() {
 // (2n+4)ε, an upper bound on |ΔF|y for F = P⁻¹L̂Û = sI − Â + ΔF
 // (termsCert step 3).
 func (bd *balancedDense) factorError(dst, y []float64) {
-	n, a := bd.n, bd.pencil
+	n, a := bd.n, bd.absFactors()
 	for i := range n {
-		v := y[i] * sqrt2 / cabs1(bd.inv[i])
+		row := a[i*n : (i+1)*n]
+		v := y[i] * bd.absDiag[i]
 		for k := i + 1; k <= bd.last[i]; k++ {
-			v += cabs1(a[i*n+k]) * y[k]
+			v += row[k] * y[k]
 		}
 		dst[i] = v
 	}
 	for i := n - 1; i > 0; i-- {
+		row := a[i*n : i*n+i]
 		v := dst[i]
-		for k := range i {
-			v += cabs1(a[i*n+k]) * dst[k]
+		for k, l := range row {
+			v += l * dst[k]
 		}
 		dst[i] = v
 	}
@@ -650,7 +656,7 @@ func (bd *balancedDense) factorError(dst, y []float64) {
 			dst[k], dst[pk] = dst[pk], dst[k]
 		}
 	}
-	g := float64(2*n+4) * eps()
+	g := float64(2*n+4) * termsEps
 	for i := range dst {
 		dst[i] *= g
 	}
@@ -658,10 +664,31 @@ func (bd *balancedDense) factorError(dst, y []float64) {
 
 const sqrt2 = 1.4142135623730951 * (1 + 0x1p-52)
 
+// absFactors returns |·|₁ of evalInto's factors, row-major, the diagonal
+// holding |1/uᵢᵢ|₁ ≥ 1/|uᵢᵢ|, with bd.absDiag the upper bound √2/|1/uᵢᵢ|₁
+// on |uᵢᵢ|; it is formed once per factorization.
+func (bd *balancedDense) absFactors() []float64 {
+	n := bd.n
+	if bd.absLU == nil {
+		bd.absLU, bd.absDiag = make([]float64, n*n), make([]float64, n)
+	}
+	if !bd.absOK {
+		for i, v := range bd.pencil {
+			bd.absLU[i] = cabs1(v)
+		}
+		for i := range n {
+			bd.absLU[i*n+i] = cabs1(bd.inv[i])
+			bd.absDiag[i] = sqrt2 / bd.absLU[i*n+i]
+		}
+		bd.absOK = true
+	}
+	return bd.absLU
+}
+
 // nsolve overwrites the nonnegative y with M(Û)⁻¹M(L̂)⁻¹Py for
 // evalInto's factors, an upper bound on |F⁻¹|y.
 func (bd *balancedDense) nsolve(y []float64) {
-	n, a := bd.n, bd.pencil
+	n, a := bd.n, bd.absFactors()
 	for k, pk := range bd.piv {
 		if pk != k {
 			y[k], y[pk] = y[pk], y[k]
@@ -673,15 +700,16 @@ func (bd *balancedDense) nsolve(y []float64) {
 			continue
 		}
 		for i := k + 1; i < n; i++ {
-			y[i] += cabs1(a[i*n+k]) * yk
+			y[i] += a[i*n+k] * yk
 		}
 	}
 	for i := n - 1; i >= 0; i-- {
+		row := a[i*n : (i+1)*n]
 		v := y[i]
 		for k := i + 1; k <= bd.last[i]; k++ {
-			v += cabs1(a[i*n+k]) * y[k]
+			v += row[k] * y[k]
 		}
-		y[i] = v * cabs1(bd.inv[i])
+		y[i] = v * row[i]
 	}
 }
 

@@ -145,13 +145,17 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // response h, with δ = u(|c||M||A||M||b| + |c||M||b| + |D|), M = (λI − A)⁻¹
 // at the exact point λ, η = u·ρ(|M||A|) < 1 and u = n·ε. The double solve's
 // value stands where an a posteriori certificate proves |ĥ − h| ≤ δ;
-// elsewhere the point takes the componentwise-verified double-double
-// response, then for n ≤ 16 the exact response, and fails with
-// ErrAccuracyUnverified where none applies. At DC (ω = 0: s = 0, or z = 1)
-// FreqResponse and EvalFr return DCGain's gain or DCGain's error. Off DC
-// an entry is infinite only at an exact pole of the stored model, λI − A
-// exactly singular: a pencil singular only within rounding is no pole, and
-// its response is finite.
+// elsewhere the point takes the double-double response where it is
+// componentwise verified and passes the same certificate, then for n ≤ 16
+// the exact response. A point none of these settles keeps its best
+// estimate: the result is returned in full with ErrAccuracyUnverified,
+// naming the first such ω. At DC (ω = 0: s = 0, or z = 1) the response is
+// DCGain's gain where DCGain returns nil, DCGain's value and error where
+// DCGain is unverified and λI − A is exactly singular there, and otherwise
+// the chain above. An entry is infinite only at an exact pole of the
+// stored model, λI − A exactly singular (for n > 16 shown on a diagonal
+// block of order up to 16 of its block-triangular form): a pencil singular
+// only within rounding is no pole, and its response is finite.
 //
 // As MATLAB freqresp and evalfr return Inf rather than failing at a pole, a
 // frequency at a pole of the model is not an error, for descriptor and
