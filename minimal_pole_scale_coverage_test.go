@@ -91,7 +91,7 @@ func TestReduceRefusesCutWithUncoveredClusterGap(t *testing.T) {
 // poleScalesCovered: points beyond a group's scale σ fix at most
 // 1 + ⌊ln(1/tol)/ln(d/σ)⌋ of its coefficients however many there are,
 // points at or below σ count fully, a shared pole counts once, and at
-// tol ≥ 1 a point beyond a group fixes one coefficient.
+// tol ≥ 1 the count per scale does not apply.
 func TestPoleScalesCoveredCountsFarPointsByScale(t *testing.T) {
 	tol := math.Sqrt(eps())
 	all := func(n int) []bool {
@@ -119,7 +119,21 @@ func TestPoleScalesCoveredCountsFarPointsByScale(t *testing.T) {
 	if poleScalesCovered(false, []complex128{-1, -2}, poleWindows{cutPoles: []complex128{-1, -2}}, pts, all(1), tol) {
 		t.Error("four unshared poles covered by one point")
 	}
-	if !poleScalesCovered(false, []complex128{-1}, poleWindows{}, pts, all(1), 2) || poleScalesCovered(false, []complex128{-1, -2}, poleWindows{}, pts, all(1), 2) {
-		t.Error("at tol 2 a point beyond the group does not fix exactly one coefficient")
+	if !poleScalesCovered(false, group, win, far, all(len(far)), 2) {
+		t.Error("count per scale applied at tol 2")
+	}
+}
+
+// TestReduceTolAboveOneSkipsScaleCount checks that at Tol ≥ 1, where
+// |G−R| ≤ terms ≤ Tol·terms holds at every point, the count per pole scale
+// does not refuse a cut: matched-hid/221-unc-true at Tol 2 reduces to 0.
+func TestReduceTolAboveOneSkipsScaleCount(t *testing.T) {
+	sys := bandLiterals["matched-hid/221-unc-true"].system(t)
+	res, err := sys.Reduce(&ReduceOpts{Tol: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order != 0 {
+		t.Errorf("order %d at Tol 2, want 0", res.Order)
 	}
 }

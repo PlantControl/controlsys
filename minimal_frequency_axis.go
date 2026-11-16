@@ -249,10 +249,12 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 // errs by up to κ·ε, which beside a cluster of poles near the axis or an
 // unresolved slow pole is the size of the cut's error, while double-double
 // shrinks it by 2⁻⁵². The responses and their rigorous bounds are those of
-// zpkDDResponse (comp = ver; the terms within their stated band): a point
-// is verified when |Ĝ−R̂| + δ_G + δ_R ≤ tol·scale at every entry, and an
-// entry refutes the cut when |Ĝ−R̂| − δ_G − δ_R > tol·max(scale, terms_G),
-// terms_G its upper bound, which classifyProbe's refutation is. It
+// zpkDDResponse (comp = ver; the terms within their stated band
+// [lo, hi]): a point is verified when |Ĝ−R̂| + δ_G + δ_R ≤ tol·max(scale,
+// lo) at every entry, the exact deviation then within Reduce's bound
+// tol·max(scale, terms_G) (lo > 0 of a determined band, as
+// zpkJudgeEntries), and an entry refutes the cut when |Ĝ−R̂| − δ_G − δ_R >
+// tol·max(scale, hi), which classifyProbe's refutation is. It
 // reports false on a refutation; a point the double-double solve cannot
 // bound stays open. Points inside a window stay open: there the
 // refutation charges the data bounds, which are not formed here.
@@ -274,7 +276,8 @@ func resolveOpenProbes(full, cut *boundedResponse, pts []complex128, verified []
 		ok := true
 		for i := range g {
 			diff := cmplx.Abs(g[i].g - r[i].g)
-			if diff+g[i].ver+r[i].ver <= tol*scale {
+			lhs := diff + g[i].ver + r[i].ver
+			if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
 				continue
 			}
 			if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
@@ -319,9 +322,14 @@ func ddEntryBounds(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkE
 // the group needs as many as it has poles. Without this the global count
 // n + nr can be met by points far above a cluster of poles near the axis
 // (matched C2D near z = 1) or above unresolved slow poles that leave no
-// resolved gap, while every point at their scale is uninformative. K is
-// floored at 1, its value as tol → 1, so the count is continuous in tol.
+// resolved gap, while every point at their scale is uninformative. At
+// tol ≥ 1 the contract holds at every point, |G−R| = |Σ_l C_il X_lj| ≤
+// terms ≤ tol·terms, and K's premise ln(1/tol) > 0 is empty, so the count
+// per scale does not apply.
 func poleScalesCovered(discrete bool, evG []complex128, win poleWindows, pts []complex128, verified []bool, tol float64) bool {
+	if !(tol < 1) {
+		return true
+	}
 	poleScale := func(ev complex128) float64 {
 		if !discrete {
 			return cmplx.Abs(ev)
@@ -373,7 +381,7 @@ func poleScalesCovered(discrete bool, evG []complex128, win poleWindows, pts []c
 				continue
 			}
 			k := 1
-			if sigma > 0 && lt > 0 {
+			if sigma > 0 {
 				k += int(math.Floor(lt / math.Log(q.a/sigma)))
 			}
 			capped = min(capped, beyond+k)
