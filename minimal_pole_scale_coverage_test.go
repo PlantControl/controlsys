@@ -9,7 +9,9 @@ import (
 // verified point far above a pole group (SCBUFK): matched-hid 287 under
 // Equalize (drawn on arm64) and 312 under Equalize (amd64), whose poles
 // cluster within 0.02 of z = 1 while the band verified only θ ≥ 0.27 and
-// θ ≥ 0.045, 1.2e4·tol and 6.4·tol off at z = 1.
+// θ ≥ 0.045, 1.2e4·tol and 6.4·tol off at z = 1; and nse-rot/171 as
+// the current corpus draws it on amd64 (bandLiterals holds an earlier
+// draw), whose ReduceUnobservable cut main accepted.
 var poleScaleLiterals = map[string]bandLiteral{
 	"matched-hid/287-unobs-true@arm64": {
 		n: 6, m: 1, p: 1, dt: 0.01,
@@ -39,6 +41,17 @@ var poleScaleLiterals = map[string]bandLiteral{
 		c: []uint64{0x3df95656279478f7, 0xbe0c4e10aca9e09d, 0xbe0c4d1ef2adb2a6, 0xbdf43dd7f3a6ab18, 0x3e0561257d3e6f60, 0xbdd7ad1789f6016e},
 		d: []uint64{0},
 	},
+	"nse-rot/171-redraw": {
+		n: 3, m: 1, p: 1, dt: 0,
+		a: []uint64{
+			0x42dff3e69fb928a8, 0x42e804ea3cdba20d, 0x42f54f0b5189f193,
+			0x42e804ea3cdba1c2, 0x42f20e33c15ecaa8, 0x4300049cc7b18b7f,
+			0x42f54f0b5189f196, 0x4300049cc7b18b88, 0x430c6bc328b94006,
+		},
+		b: []uint64{0x42ed73313a247cde, 0x42f62349adea5ff1, 0x4303a3c416e37e07},
+		c: []uint64{0xbfdb9db7d6ee84bf, 0xbfe29223aca38a1c, 0x3fed7a01844d932a},
+		d: []uint64{0xbfb0dff51e9a5250},
+	},
 }
 
 // TestReduceRefusesCutWithUncoveredClusterGap checks Reduce's contract on
@@ -57,7 +70,7 @@ func TestReduceRefusesCutWithUncoveredClusterGap(t *testing.T) {
 	}{
 		{"matched-hid/287-unobs-true@arm64", poleScaleLiterals["matched-hid/287-unobs-true@arm64"], &ReduceOpts{Equalize: true}},
 		{"matched-hid/312-unobs-true", poleScaleLiterals["matched-hid/312-unobs-true"], &ReduceOpts{Equalize: true}},
-		{"nse-rot/171", bandLiterals["nse-rot/171"], &ReduceOpts{Mode: ReduceUnobservable}},
+		{"nse-rot/171-redraw", poleScaleLiterals["nse-rot/171-redraw"], &ReduceOpts{Mode: ReduceUnobservable}},
 	}
 	for _, c := range cases {
 		sys := c.lit.system(t)
