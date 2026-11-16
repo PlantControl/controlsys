@@ -1808,6 +1808,8 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 // (dcRoundingDisk) the poles do not resolve. It is the larger of that
 // disk's edge, as a frequency, and poleStabilityTolerance(1)/Dt, or the
 // tolerance itself for a continuous plant (A2OX65 Pidtune ruling, layer 1).
+// plantCrossoverChoice also passes over crossings at or below
+// pidtuneDCLevelCrossover, formed only once a crossing is above this floor.
 func pidtuneMinCrossover(plant *System) float64 {
 	tol := poleStabilityTolerance(1)
 	edge := 0.0
@@ -1821,6 +1823,49 @@ func pidtuneMinCrossover(plant *System) float64 {
 		tol /= plant.Dt
 	}
 	return max(edge, tol)
+}
+
+// pidtuneDCLevelCrossover is, for a plant whose certified DC gain lies
+// within its own rounding bound β of 0 dB (solveDCRegular's certificate:
+// its τ = ε·(|D| + Σ|C||X|) as formed there, plus ½ulp), the lowest ω where |G| leaves the band
+// |G(0)| ± β: the gain crossings of the levels |G(0)| ± β, from the gain
+// search itself. Below it |G| stays within rounding of the level, so a 0 dB
+// crossing there is one of the stored data's rounding (0.1/(z−0.9): |G(1)| =
+// 1 + 2.8e-16 crosses at 2.5e-8). +Inf where |G| never leaves the band; 0
+// where DC is not at the level within terms, not certified, or the band's
+// crossings are not resolved (CISC3B, LI4CO5).
+func pidtuneDCLevelCrossover(plant *System) float64 {
+	n, m, p := plant.Dims()
+	if n == 0 || m != 1 || p != 1 || plant.internalDelayCount() > 0 || newDescriptorPolicy(plant).isDescriptor() {
+		return 0
+	}
+	r := solveDCRegular(nil, plant.A, plant.B, plant.C, plant.D, real(dcPoint(plant)), true)
+	if !r.certified || r.overflow || r.solveErr != nil || r.g == nil {
+		return 0
+	}
+	if len(r.tau) == 0 {
+		return 0
+	}
+	g0 := math.Abs(r.g.At(0, 0))
+	beta := r.tau[0] + 0.5*(math.Nextafter(g0, math.Inf(1))-g0)
+	if !(math.Abs(g0-1) <= beta) || !(g0 > beta) {
+		return 0
+	}
+	loop, err := newRationalLoop(plant)
+	if err != nil {
+		return 0
+	}
+	wc := math.Inf(1)
+	for _, level := range []float64{math.Nextafter(g0+beta, math.Inf(1)), math.Nextafter(g0-beta, 0)} {
+		ws, err := loop.gainCrossings(level)
+		if err != nil {
+			return 0
+		}
+		if len(ws) > 0 {
+			wc = min(wc, ws[0])
+		}
+	}
+	return wc
 }
 
 func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
@@ -1846,8 +1891,12 @@ func plantCrossoverChoice(plant *System) (float64, pidtuneCrossover, pidtuneAltC
 		return 0, pidtuneCrossGain, nil, err
 	}
 	wcMin := pidtuneMinCrossover(plant)
+	dcLevel, dcDone := 0.0, false
 	for _, w := range all.GainCrossFreqs {
-		if w > wcMin {
+		if w > wcMin && !dcDone {
+			dcLevel, dcDone = pidtuneDCLevelCrossover(plant), true
+		}
+		if w > wcMin && w > dcLevel {
 			alt := func() (float64, pidtuneCrossover, bool) {
 				poles, err := plant.Poles()
 				if err != nil {
