@@ -787,7 +787,8 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) dcRoute {
 		return dcRoute{g: gain, certain: sure && (allInf(gain) || finiteCertified && n > exactDetMaxOrder)}
 	}
 	if gain, ok, err := sys.dcGainByStructuralEntries(offPole); ok {
-		return dcRoute{g: gain, err: err, certain: true}
+		n, _, _ := sys.Dims()
+		return dcRoute{g: gain, err: err, certain: n > exactDetMaxOrder || err == nil && allInf(gain)}
 	}
 	if l := sys.dcGainByBlockLaurent(offPole); l.ok {
 		return dcRoute{g: l.g, certain: l.exact, deflated: l.deflated, singular: true, lim: l.lim}

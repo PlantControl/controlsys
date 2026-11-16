@@ -43,3 +43,22 @@ func TestDCGainDecoupledIntegratorBesideIllConditionedBlock(t *testing.T) {
 		}
 	}
 }
+
+// A pole at DC whose state no channel reaches (structural reduction) leaves
+// a nonsingular channel solve certified only within its terms; at order ≤
+// exactDetMaxOrder DCGain's nil promises the exact limit, here 0 (ONYZO7).
+func TestDCGainStructuralChannelBesideUnreachedIntegratorExactLimit(t *testing.T) {
+	sys, err := NewFromSlices(4, 1, 1,
+		[]float64{0, 1, 0, 0, 0, -1, -0, -0, 0, 934, -1, -431, 0, -393637, 420, 181019},
+		[]float64{-0, 0, -1296, 544317}, []float64{1, 1, -1, 1}, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatalf("DCGain: %v", err)
+	}
+	if got := g.At(0, 0); got != 0 {
+		t.Errorf("DCGain = %.17g, want 0", got)
+	}
+}
