@@ -173,12 +173,26 @@ func (p ipoly) signAt(num *big.Int, q int) int {
 	if len(p) == 0 {
 		return 0
 	}
+	var s signScratch
+	return p.signAtScratch(num, q, &s)
+}
+
+// signScratch holds signAtScratch's accumulators, reused across calls so
+// refinement's many evaluations stop reallocating multi-thousand-bit
+// integers.
+type signScratch struct{ acc, mul, t, mi big.Int }
+
+func (p ipoly) signAtScratch(num *big.Int, q int, s *signScratch) int {
+	if len(p) == 0 {
+		return 0
+	}
 	d := len(p) - 1
-	acc := new(big.Int)
-	t := new(big.Int)
+	acc, mul := &s.acc, &s.mul
+	acc.SetInt64(0)
 	for i := d; i >= 0; i-- {
-		acc.Mul(acc, num)
-		acc.Add(acc, t.Lsh(p[i], uint(q*(d-i))))
+		mul.Mul(acc, num)
+		acc, mul = mul, acc
+		acc.Add(acc, s.t.Lsh(p[i], uint(q*(d-i))))
 	}
 	return acc.Sign()
 }
@@ -474,6 +488,7 @@ type crossingCounter struct {
 	p  ipoly // empty where |L| ≡ γ: no isolated crossing
 	k  int
 	dt float64
+	s  signScratch
 }
 
 func newCrossingCounter(n int, a, b, c []float64, d, dt, gamma float64) (*crossingCounter, bool) {
@@ -527,6 +542,10 @@ func newCrossingCounter(n int, a, b, c []float64, d, dt, gamma float64) (*crossi
 
 // point is X at ω as num/2^q.
 func (cc *crossingCounter) point(w float64) (*big.Int, int) {
+	return cc.pointInto(new(big.Int), w)
+}
+
+func (cc *crossingCounter) pointInto(mi *big.Int, w float64) (*big.Int, int) {
 	var x float64
 	e := 0
 	if cc.dt > 0 {
@@ -535,7 +554,7 @@ func (cc *crossingCounter) point(w float64) (*big.Int, int) {
 		x, e = w, cc.k
 	}
 	m, ex := math.Frexp(x)
-	mi := new(big.Int).SetUint64(uint64(m * (1 << 53)))
+	mi.SetUint64(uint64(m * (1 << 53)))
 	ex += e - 53
 	mi.Mul(mi, mi)
 	ex *= 2
@@ -546,8 +565,8 @@ func (cc *crossingCounter) point(w float64) (*big.Int, int) {
 }
 
 func (cc *crossingCounter) signAtOmega(w float64) int {
-	n, q := cc.point(w)
-	return cc.p.signAt(n, q)
+	n, q := cc.pointInto(&cc.s.mi, w)
+	return cc.p.signAtScratch(n, q, &cc.s)
 }
 
 // omegaOf is the float ω whose X is nearest num/2^q.
