@@ -352,9 +352,14 @@ type discreteFitGrid struct {
 // discreteFitTheta is θ_k of the closed grid πk/(samples−1), which samples
 // DC, or of the open grid π(k+½)/samples, which does not. The fit holding
 // integrators samples the open grid, as does a free fit whose source
-// response is nonfinite at DC: FreqResponse takes the pole limit at s = 0
-// beside a near pole the count resolves from zero, ±Inf although G(0) of
-// the stored model is finite (NDFJC6).
+// response is nonfinite at DC. For an explicit source of order up to 16
+// that happens only at an exact pole at DC: FreqResponse(0) is DCGain's
+// value, or the stored model's exact one, not the pole limit's spurious ±Inf
+// beside a near pole the count resolves from zero (NDFJC6, fixed by
+// FKYKOG). It can still happen at an exact DC pole, and for sources of
+// order above 16 (DCGain's Inf, or a pole proven only on a small diagonal
+// block), descriptor sources and sources with internal delays, whose DC
+// response keeps the pole limit.
 func discreteFitTheta(k, samples int, open bool) float64 {
 	if open {
 		return math.Pi * (float64(k) + .5) / float64(samples)
