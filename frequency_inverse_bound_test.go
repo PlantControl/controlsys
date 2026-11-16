@@ -65,3 +65,44 @@ func exactInverse2(a []float64, lam float64) []float64 {
 	}
 	return out
 }
+
+// FKYKOG: the inverse tier's tail takes, entry by entry, the smaller of the
+// comparison and inverse bounds on |M|y, and either alone where the other
+// has none.
+func TestTermsCertMinUpper(t *testing.T) {
+	tc := &termsCert{n: 3}
+	scale := func(f []float64, ok bool) mUpper {
+		return func(y []float64) bool {
+			for i := range y {
+				y[i] *= f[i]
+			}
+			return ok
+		}
+	}
+	a, b := []float64{1, 5, 3}, []float64{4, 2, 3}
+	for _, tt := range []struct {
+		okA, okB bool
+		want     []float64
+		ok       bool
+	}{
+		{true, true, []float64{1, 2, 3}, true},
+		{false, true, []float64{4, 2, 3}, true},
+		{true, false, []float64{1, 5, 3}, true},
+		{false, false, nil, false},
+	} {
+		y := []float64{1, 1, 1}
+		ok := tc.minUpper(scale(a, tt.okA), scale(b, tt.okB))(y)
+		if ok != tt.ok {
+			t.Errorf("okA=%v okB=%v: ok = %v", tt.okA, tt.okB, ok)
+			continue
+		}
+		if ok {
+			for i, w := range tt.want {
+				if y[i] != w {
+					t.Errorf("okA=%v okB=%v: y = %v, want %v", tt.okA, tt.okB, y, tt.want)
+					break
+				}
+			}
+		}
+	}
+}

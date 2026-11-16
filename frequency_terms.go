@@ -504,7 +504,8 @@ func newInverseBound(br *balancedRealization, absA []float64, pt frequencyPoint,
 }
 
 // weigh sets ib.v and ib.q < 1/2 with R̄v ≤ qv, reporting false where the
-// iteration finds none.
+// iteration finds none, at once where minᵢ (R̄v)ᵢ/vᵢ ≤ ρ(R̄) shows there is
+// none.
 func (ib *inverseBound) weigh() bool {
 	n := ib.n
 	if ib.v == nil {
@@ -516,6 +517,7 @@ func (ib *inverseBound) weigh() bool {
 	rv := ib.z
 	for it := 0; ; it++ {
 		ib.q = 0
+		lo := math.Inf(1)
 		for i := range n {
 			var r float64
 			for k, a := range ib.rbar[i*n : (i+1)*n] {
@@ -523,11 +525,12 @@ func (ib *inverseBound) weigh() bool {
 			}
 			rv[i] = r
 			ib.q = max(ib.q, r/ib.v[i]*(1+float64(n+2)*termsEps))
+			lo = min(lo, r/ib.v[i])
 		}
 		if ib.q < 0.5 {
 			return true
 		}
-		if it == n {
+		if lo >= 0.5 || it == n {
 			return false
 		}
 		for i, r := range rv {
