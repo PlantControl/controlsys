@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"sync/atomic"
+
+	"plantcontrol.org/v1/gonum/blas/blas64"
 )
 
 // FreqResponse's within-terms contract (FKYKOG) for an explicit model
@@ -19,50 +22,75 @@ import (
 // column j, with θ = u/2, X = |c||M||A||M||b| + |c||M||b| (δ = uX + u|D|)
 // and L = |c||x̂|, all moduli complex moduli:
 //
-//  1. Rows: the residual r = b − (λI − A)x̂, compensated against the exact
-//     pencil, has |rᵢ| ≤ θsᵢ, s = |A||x̂| + |b|, in every row
-//     (Oettli–Prager with A and b perturbed, λ exact).
+//  1. Rows: the residual r = b − (λI − A)x̂ against the exact pencil has
+//     |rᵢ| ≤ θ'sᵢ, s = |A||x̂| + |b|, in every row, for some θ' ≤ θ
+//     (Oettli–Prager with A and b perturbed, λ exact); the steps below
+//     hold with θ' in place of θ, and θ' is the largest proven |rᵢ|/sᵢ. A row passes first on its
+//     working-precision residual plus that residual's rounding bound
+//     (nnzᵢ+5)(ε/2)Sᵢ, Sᵢ the sum of its terms' magnitudes; the rows that
+//     fail it are formed again in compensated arithmetic.
 //  2. e = |x̂ − x| = |Mr| ≤ θ|M|s, and |x̂| ≤ |M||b| + e, so
-//     |c|e ≤ θX + θ|c||M||A|e ≤ θX + T₂, T₂ = θ²|c|N|A|Ns, where
-//     N = M(Û)⁻¹M(L̂)⁻¹P, the comparison matrices of the LU factors (|·|₁
-//     off the diagonal, 1/|·⁻¹|₁ on it), bounds |M|.
-//  3. The output ĥ differs from c·x̂ + D by o, measured in compensated
+//     |c|e ≤ θX + θ|c||M||A|e ≤ θX + T₂, T₂ = θ²|c||M||A||M|s.
+//  3. |M| is bounded through the computed factors F = P⁻¹L̂Û of the
+//     rounded pencil: F = (λI − A) + ΔF with |ΔF| ≤ γ·P⁻¹|L̂||Û| (γ =
+//     (2n+4)ε covers complex GEPP and the rounded diagonal λ − aᵢᵢ), and
+//     N = M(Û)⁻¹M(L̂)⁻¹P, the comparison matrices of the factors (|·|₁ off
+//     the diagonal, 1/|·⁻¹|₁ on it), bounds |F⁻¹|. M = (I − F⁻¹ΔF)⁻¹F⁻¹,
+//     so for y ≥ 0 and v = Ny, |M|y ≤ Σₖ (N|ΔF|)ᵏ v. Where the q check
+//     N(|ΔF|v) ≤ q·v holds with q < 1, that sum is at most v/(1−q).
+//     Applied to y = s and then to y = |A|·Ns/(1−q₁), T₂ ≤
+//     θ²|c|v₂/(1−q₂) with v₂ = N|A|Ns/(1−q₁). q ≥ 1 fails the point. The
+//     Hessenberg sweep adds the reduction's normwise backward error,
+//     γᵣ‖Â‖_F, to |ΔF| as a rank-one all-ones term (comparisonBounds).
+//  4. The output ĥ differs from c·x̂ + D by o, measured in compensated
 //     arithmetic, so |ĥ − h| ≤ o + θX + T₂; and X ≥ |c||x| ≥ L − |c|e
 //     gives X ≥ (L − T₂)/(1 + θ).
-//  4. Accept where o + T₂ ≤ (u − θ)·(L − T₂)/(1 + θ) + u|D|: then
+//  5. Accept where o + T₂ ≤ (u − θ)·(L − T₂)/(1 + θ) + u|D|: then
 //     |ĥ − h| ≤ uX + u|D| = δ ≤ δ/(1−η) for every η < 1.
 //
 // The first-order term θX cancels against uX exactly, with no Neumann
-// series and so no condition on η; |M| enters only the second-order T₂,
-// through N, which bounds the inverse of the factored pencil, so T₂ is
-// exact to first order in the factorization's backward error. θ = u/2
-// leaves the other half of u to the output, formed with one rounding where
-// refinement re-forms it (compensatedOutput); at n = 1 that rounding alone
-// takes ε/2 of the ε budget.
+// series in |M||A| and so no condition on η; |M| enters only the
+// second-order T₂. θ = u/2 leaves the other half of u to the output,
+// formed with one rounding where refinement re-forms it
+// (compensatedOutput); at n = 1 that rounding alone takes ε/2 of the ε
+// budget.
 type termsCert struct {
 	n, m, p int
 	absA    []float64
-	xc, r   []complex128
+	nnz     []int
+	xc      []complex128
 	xm, s   []float64
 	t, t2   []float64
+	w       []float64
 	// undriven marks, at k*m+j, a state input j cannot reach (undrivenStates):
 	// exactly zero in x, where the solve leaves only roundoff fill.
 	undriven []bool
 }
 
+// comparisonBounds bounds the inverse of a factored pencil (step 3):
+// nsolve overwrites the nonnegative y with Ny, and factorError sets dst
+// to an upper bound on |ΔF|y.
+type comparisonBounds interface {
+	nsolve(y []float64)
+	factorError(dst, y []float64)
+}
+
 func newTermsCert(br *balancedRealization) *termsCert {
 	n := br.n
-	f := make([]float64, n*n+4*n)
-	c := make([]complex128, 2*n)
+	f := make([]float64, n*n+5*n)
 	tc := &termsCert{
 		n: n, m: br.m, p: br.p,
 		absA: f[: n*n : n*n],
-		xc:   c[:n:n], r: c[n:],
-		xm: f[n*n : n*n+n : n*n+n], s: f[n*n+n : n*n+2*n : n*n+2*n],
-		t: f[n*n+2*n : n*n+3*n : n*n+3*n], t2: f[n*n+3*n:],
+		nnz:  make([]int, n),
+		xc:   make([]complex128, n),
+		xm:   f[n*n : n*n+n : n*n+n], s: f[n*n+n : n*n+2*n : n*n+2*n],
+		t: f[n*n+2*n : n*n+3*n : n*n+3*n], t2: f[n*n+3*n : n*n+4*n : n*n+4*n], w: f[n*n+4*n:],
 	}
 	for i, v := range br.a {
 		tc.absA[i] = math.Abs(v)
+		if v != 0 {
+			tc.nnz[i/n]++
+		}
 	}
 	tc.undriven = br.undrivenStates()
 	return tc
@@ -93,41 +121,129 @@ func termsAbs(z complex128) float64 {
 }
 
 // rows reports whether column j, loaded, passes the row test of step 1 at
-// pt, leaving s in tc.s.
-func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int) bool {
+// pt, leaving s in tc.s, and returns the smallest θ' ≤ θ the bounds on
+// |rᵢ|/sᵢ prove, with cheap reporting whether a row passed on its
+// working-precision residual alone. compensated skips that tier.
+func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, compensated bool) (ok bool, thetaR float64, cheap bool) {
 	n, m := tc.n, tc.m
 	theta := float64(n) / 2 * eps()
 	kappa := complex(1, 0)
 	if !pt.isPlain() {
 		kappa = pt.scale()
 	}
-	pencilResidual(tc.r, tc.xc, 1, br.a, nil, n, br.b[j:], m, n, pt.p, pt.q, kappa)
-	ik := crecip(kappa)
+	ka, km, pa, qa := cabs1(kappa), termsAbs(kappa), cabs1(pt.p), cabs1(pt.q)
 	lam := cabs1(pt.value())
 	slack := 2 * float64(n+2) * eps() * eps()
 	for i := range n {
-		s := math.Abs(br.b[i*m+j])
+		bi := br.b[i*m+j]
+		s := math.Abs(bi)
+		var sum float64
+		var ar, ai float64
+		row := br.a[i*n : (i+1)*n]
 		for k, a := range tc.absA[i*n : (i+1)*n] {
+			if a == 0 {
+				continue
+			}
 			s += a * tc.xm[k]
+			x := tc.xc[k]
+			ar += row[k] * real(x)
+			ai += row[k] * imag(x)
+			sum += a * cabs1(x)
 		}
 		tc.s[i] = s
-		r := tc.r[i]
-		if kappa != 1 {
-			r *= ik
+		xi := tc.xc[i]
+		r := kappa*complex(bi, 0) - pt.p*xi - pt.q*complex(ar, ai)
+		if !compensated {
+			bound := float64(tc.nnz[i]+5) * eps() / 2 * (ka*math.Abs(bi) + pa*cabs1(xi) + qa*sum)
+			if rb := (termsAbs(r) + bound) * (1 + 2*eps()) / km; rb <= theta*s {
+				if rb > 0 {
+					thetaR = max(thetaR, rb/s)
+				}
+				cheap = true
+				continue
+			}
 		}
-		rb := termsAbs(r)*(1+4*eps()) + slack*(s+lam*tc.xm[i]+cabs1(tc.xc[i]))
+		rc := pencilResidualRow(tc.xc, row, i, bi, pt.p, pt.q, kappa)
+		if kappa != 1 {
+			rc *= crecip(kappa)
+		}
+		rb := termsAbs(rc)*(1+4*eps())*(1+2*eps()) + slack*(s+lam*tc.xm[i]+cabs1(xi))
 		if !(rb <= theta*s) {
+			return false, 0, cheap
+		}
+		if rb > 0 {
+			thetaR = max(thetaR, rb/s)
+		}
+	}
+	return true, thetaR, cheap
+}
+
+// pencilResidualRow is row i of pencilResidual for an explicit model:
+// κbᵢ − p·xᵢ − q·(Ax)ᵢ in compensated arithmetic, row the row of A.
+func pencilResidualRow(x []complex128, row []float64, i int, b float64, p, q, kappa complex128) complex128 {
+	pr, pi, qr, qi := real(p), imag(p), real(q), imag(q)
+	var axr, axi compensatedSum
+	for k, av := range row {
+		if av == 0 {
+			continue
+		}
+		axr.addProd(av, real(x[k]))
+		axi.addProd(av, imag(x[k]))
+	}
+	var re, im compensatedSum
+	if kappa == 1 {
+		re.add(b)
+	} else {
+		re.addProd(real(kappa), b)
+		im.addProd(imag(kappa), b)
+	}
+	xr, xi := real(x[i]), imag(x[i])
+	re.addProd(-pr, xr)
+	re.addProd(pi, xi)
+	im.addProd(-pr, xi)
+	im.addProd(-pi, xr)
+	re.addScaled(-qr, axr)
+	re.addScaled(qi, axi)
+	im.addScaled(-qr, axi)
+	im.addScaled(-qi, axr)
+	return complex(re.value(), im.value())
+}
+
+// mBound sets y to an upper bound on |M|y (step 3) and reports false where
+// the q check fails.
+func (tc *termsCert) mBound(y []float64, cb comparisonBounds) bool {
+	cb.nsolve(y)
+	cb.factorError(tc.w, y)
+	cb.nsolve(tc.w)
+	q := 0.0
+	for i, v := range y {
+		if tc.w[i] == 0 {
+			continue
+		}
+		if !(v > 0) {
 			return false
 		}
+		q = max(q, tc.w[i]/v)
+	}
+	q *= 1 + 8*float64(tc.n)*eps()
+	if !(q < 1) {
+		return false
+	}
+	f := 1 / (1 - q) * (1 + 2*eps())
+	for i := range y {
+		y[i] *= f
 	}
 	return true
 }
 
-// tail sets tc.t2 to N|Â|Ns of step 2, applying N in place with nsolve.
-func (tc *termsCert) tail(nsolve func([]float64)) {
+// tail sets tc.t2 to an upper bound on |M||Â||M|s of step 2 and reports
+// false where a q check fails.
+func (tc *termsCert) tail(cb comparisonBounds) bool {
 	n := tc.n
 	copy(tc.t, tc.s)
-	nsolve(tc.t)
+	if !tc.mBound(tc.t, cb) {
+		return false
+	}
 	for i := range n {
 		var v float64
 		for k, a := range tc.absA[i*n : (i+1)*n] {
@@ -135,15 +251,14 @@ func (tc *termsCert) tail(nsolve func([]float64)) {
 		}
 		tc.t2[i] = v
 	}
-	nsolve(tc.t2)
+	return tc.mBound(tc.t2, cb)
 }
 
-// output reports whether each entry of column j of dst passes steps 3–4,
+// output reports whether each entry of column j of dst passes steps 4–5,
 // column j of x̂ loaded and its tail formed.
-func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int) bool {
+func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, theta float64) bool {
 	n, m := tc.n, tc.m
 	u := float64(n) * eps()
-	theta := u / 2
 	grow := 1 + 8*float64(n)*eps()
 	for i := range tc.p {
 		cr := br.c[i*n : (i+1)*n]
@@ -178,19 +293,26 @@ func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int) bo
 	return true
 }
 
-// certify runs steps 1–4 on x (entry (k, j) at x[k*ks+j*js]) and dst.
+// certify runs steps 1–5 on x (entry (k, j) at x[k*ks+j*js]) and dst.
 // rowsOK reports step 1 alone, which refinement can still fix.
-func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []complex128, ks, js int, dst []complex128, nsolve func([]float64)) (rowsOK, ok bool) {
-	rowsOK = true
+func (tc *termsCert) certify(br *balancedRealization, pt frequencyPoint, x []complex128, ks, js int, dst []complex128, cb comparisonBounds) (rowsOK, ok bool) {
 	for j := range tc.m {
 		tc.load(x, ks, js, j)
-		if !tc.rows(br, pt, j) {
+		rowsOK, thetaR, cheap := tc.rows(br, pt, j, false)
+		if !rowsOK {
 			return false, false
 		}
-		tc.tail(nsolve)
-		if !tc.output(br, dst, j) {
-			ok = false
-			return rowsOK, false
+		if !tc.tail(cb) {
+			return true, false
+		}
+		if tc.output(br, dst, j, thetaR) {
+			continue
+		}
+		if !cheap {
+			return true, false
+		}
+		if _, thetaR, _ = tc.rows(br, pt, j, true); !tc.output(br, dst, j, thetaR) {
+			return true, false
 		}
 	}
 	return true, true
@@ -232,14 +354,18 @@ var errTermsUnverified = fmt.Errorf("response not certified within the rounding 
 
 // evalWithinTerms is FreqResponse's point evaluation of an explicit model
 // without internal delays (see termsCert): the solver's value where
-// certifyTerms passes, else the verified double-double response
-// (ddResponseVerified), else for n ≤ exactDetMaxOrder the exact response
-// (exactResponseAt), whose entries are infinite only where their exact
-// value lies beyond float64's range, and errTermsUnverified otherwise. The
-// point at infinity keeps evalWithPoleLimit. A point where pI + qA
-// is exactly singular is a pole of the stored model and takes the pole
-// limit (evalWithPoleLimit). Off a pole of the stored model no entry is
-// ever infinite: a pencil singular only within rounding is not a pole.
+// certifyTerms passes, else the verified double-double response where it
+// passes termsCert too (ddResponseCertified), else for n ≤
+// exactDetMaxOrder the exact response (exactResponseAt), whose entries are
+// infinite only where their exact value lies beyond float64's range. A
+// point where pI + qA is exactly singular, for n > exactDetMaxOrder decided
+// on the diagonal blocks of the block-triangular form (blockSingularAt), is
+// a pole of the stored model and takes the pole limit (evalWithPoleLimit).
+// Otherwise dst holds the best unverified estimate (the solver's value, else
+// the double-double response, else the pole limit, else NaN) and the error
+// is errTermsUnverified. Off a pole of the stored model no entry is ever
+// infinite: a pencil singular only within rounding is not a pole. The point
+// at infinity keeps evalWithPoleLimit.
 func evalWithinTerms(solver termsSolver, sys *System, pt frequencyPoint, dst []complex128) error {
 	if cmplx.IsInf(pt.value()) {
 		return evalWithPoleLimit(solver.evalInto, sys, pt, dst)
@@ -252,19 +378,28 @@ func evalWithinTerms(solver termsSolver, sys *System, pt frequencyPoint, dst []c
 	if errors.Is(err, errNonFinitePencil) || errors.Is(err, errStateUnderflow) {
 		return err
 	}
-	if ddResponseVerified(sys, pt, dst) {
+	var estimate []complex128
+	if err == nil {
+		estimate = append(estimate, dst...)
+	}
+	if ddResponseCertified(sys, pt, dst) {
 		termsDDCount.Add(1)
 		return nil
 	}
 	n, _, _ := sys.Dims()
-	ps, ok := cachedPoleSchur(sys)
-	if n > exactDetMaxOrder || !ok {
-		termsUnverifiedCount.Add(1)
-		return errTermsUnverified
+	singular, decided := false, false
+	if n <= exactDetMaxOrder {
+		g, _, ok := exactResponseOf(sys, pt)
+		if ok {
+			termsExactCount.Add(1)
+			copy(dst, g)
+			return nil
+		}
+		singular, decided = true, true
+	} else {
+		singular, decided = blockSingularAt(sys, pt), true
 	}
-	g, _, ok := exactResponseAt(ps, pt)
-	if !ok {
-		termsPoleCount.Add(1)
+	poleLimit := func() error {
 		return evalWithPoleLimit(func(at frequencyPoint, d []complex128) error {
 			if at == pt {
 				return errSingularPencil
@@ -272,9 +407,73 @@ func evalWithinTerms(solver termsSolver, sys *System, pt frequencyPoint, dst []c
 			return solver.evalInto(at, d)
 		}, sys, pt, dst)
 	}
-	termsExactCount.Add(1)
-	copy(dst, g)
-	return nil
+	if decided && singular {
+		termsPoleCount.Add(1)
+		return poleLimit()
+	}
+	termsUnverifiedCount.Add(1)
+	switch {
+	case estimate != nil:
+		copy(dst, estimate)
+	case ddResponse(sys, pt, dst) == nil:
+	case poleLimit() == nil:
+	default:
+		for i := range dst {
+			dst[i] = complex(math.NaN(), math.NaN())
+		}
+	}
+	return errTermsUnverified
+}
+
+// exactResponseOf is exactResponseAt of the explicit sys, memoized where
+// its poleSchurData builds and solved unmemoized where that fails.
+func exactResponseOf(sys *System, pt frequencyPoint) (g []complex128, overflow, ok bool) {
+	if ps, ok := cachedPoleSchur(sys); ok {
+		return exactResponseAt(ps, pt)
+	}
+	n, m, p := sys.Dims()
+	ps := &poleSchurData{n: n, m: m, p: p, a: make([]float64, n*n), b: make([]float64, n*m), c: make([]float64, p*n), d: make([]float64, p*m)}
+	copyStrided(ps.a, n, sys.A.RawMatrix().Data, sys.A.RawMatrix().Stride, n, n)
+	copyStrided(ps.b, m, sys.B.RawMatrix().Data, sys.B.RawMatrix().Stride, n, m)
+	copyStrided(ps.c, n, sys.C.RawMatrix().Data, sys.C.RawMatrix().Stride, p, n)
+	copyStrided(ps.d, m, sys.D.RawMatrix().Data, sys.D.RawMatrix().Stride, p, m)
+	return solveExactAt(ps, pt)
+}
+
+// blockSingularAt reports whether pI + qA of the explicit sys is exactly
+// singular at pt on some diagonal block of order up to exactDetMaxOrder
+// of its block-triangular form (tarjanBlocks of A's pattern): det(pI + qA)
+// is the product of the blocks' determinants.
+func blockSingularAt(sys *System, pt frequencyPoint) bool {
+	n, _, _ := sys.Dims()
+	pat := blas64.General{Rows: n, Cols: n, Stride: n, Data: make([]float64, n*n)}
+	raw := sys.A.RawMatrix()
+	for i := range n {
+		for j := range n {
+			if raw.Data[i*raw.Stride+j] != 0 {
+				pat.Data[i*n+j] = 1
+			}
+		}
+	}
+	for _, block := range tarjanBlocks(pat, n) {
+		k := len(block)
+		if k > exactDetMaxOrder {
+			continue
+		}
+		a := make([]float64, k*k)
+		for i, bi := range block {
+			for j, bj := range block {
+				a[i*k+j] = raw.Data[bi*raw.Stride+bj]
+			}
+		}
+		b := make([]float64, k)
+		b[0] = 1
+		ps := &poleSchurData{n: k, m: 1, p: 1, a: a, b: b, c: slices.Clone(b), d: []float64{0}}
+		if _, _, ok := solveExactAt(ps, pt); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // termsPassCount, termsDDCount, termsExactCount, termsPoleCount and

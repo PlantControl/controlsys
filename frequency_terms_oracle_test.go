@@ -229,3 +229,24 @@ func checkWithinTerms(t *testing.T, sys *System, omega []float64, resp *FreqResp
 		}
 	}
 }
+
+// checkGridWithinTerms checks g, the response of the explicit delay-free
+// sys at pt as EvalFr returns it, against frTermsBound: each entry finite,
+// within δ/(1−η) of h where η < 1.
+func checkGridWithinTerms(t *testing.T, label string, sys *System, pt frequencyPoint, g [][]complex128) {
+	t.Helper()
+	h, tb, sing := frTermsBound(sys, pt)
+	if sing {
+		t.Errorf("%s: pencil exactly singular", label)
+		return
+	}
+	_, m, _ := sys.Dims()
+	for i, row := range g {
+		for j, v := range row {
+			want, b := h[i*m+j], tb[i*m+j]
+			if cmplx.IsInf(v) || cmplx.IsNaN(v) || b >= 0 && !(cmplx.Abs(v-want) <= b) {
+				t.Errorf("%s: [%d][%d] = %v, want %v within %.3g", label, i, j, v, want, b)
+			}
+		}
+	}
+}

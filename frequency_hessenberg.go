@@ -224,7 +224,7 @@ func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []co
 	}
 	u := newRealizationCopy(src, n, m, p)
 	g := make([]complex128, p*m)
-	bad, err := ddRealizationInto(&u, pt, g, true)
+	bad, err := ddRealizationInto(&u, pt, g, true, nil)
 	if err != nil {
 		return errStateUnderflow
 	}
@@ -589,12 +589,12 @@ func (bd *balancedDense) certifyTerms(pt frequencyPoint, dst []complex128) bool 
 		bd.cert = newTermsCert(&bd.balancedRealization)
 	}
 	br := &bd.balancedRealization
-	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd)
 	refined := false
 	for step := 0; !rowsOK && step < maxRefineSteps; step++ {
 		bd.refineStep()
 		compensatedOutput(br, bd.x, bd.m, 1, dst)
-		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd.comparisonSolve)
+		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd)
 		refined = true
 	}
 	if ok && refined {
@@ -626,9 +626,41 @@ func (bd *balancedDense) refineStep() {
 	}
 }
 
-// comparisonSolve overwrites the nonnegative y with M(Û)⁻¹M(L̂)⁻¹Py for
-// evalInto's factors, an upper bound on |(sI − Â)⁻¹|y.
-func (bd *balancedDense) comparisonSolve(y []float64) {
+// factorError sets dst to γ·P⁻¹|L̂||Û|y for evalInto's factors, γ =
+// (2n+4)ε, an upper bound on |ΔF|y for F = P⁻¹L̂Û = sI − Â + ΔF
+// (termsCert step 3).
+func (bd *balancedDense) factorError(dst, y []float64) {
+	n, a := bd.n, bd.pencil
+	for i := range n {
+		v := y[i] * sqrt2 / cabs1(bd.inv[i])
+		for k := i + 1; k <= bd.last[i]; k++ {
+			v += cabs1(a[i*n+k]) * y[k]
+		}
+		dst[i] = v
+	}
+	for i := n - 1; i > 0; i-- {
+		v := dst[i]
+		for k := range i {
+			v += cabs1(a[i*n+k]) * dst[k]
+		}
+		dst[i] = v
+	}
+	for k := n - 1; k >= 0; k-- {
+		if pk := bd.piv[k]; pk != k {
+			dst[k], dst[pk] = dst[pk], dst[k]
+		}
+	}
+	g := float64(2*n+4) * eps()
+	for i := range dst {
+		dst[i] *= g
+	}
+}
+
+const sqrt2 = 1.4142135623730951 * (1 + 0x1p-52)
+
+// nsolve overwrites the nonnegative y with M(Û)⁻¹M(L̂)⁻¹Py for
+// evalInto's factors, an upper bound on |F⁻¹|y.
+func (bd *balancedDense) nsolve(y []float64) {
 	n, a := bd.n, bd.pencil
 	for k, pk := range bd.piv {
 		if pk != k {
@@ -961,6 +993,7 @@ type hessenbergSweep struct {
 	via         sweepVia
 	denseSolved bool
 	cert        *termsCert
+	normF       float64
 	xf          []complex128
 	absQT       []float64
 	certBuf     []float64
@@ -1416,12 +1449,17 @@ func (hs *hessenbergSweep) certifyTerms(pt frequencyPoint, dst []complex128) boo
 			for i, v := range hs.q {
 				hs.absQT[i] = math.Abs(v)
 			}
+			var f l2
+			for _, v := range hs.a {
+				f.add(v)
+			}
+			hs.normF = f.norm()
 		}
 		qMulCols(hs.xf, hs.y, hs.q, n, m)
 		for i, v := range hs.x {
 			hs.xf[i] += v
 		}
-		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs.comparisonSolve); ok {
+		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs); ok {
 			return true
 		}
 		if hs.denseRetry(pt, dst) != nil {
@@ -1434,11 +1472,52 @@ func (hs *hessenbergSweep) certifyTerms(pt frequencyPoint, dst []complex128) boo
 	return hs.dense.certifyTerms(pt, dst)
 }
 
-// comparisonSolve overwrites the nonnegative y with |Q|·N_H·|Qᵀ|y, N_H
-// replaying factor's swaps and multipliers and back substitution in
-// magnitudes: an upper bound on |(sI − Â)⁻¹|y to first order in the
-// reduction's and the factorization's backward errors.
-func (hs *hessenbergSweep) comparisonSolve(y []float64) {
+// factorError sets dst to an upper bound on |ΔF|y for F = Q·L̂Û·Qᵀ, the
+// factored sI − H mapped back: |Q|·γ|L̂||Û|·|Qᵀ|y with γ = (2n+4)ε, plus
+// the reduction's normwise backward error (n² + 4n)ε‖Â‖_F as a rank-one
+// all-ones term.
+func (hs *hessenbergSweep) factorError(dst, y []float64) {
+	n, q, t := hs.n, hs.absQT, hs.certBuf
+	clear(t)
+	sum := 0.0
+	for k, yk := range y {
+		sum += yk
+		if yk == 0 {
+			continue
+		}
+		for i, a := range q[k*n : (k+1)*n] {
+			t[i] += a * yk
+		}
+	}
+	u := hs.u
+	for i := range n {
+		v := t[i] * sqrt2 / cabs1(hs.inv[i])
+		for k := i + 1; k < n; k++ {
+			v += cabs1(u[i*n+k]) * t[k]
+		}
+		t[i] = v
+	}
+	for k := n - 2; k >= 0; k-- {
+		t[k+1] += cabs1(hs.mult[k]) * t[k]
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+	}
+	g := float64(2*n+4) * eps()
+	red := float64(n*n+4*n) * eps() * hs.normF * sum
+	for i := range n {
+		var v float64
+		for k, a := range q[i*n : (i+1)*n] {
+			v += a * t[k]
+		}
+		dst[i] = g*v + red
+	}
+}
+
+// nsolve overwrites the nonnegative y with |Q|·N_H·|Qᵀ|y, N_H replaying
+// factor's swaps and multipliers and back substitution in magnitudes: an
+// upper bound on |F⁻¹|y.
+func (hs *hessenbergSweep) nsolve(y []float64) {
 	n, q, t := hs.n, hs.absQT, hs.certBuf
 	clear(t)
 	for k, yk := range y {

@@ -302,6 +302,9 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		return e.matrix(data, omega), nil
 	}
 	if err := e.sweepInto(omega, data, e.pointSolver(len(omega))); err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return e.matrix(data, omega), err
+		}
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -319,6 +322,9 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 
 	data := make([]complex128, len(omega)*e.p*e.m)
 	if err := e.sweepInto(omega, data, e.pointSolver(1)); err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return e.matrix(data, omega), err
+		}
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -331,28 +337,45 @@ type frequencyPointSolver interface {
 }
 
 // sweepInto evaluates each frequency with solver, taking the pole limit
-// where the pencil is singular, and applies the I/O delay phase.
+// where the pencil is singular, and applies the I/O delay phase. A point
+// left unverified (ErrAccuracyUnverified) keeps its estimate and the sweep
+// goes on: it returns the first such error, naming its ω, once every point
+// is filled, and any other error at once.
 func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver frequencyPointSolver) error {
 	pm := e.p * e.m
 	delaySS := effectiveIODelayMatrix(e.sys, e.p, e.m, true)
 	eval := e.withinTerms(solver)
+	var unverified error
+	keep := func(w float64, err error) error {
+		if !errors.Is(err, ErrAccuracyUnverified) {
+			return atFrequency(w, err)
+		}
+		if unverified == nil {
+			unverified = fmt.Errorf("at ω = %g: %w", w, err)
+		}
+		return nil
+	}
 	for k, w := range omega {
 		pt := e.pointAt(w)
 		dst := data[k*pm : (k+1)*pm]
 		if done, err := dcResponseInto(e.sys, pt, dst); done {
 			if err != nil {
-				return atFrequency(w, err)
+				if err := keep(w, err); err != nil {
+					return err
+				}
 			}
 			continue
 		}
 		if err := eval(pt, dst); err != nil {
-			return atFrequency(w, err)
+			if err := keep(w, err); err != nil {
+				return err
+			}
 		}
 		if delaySS != nil {
 			applyIODelayMatrixAtS(e.sys, pt, dst, e.p, e.m, delaySS)
 		}
 	}
-	return nil
+	return unverified
 }
 
 func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
@@ -367,19 +390,20 @@ func (e frequencyEvaluator) evalPoint(pt frequencyPoint, poleLimit bool) ([][]co
 	eval := e.pointEval()
 	if poleLimit && !e.sys.HasInternalDelay() && !e.sys.IsDescriptor() {
 		if done, err := dcResponseInto(e.sys, pt, data); done {
-			if err != nil {
+			if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 				return nil, err
 			}
-			return complexFlatToGrid(data, e.p, e.m), nil
+			return complexFlatToGrid(data, e.p, e.m), err
 		}
-		if err := e.withinTerms(e.pointSolver(1))(pt, data); err != nil {
+		err := e.withinTerms(e.pointSolver(1))(pt, data)
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			if errors.Is(err, errStateUnderflow) || errors.Is(err, errPoleUnresolved) {
 				err = fmt.Errorf("at s = %v: %w", pt.value(), err)
 			}
 			return nil, err
 		}
 		applyIODelayAtS(e.sys, pt, data, e.p, e.m, true)
-		return complexFlatToGrid(data, e.p, e.m), nil
+		return complexFlatToGrid(data, e.p, e.m), err
 	}
 	if !poleLimit {
 		if err := eval(pt, data); err != nil {
@@ -635,18 +659,29 @@ func applyIODelayPhase(sys *System, omega []float64, data []complex128, p, m int
 	}
 }
 
-// dcResponseInto sets dst to DCGain's gain at the DC point of sys (s = 0,
-// or z = 1 discrete), where every delay factor is exactly 1, and returns
-// DCGain's error: FreqResponse and EvalFr of an explicit model without
-// internal delays are DCGain there. done is false off DC, for a model
-// without inputs or outputs, and for descriptor and internal-delay models.
+// dcResponseInto sets dst to the response at the DC point of an explicit
+// sys without internal delays (s = 0, or z = 1 discrete), where every
+// delay factor is exactly 1: DCGain's gain where DCGain returns nil, and
+// DCGain's value and error where it is unverified and pI + qA is exactly
+// singular there (for n > exactDetMaxOrder on a small diagonal block,
+// blockSingularAt); any other DCGain error is returned. done is false off
+// DC, for a model without inputs or outputs, for descriptor and
+// internal-delay models, and where DCGain is unverified at a pencil not
+// shown exactly singular: there FreqResponse runs its own chain
+// (evalWithinTerms).
 func dcResponseInto(sys *System, pt frequencyPoint, dst []complex128) (done bool, err error) {
 	_, m, p := sys.Dims()
 	if m == 0 || p == 0 || sys.internalDelayCount() > 0 || sys.IsDescriptor() || pt.value() != dcPoint(sys) {
 		return false, nil
 	}
 	g, err := sys.DCGain()
-	if err != nil {
+	if errors.Is(err, ErrAccuracyUnverified) && !dcPencilSingular(sys, pt) {
+		return false, nil
+	}
+	if g == nil {
+		for i := range dst {
+			dst[i] = complex(math.NaN(), math.NaN())
+		}
 		return true, err
 	}
 	raw := g.RawMatrix()
@@ -655,7 +690,18 @@ func dcResponseInto(sys *System, pt frequencyPoint, dst []complex128) (done bool
 			dst[i*m+j] = complex(raw.Data[i*raw.Stride+j], 0)
 		}
 	}
-	return true, nil
+	return true, err
+}
+
+// dcPencilSingular reports whether pI + qA of the explicit sys is exactly
+// singular at the DC point pt.
+func dcPencilSingular(sys *System, pt frequencyPoint) bool {
+	n, _, _ := sys.Dims()
+	if n > exactDetMaxOrder {
+		return blockSingularAt(sys, pt)
+	}
+	_, _, ok := exactResponseOf(sys, pt)
+	return !ok
 }
 
 func applyIODelayAtS(sys *System, pt frequencyPoint, data []complex128, p, m int, includeDelayMatrix bool) {

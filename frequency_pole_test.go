@@ -122,10 +122,28 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 	const dt = 0.1
 	disc, discOracle := poleOscLag2x2(t, dt)
 	contW := []float64{0.5, 1, 2}
-	discW := []float64{1, math.Pi / 2 / dt, 25}
+	discW := []float64{1, 25}
 	checkPoleResponse(t, "explicit continuous", cont, contW, contOracle)
 	checkPoleResponse(t, "descriptor continuous", poleDescriptorTwin(t, cont), contW, contOracle)
 	checkPoleResponse(t, "explicit discrete", disc, discW, discOracle)
+	// ω = π/(2Dt) maps to z = (1+jν)/(1−jν) with ν = tan(π/4) rounded, one
+	// ulp off the pole z = j of the stored model: finite there, within
+	// terms; EvalFr at z = j itself is the pole (FKYKOG).
+	wq := math.Pi / 2 / dt
+	frq, err := disc.FreqResponse([]float64{wq})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGridWithinTerms(t, "explicit discrete FreqResponse(π/2Dt)", disc, newTimeDomain(dt).frequencyPoint(wq), [][]complex128{{frq.At(0, 0, 0), frq.At(0, 0, 1)}, {frq.At(0, 1, 0), frq.At(0, 1, 1)}})
+	gj, err := disc.EvalFr(1i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range discOracle(1i) {
+		for j, want := range row {
+			checkPoleEntry(t, "explicit discrete EvalFr(j)", gj[i][j], want)
+		}
+	}
 	arr, err := NewModelArray([]int{2}, []*System{cont, poleDescriptorTwin(t, cont)})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +166,7 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 			}
 		}
 	}
-	checkPoleResponse(t, "descriptor discrete", poleDescriptorTwin(t, disc), discW, discOracle)
+	checkPoleResponse(t, "descriptor discrete", poleDescriptorTwin(t, disc), []float64{1, wq, 25}, discOracle)
 }
 
 // TestFreqResponseAtPoleHessenbergSweep drives the pole through the
@@ -692,11 +710,12 @@ func realSolveResponse(t *testing.T, sys *System, w float64) complex128 {
 	return g
 }
 
-// TestPoleLimitRotatedIntegratorKeepsInf: an integrator in a non-companion
-// realization has a computed eigenvalue of order eps·‖A‖, not 0, so at s = 0
-// the relative rule |p−s| ≤ 1e−3·|p| never held and the solve error replaced
-// +Inf. At the origin a pole within the cluster tolerance is a pole at s.
-func TestPoleLimitRotatedIntegratorKeepsInf(t *testing.T) {
+// TestPoleLimitRotatedIntegratorWithinTerms: an integrator in a
+// non-companion realization has a computed eigenvalue of order eps·‖A‖,
+// not 0. sI − A of the stored data is exactly nonsingular at s = 0, so the
+// response there is the stored model's finite one, within terms, not +Inf
+// (FKYKOG); off DC it is unchanged.
+func TestPoleLimitRotatedIntegratorWithinTerms(t *testing.T) {
 	tr := mat.NewDense(3, 3, []float64{1, 2, -0.5, 0.5, -1, 1, 0.3, 0.7, 2})
 	var ti mat.Dense
 	if err := ti.Inverse(tr); err != nil {
@@ -732,9 +751,7 @@ func TestPoleLimitRotatedIntegratorKeepsInf(t *testing.T) {
 		want := realSolveResponse(t, sys, 1)
 		check := func(api string, h0, h1 complex128) {
 			t.Helper()
-			if !cmplx.IsInf(h0) {
-				t.Errorf("%s %s(0) = %v; want +Inf", c.name, api, h0)
-			}
+			checkGridWithinTerms(t, c.name+" "+api+"(0)", sys, pointAt(0), [][]complex128{{h0}})
 			if cmplx.Abs(h1-want) > 1e-10*cmplx.Abs(want) {
 				t.Errorf("%s %s(1) = %v; want %v", c.name, api, h1, want)
 			}
@@ -762,8 +779,8 @@ func TestPoleLimitRotatedIntegratorKeepsInf(t *testing.T) {
 			t.Errorf("%s Bode: %v", c.name, err)
 			continue
 		}
-		if !math.IsInf(bd.MagDBAt(0, 0, 0), 1) {
-			t.Errorf("%s Bode mag(0) = %v dB; want +Inf", c.name, bd.MagDBAt(0, 0, 0))
+		if h0, _ := sys.EvalFr(0); math.Abs(bd.MagDBAt(0, 0, 0)-20*math.Log10(cmplx.Abs(h0[0][0]))) > 1e-8 {
+			t.Errorf("%s Bode mag(0) = %v dB; want %v", c.name, bd.MagDBAt(0, 0, 0), h0[0][0])
 		}
 		if wantDB := 20 * math.Log10(cmplx.Abs(want)); math.Abs(bd.MagDBAt(1, 0, 0)-wantDB) > 1e-8 {
 			t.Errorf("%s Bode mag(1) = %v dB; want %v", c.name, bd.MagDBAt(1, 0, 0), wantDB)

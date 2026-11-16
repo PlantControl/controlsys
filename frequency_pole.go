@@ -1416,7 +1416,7 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 	}
 	br := newBalancedRealization(sys, n, m, p)
 	g := make([]complex128, p*m)
-	bad, err := ddRealizationInto(&br, pt, g, false)
+	bad, err := ddRealizationInto(&br, pt, g, false, nil)
 	if errors.Is(err, errStateUnderflow) {
 		return underflowResponseInto(sys, n, m, p, pt, dst)
 	}
@@ -1433,7 +1433,7 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 	if lost {
 		u := newRealizationCopy(sys, n, m, p)
 		ug := make([]complex128, p*m)
-		ubad, uerr := ddRealizationInto(&u, pt, ug, true)
+		ubad, uerr := ddRealizationInto(&u, pt, ug, true, nil)
 		for j, e := range bad {
 			if e == nil {
 				continue
@@ -1474,17 +1474,31 @@ func ddResponseResolved(sys *System, pt frequencyPoint, dst []complex128) error 
 // block-triangular solve verifies componentwise. A model without states is
 // its D.
 func ddResponseVerified(sys *System, pt frequencyPoint, dst []complex128) bool {
+	return ddVerifiedInto(sys, pt, dst, false)
+}
+
+// ddResponseCertified is ddResponseVerified whose value also passes the
+// within-terms certificate (certifyStates) before it is accepted.
+func ddResponseCertified(sys *System, pt frequencyPoint, dst []complex128) bool {
+	return ddVerifiedInto(sys, pt, dst, true)
+}
+
+func ddVerifiedInto(sys *System, pt frequencyPoint, dst []complex128, certify bool) bool {
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return ddResponse(sys, pt, dst) == nil
 	}
-	if sys.internalDelayCount() > 0 {
+	if sys.internalDelayCount() > 0 || certify && sys.IsDescriptor() {
 		return false
 	}
 	verified := func(s *System) bool {
 		br := newBalancedRealization(s, n, m, p)
 		g := make([]complex128, p*m)
-		bad, err := ddRealizationInto(&br, pt, g, true)
+		var x []complex128
+		if certify {
+			x = make([]complex128, n*m)
+		}
+		bad, err := ddRealizationInto(&br, pt, g, true, x)
 		if err != nil {
 			return false
 		}
@@ -1493,10 +1507,28 @@ func ddResponseVerified(sys *System, pt frequencyPoint, dst []complex128) bool {
 				return false
 			}
 		}
+		if certify && !certifyStates(br, pt, x, g) {
+			return false
+		}
 		copy(dst, g)
 		return true
 	}
 	return verified(sys) || verified(blockTriangularSystem(sys))
+}
+
+// certifyStates reports whether g, the response at pt of the explicit
+// balanced realization br from its state solution x (row-major n×m),
+// passes termsCert, with N and ΔF from br's own double GEPP factors there.
+func certifyStates(br balancedRealization, pt frequencyPoint, x, g []complex128) bool {
+	if br.e != nil {
+		return false
+	}
+	bd := newBalancedDenseOf(br)
+	if bd.evalInto(pt, make([]complex128, br.p*br.m)) != nil {
+		return false
+	}
+	_, ok := newTermsCert(&bd.balancedRealization).certify(&bd.balancedRealization, pt, x, br.m, 1, g, bd)
+	return ok
 }
 
 // errDDSingular is ddRealizationInto's failure other than a lost state: a
@@ -1526,7 +1558,7 @@ var errDDSingular = errors.New("double-double response not resolved")
 // reaches (undrivenStates) passes the Oettli–Prager test |b̃ − M̃x̂| ≤
 // nε(|b̃| + |M̃||x̂|) for the rounded x̂, residual in double-double:
 // rounding an accurate x̃ leaves ε/2.
-func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) (bad []error, err error) {
+func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool, xOut []complex128) (bad []error, err error) {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
 	for _, v := range br.a {
@@ -1677,6 +1709,11 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 		} else {
 			for r := range p {
 				dst[r*m+j] = g[r*m+j]
+			}
+			for i := range xOut[:min(len(xOut), n)] {
+				v := x[i*m+j].mul(q)
+				k := bExp[j] - sk
+				xOut[i*m+j] = ddComplex{v.re.ldexp(k), v.im.ldexp(k)}.complex128()
 			}
 		}
 	}

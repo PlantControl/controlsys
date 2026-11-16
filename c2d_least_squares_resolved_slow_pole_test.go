@@ -175,13 +175,13 @@ func TestC2DFitLeastSquaresClosedGridWhereSlowPoleIsResolved(t *testing.T) {
 
 // The count takes a pole whose 1/s coefficient is within its bound (fz
 // 13418: pole 1.65e-10 inside its rounding disk 1.28e-9, neighbour 1.6e-8
-// in A22), so k = 0, and FreqResponse(0) keeps the pole limit, +Inf
-// (NSYMIV), although G(0) of the stored model is finite (2.384283283e6).
-// The free fit samples the open grid and returns nil. Main held 2
-// integrators.
-func TestC2DFitLeastSquaresOpenGridWhereResponseIsInfiniteAtDC(t *testing.T) {
+// in A22), so k = 0. Under the within-terms contract FreqResponse(0) is
+// DCGain's certified G(0) = 2.384283283e6 of the stored model, not the
+// pole limit's +Inf (FKYKOG), so the free fit samples the closed grid, as
+// for fz 12571, with DC in it, and returns nil. Main held 2 integrators.
+func TestC2DFitLeastSquaresClosedGridWhereDCGainIsFinite(t *testing.T) {
 	checkLeastSquaresFrozenFit(t, []leastSquaresFrozenCase{
-		// base (main, arm64 model) k>0: MaxRelativeError 6.26e-06, exact 3.39e-06; head k=0: 2.5e-06.
+		// base (main, arm64 model) k>0: MaxRelativeError 6.26e-06, exact 3.39e-06; NSYMIV k=0 open grid: 2.5e-06; FKYKOG k=0 closed grid: 9.5727e-06.
 		{
 			name: "fz/13418",
 			n:    6,
@@ -189,7 +189,7 @@ func TestC2DFitLeastSquaresOpenGridWhereResponseIsInfiniteAtDC(t *testing.T) {
 			b:    []float64{0x1.de66f5b235fc9p-01, 0x1.2fbd634d66a85p-01, -0x1.3be6f07be269ep-01, -0x1.d8bf26a8cc686p-01, 0x1.f7deb26ec98a4p-04, 0x1.fa715db8cd433p-01},
 			c:    []float64{0x1.f1a2ae2e09c89p-18, 0x1.d281dc9064a4bp-17, -0x1.1339ce1eedbfep-16, -0x1.ba6312c503d4dp-19, 0x1.36fb071be5f0bp-16, -0x1.238ce3f1f7ce6p-17},
 			d:    0x1.9909f1fcb57b5p+01,
-			ceil: 2.5e-06,
+			ceil: 9.582e-06,
 		},
 	})
 }
