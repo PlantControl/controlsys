@@ -127,3 +127,18 @@ func TestFreqResponseAtDCIsDCGain(t *testing.T) {
 		t.Errorf("EvalFr(0) = %v, DCGain %v", h[0][0], g.At(0, 0))
 	}
 }
+
+// FKYKOG: an output cancelling below the GEPP solve's cancellation guard
+// (main kept 46 times the term bound, 6e-10 relative, at ω = 3162).
+func TestFreqResponseWithinTermsCancellingOutput(t *testing.T) {
+	sys := withinTermsModel(t, 4,
+		[]float64{0, -1, -2, -1, 0, -1, 0, 4908, 0, 0, -1, 0, 0, 5559, 0, -2.7283573e+07},
+		[]float64{1, -2, 1, 11118},
+		[]float64{1, -1, -1, 0}, []float64{0}, 0)
+	ws := withinTermsGrid(0)
+	resp, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkWithinTerms(t, sys, ws, resp, 0)
+}
