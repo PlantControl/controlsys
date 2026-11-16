@@ -111,7 +111,10 @@ type ReduceResult struct {
 // none may refute it or fail to verify it where the model's own rounding
 // bound determines its response, and the points that verify it within the
 // rounding bounds of both responses must fix a difference of degree n + nr
-// (the orders of the model and the cut). Across a gap, a point at the fast
+// (the orders of the model and the cut), with every group of poles
+// at or below a scale given as many conditions as it has poles by points
+// that see it to tol (points far above the group fix only its leading
+// coefficients; see poleScalesCovered). Across a gap, a point at the fast
 // scale cannot see a slow pole to tol, so a continuous model also needs
 // n_f + nr_f + 1 verified points at or above the gap and n_s + nr_s + 1 at
 // or below the slow scale, the largest eigenvalue magnitude below the gap

@@ -58,8 +58,10 @@ import (
 // from it beyond tol relative to the larger of the response and the
 // entry's own terms (classifyProbe), and the model's data resolution enters
 // only in what a point inside a shared-pole window can refute.
-// Across a resolved spectral gap the count is not sufficient, and
-// frequencyAxisCutAcrossGap adds one per side of the gap.
+// Nor is the count sufficient when the verified points lie far above a
+// group of poles, a cluster near the axis or unresolved slow poles:
+// poleScalesCovered counts per pole scale. Across a resolved spectral gap
+// frequencyAxisCutAcrossGap adds one count per side of the gap.
 // False also when the eigenvalues of A or of red do not converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
 	return frequencyAxisCutAcrossGap(sys, red, removed, tol, 0)
@@ -210,34 +212,186 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 			}
 		}
 		count(poles.evals)
-		if nr > 0 {
-			evR, _, ok := eigenRoundingBounds(red.A)
-			if !ok {
-				return false
+		count(win.cutPoles)
+	}
+	counted := func() bool {
+		verified, slow, fast = 0, 0, 0
+		for k, s := range pts {
+			if !isVerified[k] {
+				continue
 			}
-			count(evR)
+			w := probeWeight(s)
+			verified += w
+			switch a := cmplx.Abs(s); {
+			case a >= cutoff:
+				fast += w
+			case a <= slowScale:
+				slow += w
+			}
 		}
+		return verified >= n+nr && (!sided || slow >= needSlow && fast >= needFast)
 	}
-	for k, s := range pts {
-		if !isVerified[k] {
-			continue
-		}
-		w := probeWeight(s)
-		verified += w
-		switch a := cmplx.Abs(s); {
-		case a >= cutoff:
-			fast += w
-		case a <= slowScale:
-			slow += w
-		}
-	}
-	if verified < n+nr {
+	if !counted() {
 		return false
 	}
-	if sided && (slow < needSlow || fast < needFast) {
-		return false
+	discrete := sys.Dt != 0
+	if !poleScalesCovered(discrete, poles.evals, win, pts, isVerified, tol) {
+		if !resolveOpenProbes(&full, &cut, pts, isVerified, win, tol) || !counted() || !poleScalesCovered(discrete, poles.evals, win, pts, isVerified, tol) {
+			return false
+		}
 	}
 	return accept()
+}
+
+// resolveOpenProbes judges, in complex double-double, every point outside
+// the shared-pole windows that the double bounds left open, for a cut the
+// global count accepts but poleScalesCovered does not: GEPP in double
+// errs by up to κ·ε, which beside a cluster of poles near the axis or an
+// unresolved slow pole is the size of the cut's error, while double-double
+// shrinks it by 2⁻⁵². The responses and their rigorous bounds are those of
+// zpkDDResponse (comp = ver; the terms within their stated band
+// [lo, hi]): a point is verified when |Ĝ−R̂| + δ_G + δ_R ≤ tol·max(scale,
+// lo) at every entry, the exact deviation then within Reduce's bound
+// tol·max(scale, terms_G) (lo > 0 of a determined band, as
+// zpkJudgeEntries), and an entry refutes the cut when |Ĝ−R̂| − δ_G − δ_R >
+// tol·max(scale, hi), which classifyProbe's refutation is. It
+// reports false on a refutation; a point the double-double solve cannot
+// bound stays open. Points inside a window stay open: there the
+// refutation charges the data bounds, which are not formed here.
+func resolveOpenProbes(full, cut *boundedResponse, pts []complex128, verified []bool, win poleWindows, tol float64) bool {
+	pm := full.p * full.m
+	var w zpkDDWork
+	g, r := make([]zpkEntryBounds, pm), make([]zpkEntryBounds, pm)
+	for k, s := range pts {
+		if verified[k] || !full.ok[k] || !cut.ok[k] || win.contain(s) {
+			continue
+		}
+		if !ddEntryBounds(&full.ev.br, s, &w, g) || !ddEntryBounds(&cut.ev.br, s, &w, r) {
+			continue
+		}
+		scale := 0.0
+		for i := range g {
+			scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
+		}
+		ok := true
+		for i := range g {
+			diff := cmplx.Abs(g[i].g - r[i].g)
+			lhs := diff + g[i].ver + r[i].ver
+			if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
+				continue
+			}
+			if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
+				return false
+			}
+			ok = false
+		}
+		verified[k] = ok
+	}
+	return true
+}
+
+// ddEntryBounds sets e, row-major p×m, to the strictly proper response of
+// br at s with zpkDDResponse's bounds, one output row at a time; false
+// where the double-double solve meets a zero pivot or cannot bound it.
+func ddEntryBounds(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkEntryBounds) bool {
+	n, m := br.n, br.m
+	for i := range br.p {
+		row := *br
+		row.p, row.c = 1, br.c[i*n:(i+1)*n]
+		got, _, ok := zpkDDResponseWork(&row, s, w)
+		if !ok {
+			return false
+		}
+		copy(e[i*m:(i+1)*m], got)
+	}
+	return true
+}
+
+// poleScalesCovered reports whether the verified points give every group
+// of poles enough interpolation conditions at its own scale. The scale of
+// a pole is |λ| on a continuous model and |ln λ| on a discrete one (z =
+// e^{sT} maps the unit circle near z = 1 to s = jθ/T), that of a point |s|
+// or |θ|. For each pole scale σ, the poles of the model and the cut at or
+// below it, a pole the two share (one with a window) counted once, form a
+// group whose part of G − R has, beyond σ, the expansion Σ_m M_m/s^{m+1}
+// with |M_m| ≤ σ^m·Σ|r|: at |s| = d > σ its m-th term is (σ/d)^m of the
+// leading one, so points at d or beyond, verified to tol, fix at most
+// K(d) = 1 + ⌊ln(1/tol)/ln(d/σ)⌋ of its coefficients, whatever their
+// number. Points at or below σ count fully, and those beyond count, in
+// order of distance, up to the least K(d) of the points at d or beyond;
+// the group needs as many as it has poles. Without this the global count
+// n + nr can be met by points far above a cluster of poles near the axis
+// (matched C2D near z = 1) or above unresolved slow poles that leave no
+// resolved gap, while every point at their scale is uninformative. At
+// tol ≥ 1 the contract holds at every point, |G−R| = |Σ_l C_il X_lj| ≤
+// terms ≤ tol·terms, and K's premise ln(1/tol) > 0 is empty, so the count
+// per scale does not apply.
+func poleScalesCovered(discrete bool, evG []complex128, win poleWindows, pts []complex128, verified []bool, tol float64) bool {
+	if !(tol < 1) {
+		return true
+	}
+	poleScale := func(ev complex128) float64 {
+		if !discrete {
+			return cmplx.Abs(ev)
+		}
+		if ev == 0 {
+			return math.Inf(1)
+		}
+		return cmplx.Abs(cmplx.Log(ev))
+	}
+	type scaled struct {
+		a float64
+		w int
+	}
+	var poles, at []scaled
+	for _, ev := range evG {
+		poles = append(poles, scaled{poleScale(ev), 1})
+	}
+	for _, ev := range win.cutPoles {
+		poles = append(poles, scaled{poleScale(ev), 1})
+	}
+	for _, c := range win.centre {
+		poles = append(poles, scaled{poleScale(c), -1})
+	}
+	for k, s := range pts {
+		if !verified[k] {
+			continue
+		}
+		a := cmplx.Abs(s)
+		if discrete {
+			a = math.Abs(cmplx.Phase(s))
+		}
+		at = append(at, scaled{a, probeWeight(s)})
+	}
+	byScale := func(x, y scaled) int { return cmp.Compare(x.a, y.a) }
+	slices.SortFunc(poles, byScale)
+	slices.SortFunc(at, byScale)
+	lt := math.Log(1 / tol)
+	need := 0
+	for i, pl := range poles {
+		need += pl.w
+		sigma := pl.a
+		if i+1 < len(poles) && poles[i+1].a == sigma || math.IsInf(sigma, 1) {
+			continue
+		}
+		have, beyond, capped := 0, 0, math.MaxInt
+		for _, q := range at {
+			if q.a <= sigma {
+				have += q.w
+				continue
+			}
+			k := 1
+			if sigma > 0 {
+				k += int(math.Floor(lt / math.Log(q.a/sigma)))
+			}
+			capped = min(capped, beyond+k)
+			beyond += q.w
+		}
+		if have+min(beyond, capped) < need {
+			return false
+		}
+	}
+	return true
 }
 
 // bandAcceptHook is a test-only seam, nil outside tests: it sees every cut
@@ -552,6 +706,8 @@ func eigenRoundingBounds(A *mat.Dense) ([]complex128, []float64, bool) {
 type poleWindows struct {
 	centre []complex128
 	radius []float64
+	// cutPoles are the eigenvalues of the cut sharedPoleWindows judged.
+	cutPoles []complex128
 }
 
 func (w poleWindows) contain(s complex128) bool {
@@ -603,6 +759,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 	if !ok {
 		return w, false
 	}
+	w.cutPoles = evR
 	rho0R := 0.0
 	for _, a := range newBalancedRealization(red, nr, red.B.RawMatrix().Cols, red.C.RawMatrix().Rows).a {
 		rho0R = math.Hypot(rho0R, a)
