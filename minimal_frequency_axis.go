@@ -296,10 +296,98 @@ func newDDJudge(full *boundedResponse, tol float64) *ddJudge {
 // judge is resolveOpenProbes' verdict at s: uninformative where either
 // double-double solve cannot bound its response.
 func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
-	g, r, tol := d.g, d.r, d.tol
-	if !ddEntryBounds(&full.ev.br, s, &d.w, g) || !ddEntryBounds(&cut.ev.br, s, &d.w, r) {
+	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) || !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
 		return probeUninformative
 	}
+	return d.verdict()
+}
+
+// refutes reports whether judge rejects at pts[k] of cb, the cut's double
+// response with its bounds. The cut's double-double solve is skipped where
+// cb shows judge cannot reject: with Ĝ the model's double-double response,
+// R̂ the cut's double one and R its exact one, |Ĝ−R_dd| − δ_R,dd ≤ |Ĝ−R̂| +
+// δ_R, so no entry is refuted when |Ĝ−R̂| + δ_R − δ_G ≤ tol·max(max|Ĝ|,
+// T_G,hi), T_G,hi its terms' upper bound.
+func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
+	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) {
+		return false
+	}
+	if d.cutCannotRefute(cb, k, false) || cb != cut && d.cutCannotRefute(cb, k, true) {
+		return false
+	}
+	if !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
+		return false
+	}
+	return d.verdict() == probeReject
+}
+
+// verifies is judge at pts[k] of cb (refutes) for a point that must verify:
+// a verification by the cut's double response with its ver bounds, the
+// model's in double-double, stands without the cut's double-double solve.
+func (d *ddJudge) verifies(full, cut, cb *boundedResponse, k int, s complex128) bool {
+	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) {
+		return false
+	}
+	if d.cutVerifies(cb, k, false) || d.cutVerifies(cb, k, true) {
+		return true
+	}
+	if !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
+		return false
+	}
+	return d.verdict() == probeVerified
+}
+
+// cutCannotRefute is refutes' test with cb's bounds at k, sharpened first
+// with sharpen.
+func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool {
+	if !cb.ok[k] || sharpen && cb.sharp[k] {
+		return false
+	}
+	if sharpen {
+		cb.sharpen(k)
+	}
+	g := d.g
+	o := k * len(g)
+	sg := 0.0
+	for i := range g {
+		sg = math.Max(sg, cmplx.Abs(g[i].g))
+	}
+	for i := range g {
+		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.comp[o+i])*(1+8*eps()) - g[i].comp
+		if !(up <= d.tol*math.Max(sg, g[i].hi)*(1-8*eps())) {
+			return false
+		}
+	}
+	return true
+}
+
+// cutVerifies is verdict's verification with cb's response and ver bounds
+// at k for the cut's, sharpened first with sharpen.
+func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
+	if !cb.ok[k] || sharpen && cb.sharp[k] {
+		return false
+	}
+	if sharpen {
+		cb.sharpen(k)
+	}
+	g, tol := d.g, d.tol
+	o := k * len(g)
+	scale := 0.0
+	for i := range g {
+		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(cb.g[o+i])))
+	}
+	for i := range g {
+		lhs := cmplx.Abs(g[i].g-cb.g[o+i]) + g[i].ver + cb.ver[o+i]
+		if !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
+			return false
+		}
+	}
+	return true
+}
+
+// verdict judges the bounds judge formed.
+func (d *ddJudge) verdict() probeVerdict {
+	g, r, tol := d.g, d.r, d.tol
 	scale := 0.0
 	for i := range g {
 		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
@@ -351,43 +439,54 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 // judged the same way.
 func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []bool, mp modelPoles, win poleWindows, discrete bool, tol float64) bool {
 	var dd *ddJudge
-	judge := func(s complex128) probeVerdict {
+	judge := func() *ddJudge {
 		if dd == nil {
 			dd = newDDJudge(full, tol)
 		}
-		return dd.judge(full, cut, s)
+		return dd
 	}
 	for k, s := range pts {
 		if verified[k] || win.contain(s) && !win.strictlyJudged(s) {
 			continue
 		}
-		if judge(s) == probeReject {
+		if judge().refutes(full, cut, cut, k, s) {
 			return false
 		}
 	}
+	var near []complex128
+	var sides []int
 	for j, ev := range mp.evals {
 		if !mp.hidden[j] || imag(ev) < 0 || axisPoleExempt && win.modelShared[j] {
 			continue
 		}
 		foot, d := mp.foot[j], mp.reach[j]
-		if judge(foot) == probeReject {
-			return false
-		}
-		var side []complex128
+		near = append(near, foot)
 		if discrete {
 			th := cmplx.Phase(foot)
-			side = append(side, cmplx.Rect(1, th+d))
+			near = append(near, cmplx.Rect(1, th+d))
 			if imag(ev) != 0 {
-				side = append(side, cmplx.Rect(1, th-d))
+				near = append(near, cmplx.Rect(1, th-d))
 			}
 		} else {
-			side = append(side, complex(0, imag(foot)+d))
+			near = append(near, complex(0, imag(foot)+d))
 			if imag(ev) != 0 {
-				side = append(side, complex(0, imag(foot)-d))
+				near = append(near, complex(0, imag(foot)-d))
 			}
 		}
-		for _, s := range side {
-			if judge(s) != probeVerified {
+		sides = append(sides, len(near))
+	}
+	if len(near) == 0 {
+		return true
+	}
+	cb := boundedResponseOf(cut.ev.br, near)
+	defer cb.release()
+	k := 0
+	for _, end := range sides {
+		if judge().refutes(full, cut, &cb, k, near[k]) {
+			return false
+		}
+		for k++; k < end; k++ {
+			if !judge().verifies(full, cut, &cb, k, near[k]) {
 				return false
 			}
 		}
