@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"runtime"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -135,7 +136,9 @@ func TestReduceResolvedGapSlowCountAtSlowScale(t *testing.T) {
 // alone. The order-5 cut, where it is accepted, must be within Reduce's
 // contract of the stored model at and beside its poles; on arm64 it is
 // 1.07·tol off inside a shared-pole window, which the double-double
-// judgement of the window refutes (HO6UP6), so the order is kept there.
+// judgement of the window refutes (HO6UP6), so the order is kept there,
+// and arm64 takes the band, not the gap path, even on main: there
+// TestReduceResolvedGapDiscreteGlobalCountLiteral covers the gap path.
 func TestReduceResolvedGapDiscreteGlobalCount(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	var kind uint8
@@ -159,6 +162,54 @@ func TestReduceResolvedGapDiscreteGlobalCount(t *testing.T) {
 	case 6:
 	default:
 		t.Errorf("order %d, want 5 or 6", res.Order)
+	}
+}
+
+// discreteGapLiteral is fuzz case 12607 frozen on arm64, where fuzz case
+// 4265 no longer reaches the gap path: a discrete model with a resolved
+// gap whose staircase order-2 cut the gap path accepts by the global count
+// alone, and refuses with the per-side count.
+var discreteGapLiteral = bandLiteral{
+	n: 3, m: 1, p: 1, dt: 0.2248521902777981,
+	a: []uint64{0x3f5b91fba28bf12a, 0x3f04ef100fcf92e4, 0xbfa2266fc329581d, 0xbf4196e9d6f5f869, 0xbeeab60b05487ed7, 0x3f8728bf86a3e43e, 0xbfa83a01bad650f1, 0xbf526520b3efcec4, 0x3fefe5dac266846b},
+	b: []uint64{0x3fefda4d10f2295c, 0x3fd6f355be841e3a, 0xbfe9b6a7e4375c27},
+	c: []uint64{0xbef1ee76fc88b965, 0xbeeed1f8cd4ffde1, 0x3efbe535dbb02f41},
+	d: []uint64{0x4000447752ad6536},
+}
+
+// TestReduceResolvedGapDiscreteGlobalCountLiteral checks the gap path of
+// a discrete model on discreteGapLiteral: on arm64, where it was frozen,
+// the gap is resolved, the staircase cut passes frequencyAxisCutAcrossGap
+// and Reduce keeps it; on every arch a cut Reduce accepts is within its
+// contract.
+func TestReduceResolvedGapDiscreteGlobalCountLiteral(t *testing.T) {
+	sys := discreteGapLiteral.system(t)
+	tol := math.Sqrt(eps())
+	res, err := sys.MinimalRealization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order < 3 {
+		if c, at := contractSweepAtPoles(sys, res.Sys, tol); c > 1 {
+			t.Errorf("order %d off by %.3g·tol·max(scale, terms) at %v", res.Order, c, at)
+		}
+	}
+	if runtime.GOARCH != "arm64" {
+		return
+	}
+	_, cutoff, ok := resolvedGap(sys.A)
+	if !ok || !(cutoff > 0) {
+		t.Fatalf("no resolved gap (cutoff %g)", cutoff)
+	}
+	cut, removed, err := reduceByStaircase(sys, newRealizationTransformPolicy(sys), &ReduceOpts{}, true, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cut.Order != 2 || !frequencyAxisCutAcrossGap(sys, cut.Sys, removed, tol, cutoff) {
+		t.Errorf("staircase order %d not accepted across the gap", cut.Order)
+	}
+	if res.Order != 2 {
+		t.Errorf("order %d, want 2", res.Order)
 	}
 }
 
