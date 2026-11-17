@@ -804,7 +804,9 @@ func exactResponseOf(sys *System, pt frequencyPoint) (g []complex128, overflow, 
 // blockSingularAt reports whether pI + qA of the explicit sys is exactly
 // singular at pt on some diagonal block of order up to exactDetMaxOrder
 // of its block-triangular form (tarjanBlocks of A's pattern): det(pI + qA)
-// is the product of the blocks' determinants.
+// is the product of the blocks' determinants. A block whose exact integer
+// system is nonsingular modulo a prime (exactNonsingularModP) is
+// nonsingular; only the others take the fraction-free solve.
 func blockSingularAt(sys *System, pt frequencyPoint) bool {
 	n, _, _ := sys.Dims()
 	pat := blas64.General{Rows: n, Cols: n, Stride: n, Data: make([]float64, n*n)}
@@ -830,6 +832,9 @@ func blockSingularAt(sys *System, pt frequencyPoint) bool {
 		b := make([]float64, k)
 		b[0] = 1
 		ps := &poleSchurData{n: k, m: 1, p: 1, a: a, b: b, c: slices.Clone(b), d: []float64{0}}
+		if ip, _, _, _, _ := exactPencilSystem(ps, pt); exactNonsingularModP(ip, 2*k, 2*k+1) {
+			continue
+		}
 		if _, _, ok := solveExactAt(ps, pt); !ok {
 			return true
 		}
