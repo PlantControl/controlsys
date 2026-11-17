@@ -1997,12 +1997,10 @@ func gainResolved(A, B, R *mat.Dense, res *RiccatiResult, miss float64) bool {
 // its Newton iterate x1 relative to ‖K̂‖₁, as d/(1 − d) for d the distance
 // from the float64 gain plus 4(n + m)·eps·(1 + cond₁(W)) times
 // ‖|W⁻¹|((|R| + |Bᵀ||X||B|)|K| + |Bᵀ||X||A| + |S|ᵀ)‖₁, the componentwise
-// condition of ddGain, over ‖K‖₁.
+// condition of ddGain, over ‖K‖₁. A zero K is resolved only with d zero
+// before that division, as gainResolved takes it with miss zero.
 func pencilGainResolved(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) bool {
 	nk := mat.Norm(res.K, 1)
-	if nk == 0 {
-		return false
-	}
 	n, m := B.Dims()
 	S := crossTerm(opts)
 	ws := make([]float64, 3*n*n+10*m*n+5*m*m)
@@ -2082,13 +2080,17 @@ func pencilGainResolved(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResul
 			dk, e = max(dk, cd), max(e, ce)
 		}
 		c := float64(4*(n+m)) * eps() * (1 + norm1(w)*norm1(wi))
-		return (dk + c*e) / nk
+		return dk + c*e
 	}
 	d := 0.0
 	if res.x1 != nil {
 		d = of(res.x1)
 	}
 	d = max(d, of(res.X))
+	if nk == 0 {
+		return d == 0
+	}
+	d /= nk
 	if !(d < 1) {
 		return false
 	}
