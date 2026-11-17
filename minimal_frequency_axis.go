@@ -305,9 +305,11 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 // refutes reports whether judge rejects at pts[k] of cb, the cut's double
 // response with its bounds. The cut's double-double solve is skipped where
 // cb shows judge cannot reject: with Ĝ the model's double-double response,
-// R̂ the cut's double one and R its exact one, |Ĝ−R_dd| − δ_R,dd ≤ |Ĝ−R̂| +
-// δ_R, so no entry is refuted when |Ĝ−R̂| + δ_R − δ_G ≤ tol·max(max|Ĝ|,
-// T_G,hi), T_G,hi its terms' upper bound.
+// R̂ the cut's double one, R its exact one and δ_R ≥ |R − R̂| cb's ver
+// bound (rigorous, as a skip must be; comp is first order),
+// |Ĝ−R_dd| − δ_R,dd ≤ |Ĝ−R̂| + δ_R, so no entry is refuted when
+// |Ĝ−R̂| + δ_R − δ_G ≤ tol·max(max|Ĝ|, T_G,hi), T_G,hi its terms' upper
+// bound.
 func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
 	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) {
 		return false
@@ -353,7 +355,7 @@ func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool
 		sg = math.Max(sg, cmplx.Abs(g[i].g))
 	}
 	for i := range g {
-		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.comp[o+i])*(1+8*eps()) - g[i].comp
+		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.ver[o+i])*(1+8*eps()) - g[i].comp
 		if !(up <= d.tol*math.Max(sg, g[i].hi)*(1-8*eps())) {
 			return false
 		}

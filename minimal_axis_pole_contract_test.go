@@ -219,7 +219,8 @@ func TestReduceAcceptedCutMatchesStoredModelAtAxisPoles(t *testing.T) {
 // the Hadamard-rotated discrete model of an uncontrollable integrator and
 // an unobservable 0.5, whose transfer function is exactly zero. The cut
 // has no poles and so no windows; the double-double judgement of the
-// hidden integrator must not panic, and a cut Reduce accepts must be
+// hidden integrator (judgeNearPoles, called directly too, since the band
+// refuses before it) must not panic, and a cut Reduce accepts must be
 // within its contract. (The band refuses it, as on main: the model's
 // response is rounding everywhere, so no point verifies the cut.)
 func TestReduceBandJudgesOrderZeroCutBesideAxisPole(t *testing.T) {
@@ -242,7 +243,12 @@ func TestReduceBandJudgesOrderZeroCutBesideAxisPole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frequencyAxisCutInBand(sys, zero.Sys, nil, math.Sqrt(eps()))
+	tol := math.Sqrt(eps())
+	frequencyAxisCutInBand(sys, zero.Sys, nil, tol)
+	pts, _, _ := axisProbes(sys, nil)
+	win, _ := sharedPoleWindows(poles, zero.Sys, tol)
+	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(zero.Sys, pts)
+	judgeNearPoles(&full, &cut, pts, make([]bool, len(pts)), poles, win, true, tol)
 	res, err := sys.Reduce(nil)
 	if err != nil {
 		t.Fatal(err)
