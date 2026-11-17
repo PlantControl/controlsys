@@ -296,8 +296,19 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 // response as well as the polynomial roots, else the polynomial roots,
 // and an error wrapping ErrAccuracyUnverified.
 //
-// Descriptor, delayed and LFT models keep the transfer-function roots with
-// no such certificate.
+// A delay-free descriptor model (no LFT) keeps the transfer-function
+// roots, verified against the pencil sE − A by TransferFunction's
+// descriptor certificate with Z in place of the coefficients
+// (descriptorZPKVerified): a nil error certifies |G − Z| ≤ tol·max(scale,
+// T), U = (sE − A)⁻¹B in the terms, at n + nf + polyDeg + 1 axis points
+// where GEPP on sE − A determines the response (n the order, nf the
+// largest row denominator degree, polyDeg the polynomial degree), and that
+// no such point outside the windows of the roots puts |G − Z| beyond
+// tol·max(scale, T) + δ_data, δ_data the change of G when every stored
+// entry moves by ε relative, as TransferFunction's own certificate; a form
+// that does not verify is returned with an error wrapping
+// ErrAccuracyUnverified. Delayed and LFT models keep the transfer-function
+// roots with no such certificate.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
 	if err != nil {
