@@ -224,7 +224,7 @@ func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []co
 	}
 	u := newRealizationCopy(src, n, m, p)
 	g := make([]complex128, p*m)
-	bad, err := ddRealizationInto(&u, pt, g, true)
+	bad, err := ddRealizationInto(&u, pt, g, true, nil)
 	if err != nil {
 		return errStateUnderflow
 	}
@@ -325,7 +325,23 @@ type balancedDense struct {
 	// src, when set, is the model balanced into the realization, which
 	// underflowResponseInto solves unbalanced.
 	src *System
+	// via records how evalInto last formed its value: from bd.x, the
+	// verified unbalanced solve, or the unverified double-double response.
+	via  solveVia
+	cert *termsCert
+	// absLU and absDiag are absFactors' magnitudes of the factors, valid
+	// while absOK.
+	absLU, absDiag []float64
+	absOK          bool
 }
+
+type solveVia uint8
+
+const (
+	viaSolve solveVia = iota
+	viaUnderflow
+	viaDD
+)
 
 // refineCondition is the error amplification, relative to ε, above which
 // the frequency solvers refine against the exact pencil: balancedDense
@@ -444,7 +460,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if tol == 0 {
 		tol = 1e-15
 	}
-	bd.pt, bd.tol, bd.stalled = pt, tol, false
+	bd.pt, bd.tol, bd.stalled, bd.via, bd.absOK = pt, tol, false, viaSolve, false
 	refineBelow, refine := max(scale/refineCondition, tol), false
 
 	// last[i] bounds the nonzeros of row i, so banded and block-triangular
@@ -535,9 +551,11 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 	}
 	if belowNormal(x, bd.screen.mask) && bd.screen.confirm(&bd.balancedRealization, x, m, 1) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+		bd.via = viaUnderflow
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
+		bd.via = viaDD
 		if err := ddResponse(bd.sys, pt, dst); errors.Is(err, errStateUnderflow) {
 			return err
 		} else if err != nil {
@@ -557,6 +575,183 @@ func (bd *balancedDense) stallInaccurate(dst []complex128) bool {
 		}
 	}
 	return false
+}
+
+// certifyTerms checks dst, evalInto's value at pt of an explicit model,
+// with termsCert, and where only the row test fails refines bd.x with the
+// same factors and forms the output again, each entry rounded once. A value
+// from the verified unbalanced solve passes; one from the unverified
+// double-double response fails.
+func (bd *balancedDense) certifyTerms(pt frequencyPoint, dst []complex128) bool {
+	if bd.e != nil || bd.n == 0 || bd.via == viaUnderflow {
+		return true
+	}
+	if bd.via == viaDD {
+		return false
+	}
+	if bd.cert == nil {
+		bd.cert = newTermsCert(&bd.balancedRealization)
+	}
+	br := &bd.balancedRealization
+	rowsOK, ok := bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd, nil)
+	refined := false
+	for step := 0; !rowsOK && step < maxRefineSteps; step++ {
+		bd.refineStep()
+		compensatedOutput(br, bd.x, bd.m, 1, dst)
+		rowsOK, ok = bd.cert.certify(br, pt, bd.x, bd.m, 1, dst, bd, nil)
+		refined = true
+	}
+	if !ok && rowsOK {
+		ok = bd.certifyInverse(pt, bd.x, dst)
+		if ok {
+			termsInverseCount.Add(1)
+		}
+	}
+	if ok && refined {
+		termsRefinedCount.Add(1)
+	}
+	return ok
+}
+
+// certifyInverse runs termsCert on x and dst with |M| from the
+// approximate-inverse tier (inverseBound) of evalInto's factors at pt.
+func (bd *balancedDense) certifyInverse(pt frequencyPoint, x, dst []complex128) bool {
+	n := bd.n
+	ib := newInverseBound(&bd.balancedRealization, bd.cert.absA, pt, func(y []complex128) {
+		cLUSolve(bd.pencil, bd.piv, y, n, n)
+	})
+	if ib == nil {
+		return false
+	}
+	_, ok := bd.cert.certify(&bd.balancedRealization, pt, x, bd.m, 1, dst, bd, ib)
+	return ok
+}
+
+// factorAt overwrites bd.pencil with the GEPP factors of the explicit sÎ − Â
+// at pt, as evalInto forms it, failing only at an exactly zero pivot; it
+// leaves no solution.
+func (bd *balancedDense) factorAt(pt frequencyPoint) bool {
+	n := bd.n
+	if pt.isPlain() {
+		bd.fillPencil(pt.value())
+	} else {
+		bd.fillPencilAt(pt)
+	}
+	if !cLUFactor(bd.pencil, bd.piv, n) {
+		return false
+	}
+	for i := range n {
+		bd.inv[i] = crecip(bd.pencil[i*n+i])
+		bd.last[i] = n - 1
+	}
+	bd.pt, bd.via, bd.absOK = pt, viaSolve, false
+	return true
+}
+
+// refineStep applies one correction to bd.x against the exact pencil at
+// bd.pt with evalInto's factors.
+func (bd *balancedDense) refineStep() {
+	pt, n, m, r := bd.pt, bd.n, bd.m, bd.r
+	kappa := complex(1, 0)
+	if !pt.isPlain() {
+		kappa = pt.scale()
+	}
+	for j := range m {
+		pencilResidual(r[j:], bd.x[j:], m, bd.a, nil, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
+	}
+	if kappa != 1 {
+		ik := crecip(kappa)
+		for i := range r {
+			r[i] *= ik
+		}
+	}
+	cLUSolve(bd.pencil, bd.piv, r, n, m)
+	for i, v := range r {
+		bd.x[i] += v
+	}
+}
+
+// factorError sets dst to γ·P⁻¹|L̂||Û|y for evalInto's factors, γ =
+// (2n+4)ε, an upper bound on |ΔF|y for F = P⁻¹L̂Û = sI − Â + ΔF
+// (termsCert step 3).
+func (bd *balancedDense) factorError(dst, y []float64) {
+	n, a := bd.n, bd.absFactors()
+	for i := range n {
+		row := a[i*n : (i+1)*n]
+		v := y[i] * bd.absDiag[i]
+		for k := i + 1; k <= bd.last[i]; k++ {
+			v += row[k] * y[k]
+		}
+		dst[i] = v
+	}
+	for i := n - 1; i > 0; i-- {
+		row := a[i*n : i*n+i]
+		v := dst[i]
+		for k, l := range row {
+			v += l * dst[k]
+		}
+		dst[i] = v
+	}
+	for k := n - 1; k >= 0; k-- {
+		if pk := bd.piv[k]; pk != k {
+			dst[k], dst[pk] = dst[pk], dst[k]
+		}
+	}
+	g := float64(2*n+4) * termsEps
+	for i := range dst {
+		dst[i] *= g
+	}
+}
+
+const sqrt2 = 1.4142135623730951 * (1 + 0x1p-52)
+
+// absFactors returns |·|₁ of evalInto's factors, row-major, the diagonal
+// holding |1/uᵢᵢ|₁ ≥ 1/|uᵢᵢ|, with bd.absDiag the upper bound √2/|1/uᵢᵢ|₁
+// on |uᵢᵢ|; it is formed once per factorization.
+func (bd *balancedDense) absFactors() []float64 {
+	n := bd.n
+	if bd.absLU == nil {
+		bd.absLU, bd.absDiag = make([]float64, n*n), make([]float64, n)
+	}
+	if !bd.absOK {
+		for i, v := range bd.pencil {
+			bd.absLU[i] = cabs1(v)
+		}
+		for i := range n {
+			bd.absLU[i*n+i] = cabs1(bd.inv[i])
+			bd.absDiag[i] = sqrt2 / bd.absLU[i*n+i]
+		}
+		bd.absOK = true
+	}
+	return bd.absLU
+}
+
+// nsolve overwrites the nonnegative y with M(Û)⁻¹M(L̂)⁻¹Py for
+// evalInto's factors, an upper bound on |F⁻¹|y.
+func (bd *balancedDense) nsolve(y []float64) {
+	n, a := bd.n, bd.absFactors()
+	for k, pk := range bd.piv {
+		if pk != k {
+			y[k], y[pk] = y[pk], y[k]
+		}
+	}
+	for k := range n {
+		yk := y[k]
+		if yk == 0 {
+			continue
+		}
+		for i := k + 1; i < n; i++ {
+			y[i] += a[i*n+k] * yk
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		row := a[i*n : (i+1)*n]
+		v := y[i]
+		for k := i + 1; k <= bd.last[i]; k++ {
+			v += row[k] * y[k]
+		}
+		y[i] = v * row[i]
+	}
 }
 
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
@@ -862,7 +1057,27 @@ type hessenbergSweep struct {
 	sys       *System
 	dense     *balancedDense // denseRetry's solver, built on first use
 	alt       []complex128
+	// via records how evalInto last formed its value: from x + Qy,
+	// denseRetry, or the verified unbalanced solve.
+	via         sweepVia
+	denseSolved bool
+	absU        []float64
+	absMult     []float64
+	absOK       bool
+	cert        *termsCert
+	normF       float64
+	xf          []complex128
+	absQT       []float64
+	certBuf     []float64
 }
+
+type sweepVia uint8
+
+const (
+	viaSweepSolve sweepVia = iota
+	viaSweepDense
+	viaSweepUnderflow
+)
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	nn := n * n
@@ -954,6 +1169,7 @@ func cabs1(z complex128) float64 { return math.Abs(real(z)) + math.Abs(imag(z)) 
 // right-hand sides. Row k of u holds the not-yet-pivoted row until step k
 // settles it, so the pencil is never formed.
 func (hs *hessenbergSweep) factor(pt frequencyPoint) error {
+	hs.absOK = false
 	s := pt.value()
 	n := hs.n
 	h, u, inv := hs.h, hs.u, hs.inv
@@ -1175,6 +1391,7 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
 	err := hs.dense.evalInto(pt, hs.alt)
+	hs.denseSolved = err == nil
 	if errors.Is(err, errSingularPencil) && !errors.Is(err, errStallUnresolved) && hs.dense.sys != nil {
 		if ddErr := ddResponse(hs.sys, pt, hs.alt); ddErr == nil || errors.Is(ddErr, errStateUnderflow) {
 			err = ddErr
@@ -1272,15 +1489,161 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
+	hs.via = viaSweepSolve
 	if belowNormal(x, hs.screen.mask) && hs.screen.confirm(&hs.balancedRealization, x, 1, n) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+		hs.via = viaSweepUnderflow
 		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
 	}
 	if !converged {
+		hs.via = viaSweepDense
 		if err := hs.denseRetry(pt, dst); err != nil {
 			return err
 		}
 	}
 	return finiteResponse(dst)
+}
+
+// certifyTerms checks dst, evalInto's value at pt, with termsCert on the
+// balanced realization: x̂ = x + Qy, N applied as |Q|·N_H·|Qᵀ| with N_H
+// the comparison inverse of the factors of sI − H. Where that fails, or
+// evalInto took denseRetry, the balanced dense solve decides, as
+// balancedDense.certifyTerms does.
+func (hs *hessenbergSweep) certifyTerms(pt frequencyPoint, dst []complex128) bool {
+	n, m := hs.n, hs.m
+	switch {
+	case n == 0 || hs.via == viaSweepUnderflow:
+		return true
+	case hs.via == viaSweepSolve:
+		if hs.cert == nil {
+			hs.cert = newTermsCert(&hs.balancedRealization)
+			hs.xf = make([]complex128, n*m)
+			hs.certBuf = make([]float64, n)
+			hs.absQT = make([]float64, n*n)
+			for i, v := range hs.q {
+				hs.absQT[i] = math.Abs(v)
+			}
+			var f l2
+			for _, v := range hs.a {
+				f.add(v)
+			}
+			hs.normF = f.norm()
+		}
+		qMulCols(hs.xf, hs.y, hs.q, n, m)
+		for i, v := range hs.x {
+			hs.xf[i] += v
+		}
+		if _, ok := hs.cert.certify(&hs.balancedRealization, pt, hs.xf, 1, n, dst, hs, nil); ok {
+			return true
+		}
+		if hs.denseRetry(pt, dst) != nil {
+			return false
+		}
+	}
+	if hs.dense == nil || !hs.denseSolved {
+		return false
+	}
+	return hs.dense.certifyTerms(pt, dst)
+}
+
+// factorError sets dst to an upper bound on |ΔF|y for F = Q·L̂Û·Qᵀ, the
+// factored sI − H mapped back: |Q|·γ|L̂||Û|·|Qᵀ|y with γ = (2n+4)ε, plus
+// the reduction's normwise backward error (n² + 4n)ε‖Â‖_F as a rank-one
+// all-ones term.
+func (hs *hessenbergSweep) factorError(dst, y []float64) {
+	n, q, t := hs.n, hs.absQT, hs.certBuf
+	clear(t)
+	sum := 0.0
+	for k, yk := range y {
+		sum += yk
+		if yk == 0 {
+			continue
+		}
+		for i, a := range q[k*n : (k+1)*n] {
+			t[i] += a * yk
+		}
+	}
+	u, mult := hs.absFactors()
+	for i := range n {
+		row := u[i*n : (i+1)*n]
+		v := t[i] * sqrt2 / row[i]
+		for k := i + 1; k < n; k++ {
+			v += row[k] * t[k]
+		}
+		t[i] = v
+	}
+	for k := n - 2; k >= 0; k-- {
+		t[k+1] += mult[k] * t[k]
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+	}
+	g := float64(2*n+4) * eps()
+	red := float64(n*n+4*n) * eps() * hs.normF * sum
+	for i := range n {
+		var v float64
+		for k, a := range q[i*n : (i+1)*n] {
+			v += a * t[k]
+		}
+		dst[i] = g*v + red
+	}
+}
+
+// absFactors returns |·|₁ of factor's U, its diagonal holding |1/uᵢᵢ|₁,
+// and of its multipliers, formed once per factorization.
+func (hs *hessenbergSweep) absFactors() (u, mult []float64) {
+	n := hs.n
+	if hs.absU == nil {
+		hs.absU, hs.absMult = make([]float64, n*n), make([]float64, n)
+	}
+	if !hs.absOK {
+		for i := range n {
+			for k := i + 1; k < n; k++ {
+				hs.absU[i*n+k] = cabs1(hs.u[i*n+k])
+			}
+			hs.absU[i*n+i] = cabs1(hs.inv[i])
+			hs.absMult[i] = cabs1(hs.mult[i])
+		}
+		hs.absOK = true
+	}
+	return hs.absU, hs.absMult
+}
+
+// nsolve overwrites the nonnegative y with |Q|·N_H·|Qᵀ|y, N_H replaying
+// factor's swaps and multipliers and back substitution in magnitudes: an
+// upper bound on |F⁻¹|y.
+func (hs *hessenbergSweep) nsolve(y []float64) {
+	n, q, t := hs.n, hs.absQT, hs.certBuf
+	clear(t)
+	for k, yk := range y {
+		if yk == 0 {
+			continue
+		}
+		for i, a := range q[k*n : (k+1)*n] {
+			t[i] += a * yk
+		}
+	}
+	u, mult := hs.absFactors()
+	for k := range n - 1 {
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+		t[k+1] += mult[k] * t[k]
+	}
+	for i := n - 1; i >= 0; i-- {
+		row := u[i*n : (i+1)*n]
+		v := t[i]
+		for k := i + 1; k < n; k++ {
+			v += row[k] * t[k]
+		}
+		t[i] = v * row[i]
+	}
+	for i := range n {
+		var v float64
+		for k, a := range q[i*n : (i+1)*n] {
+			v += a * t[k]
+		}
+		y[i] = v
+	}
 }
 
 // pencilResidual sets r = κ·b − p·E·x − q·A·x for one right-hand side in

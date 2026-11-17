@@ -180,8 +180,10 @@ func TestEvalFrStiffExplicitDCResolvedSlowPole(t *testing.T) {
 // stepped 1e-5·rho past the slow poles. DCGain reads the integrator too;
 // for the rounded stiff one the transfer limit was finite (W45MGH). Where
 // the integrator is rounded off 0, the float model's exact limit is finite,
-// so DCGain's Inf comes with ErrAccuracyUnverified (N4GQHT).
-func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
+// so DCGain's Inf comes with ErrAccuracyUnverified (N4GQHT), and EvalFr(0)
+// and FreqResponse(0) return that finite limit within terms (FKYKOG); the
+// exact integrator stays +Inf.
+func TestEvalFrStiffExplicitDCIntegrator(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 2026))
 	T := mat.NewDense(3, 3, nil)
 	for i := range 9 {
@@ -228,8 +230,18 @@ func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 		if tc.name != "exact stiff" {
 			requireDCGainUnverified(t, tc.name, dc, err)
 		}
-		if !cmplx.IsInf(ev[0][0]) || !cmplx.IsInf(fr.At(0, 0, 0)) || !math.IsInf(dc.At(0, 0), 0) {
-			t.Errorf("%s: EvalFr(0) %v, FreqResponse(0) %v, DCGain %v, want Inf", tc.name, ev[0][0], fr.At(0, 0, 0), dc.At(0, 0))
+		if !math.IsInf(dc.At(0, 0), 0) {
+			t.Errorf("%s: DCGain %v, want Inf", tc.name, dc.At(0, 0))
+		}
+		if tc.name != "exact stiff" {
+			checkGridWithinTerms(t, tc.name+": EvalFr(0)", sys, pointAt(0), ev)
+			if fr.At(0, 0, 0) != ev[0][0] {
+				t.Errorf("%s: EvalFr(0) %v, FreqResponse(0) %v", tc.name, ev[0][0], fr.At(0, 0, 0))
+			}
+			continue
+		}
+		if !cmplx.IsInf(ev[0][0]) || !cmplx.IsInf(fr.At(0, 0, 0)) {
+			t.Errorf("%s: EvalFr(0) %v, FreqResponse(0) %v, want Inf", tc.name, ev[0][0], fr.At(0, 0, 0))
 		}
 	}
 }

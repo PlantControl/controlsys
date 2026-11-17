@@ -67,7 +67,9 @@ func roundedStiffIntegrator(t *testing.T, seed uint64, stiff float64, m, p int) 
 // of the characteristic polynomial against a roundoff of order ε‖A‖³, and
 // returned 15797.6 (W45MGH). The exact limit of the float data, 80439.7,
 // is R/(−λ) for the rounded λ, which the data do not tell from 0, so the
-// Inf comes with ErrAccuracyUnverified (N4GQHT).
+// Inf comes with ErrAccuracyUnverified (N4GQHT). The pencil is exactly
+// nonsingular, so EvalFr(0) runs its own within-terms chain and returns
+// that exact finite value (FKYKOG).
 func TestDCGainRoundedStiffIntegratorInf(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 2026))
 	T := mat.NewDense(3, 3, nil)
@@ -96,16 +98,14 @@ func TestDCGainRoundedStiffIntegratorInf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cmplx.IsInf(ev[0][0]) {
-		t.Errorf("EvalFr(0) = %v, want Inf", ev[0][0])
-	}
+	checkGridWithinTerms(t, "EvalFr(0)", sys, pointAt(0), ev)
 }
 
 // Rounded integrators beside a fast pole of 1e4 to 1e14: every entry is
-// the signed Inf of the intended residue, SISO and MIMO, and EvalFr(0)
-// reads the pole too. On base DCGain was finite (W45MGH). DCGain flags
-// the Inf with ErrAccuracyUnverified, the float model's exact limit being
-// finite (N4GQHT); integratingDCGain does not check it.
+// the signed Inf of the intended residue, SISO and MIMO. On base DCGain was
+// finite (W45MGH). DCGain flags the Inf with ErrAccuracyUnverified, the
+// float model's exact limit being finite (N4GQHT); integratingDCGain does
+// not check it. EvalFr(0) returns that finite limit within terms (FKYKOG).
 func TestDCGainRoundedStiffIntegratorFamily(t *testing.T) {
 	for seed := range uint64(44) {
 		stiff := math.Pow(10, 4+float64(seed%11))
@@ -134,11 +134,9 @@ func TestDCGainRoundedStiffIntegratorFamily(t *testing.T) {
 				if g := ig.At(i, j); g != want {
 					t.Errorf("%s: integratingDCGain[%d][%d] = %v, want %v", label, i, j, g, want)
 				}
-				if !cmplx.IsInf(ev[i][j]) {
-					t.Errorf("%s: EvalFr(0)[%d][%d] = %v, want Inf", label, i, j, ev[i][j])
-				}
 			}
 		}
+		checkGridWithinTerms(t, label+": EvalFr(0)", sys, pointAt(0), ev)
 	}
 }
 

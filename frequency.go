@@ -139,9 +139,28 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // 256 states in all. Beyond that, Δ = z^{-k} formed in complex128 leaves
 // about kε/d relative error.
 //
+// For an explicit model without internal delays the response is within
+// terms: a nil error certifies each entry ĥ within the rounding of the
+// stored data's terms, |ĥ − h| ≤ δ/(1−η) for the stored model's exact
+// response h, with δ = u(|c||M||A||M||b| + |c||M||b| + |D|), M = (λI − A)⁻¹
+// at the exact point λ, η = u·ρ(|M||A|) < 1 and u = n·ε. The double solve's
+// value stands where an a posteriori certificate proves |ĥ − h| ≤ δ;
+// elsewhere the point takes the double-double response where it is
+// componentwise verified and passes the same certificate, then for n ≤ 16
+// the exact response. A point none of these settles keeps its best
+// estimate: the result is returned in full with ErrAccuracyUnverified,
+// naming the first such ω. At DC (ω = 0: s = 0, or z = 1) the response is
+// DCGain's gain where DCGain returns nil, DCGain's value and error where
+// DCGain is unverified and λI − A is exactly singular there, and otherwise
+// the chain above. An entry is infinite only at an exact pole of the
+// stored model, λI − A exactly singular (for n > 16 shown on a diagonal
+// block of order up to 16 of its block-triangular form): a pencil singular
+// only within rounding is no pole, and its response is finite.
+//
 // As MATLAB freqresp and evalfr return Inf rather than failing at a pole, a
-// frequency at a pole of the model is not an error, for explicit, descriptor
-// and internal-delay realizations alike: entries the pole reaches are
+// frequency at a pole of the model is not an error, for descriptor and
+// internal-delay realizations and at an exact pole of an explicit one:
+// entries the pole reaches are
 // infinite (cmplx.IsInf reports true; their phase is meaningless), and the
 // other entries keep their finite values, extrapolated from nearby points to
 // about 1e-12 relative accuracy (1e-9 at a repeated pole). A pole of the delay-free plant that an
@@ -150,17 +169,10 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // singular to working precision the delay-free response is solved in
 // double-double arithmetic, and the frequency is a pole where that is
 // singular too or puts a pole within about 2e-15 times the largest pole
-// magnitude of the frequency. At DC (s = 0, z = 1) of a delay-free model
-// it is instead a pole when a computed
+// magnitude of the frequency. At DC (s = 0, z = 1) of a delay-free
+// descriptor model it is instead a pole when a computed
 // pole lies within 1e-3 relative and a 1e-5 fraction of the next pole's
-// distance (at s = 0 also within 1e-6 of the largest pole magnitude). For
-// an explicit delay-free model of order up to 16 with poles inside their
-// own rounding disk of DC that samples cannot tell from DC, the response at
-// DC is Inf only where the entry's pole is exact, I − A (A) exactly
-// singular; where that is exactly nonsingular it is the float model's
-// exact value, as DCGain certifies it, and a frequency off DC inside the
-// disk is its resolved double-double response or ErrAccuracyUnverified,
-// never a pole. Outside that scope the rule above holds. A
+// distance (at s = 0 also within 1e-6 of the largest pole magnitude). A
 // frequency merely near a pole, as beside a lightly damped pair, gives large
 // finite values. ErrSingularTransform remains for models singular at every
 // frequency near omega, such as det(sE-A) ≡ 0.
@@ -294,6 +306,9 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		return e.matrix(data, omega), nil
 	}
 	if err := e.sweepInto(omega, data, e.pointSolver(len(omega))); err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return e.matrix(data, omega), err
+		}
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -311,6 +326,9 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 
 	data := make([]complex128, len(omega)*e.p*e.m)
 	if err := e.sweepInto(omega, data, e.pointSolver(1)); err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return e.matrix(data, omega), err
+		}
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -323,22 +341,45 @@ type frequencyPointSolver interface {
 }
 
 // sweepInto evaluates each frequency with solver, taking the pole limit
-// where the pencil is singular, and applies the I/O delay phase.
+// where the pencil is singular, and applies the I/O delay phase. A point
+// left unverified (ErrAccuracyUnverified) keeps its estimate and the sweep
+// goes on: it returns the first such error, naming its ω, once every point
+// is filled, and any other error at once.
 func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver frequencyPointSolver) error {
 	pm := e.p * e.m
 	delaySS := effectiveIODelayMatrix(e.sys, e.p, e.m, true)
-	eval := solver.evalInto
+	eval := e.withinTerms(solver)
+	var unverified error
+	keep := func(w float64, err error) error {
+		if !errors.Is(err, ErrAccuracyUnverified) {
+			return atFrequency(w, err)
+		}
+		if unverified == nil {
+			unverified = fmt.Errorf("at ω = %g: %w", w, err)
+		}
+		return nil
+	}
 	for k, w := range omega {
 		pt := e.pointAt(w)
 		dst := data[k*pm : (k+1)*pm]
-		if err := evalWithPoleLimit(eval, e.sys, pt, dst); err != nil {
-			return atFrequency(w, err)
+		if done, err := dcResponseInto(e.sys, pt, dst); done {
+			if err != nil {
+				if err := keep(w, err); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := eval(pt, dst); err != nil {
+			if err := keep(w, err); err != nil {
+				return err
+			}
 		}
 		if delaySS != nil {
 			applyIODelayMatrixAtS(e.sys, pt, dst, e.p, e.m, delaySS)
 		}
 	}
-	return nil
+	return unverified
 }
 
 func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
@@ -351,6 +392,23 @@ func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 func (e frequencyEvaluator) evalPoint(pt frequencyPoint, poleLimit bool) ([][]complex128, error) {
 	data := make([]complex128, e.p*e.m)
 	eval := e.pointEval()
+	if poleLimit && !e.sys.HasInternalDelay() && !e.sys.IsDescriptor() {
+		if done, err := dcResponseInto(e.sys, pt, data); done {
+			if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+				return nil, err
+			}
+			return complexFlatToGrid(data, e.p, e.m), err
+		}
+		err := e.withinTerms(e.pointSolver(1))(pt, data)
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+			if errors.Is(err, errStateUnderflow) || errors.Is(err, errPoleUnresolved) {
+				err = fmt.Errorf("at s = %v: %w", pt.value(), err)
+			}
+			return nil, err
+		}
+		applyIODelayAtS(e.sys, pt, data, e.p, e.m, true)
+		return complexFlatToGrid(data, e.p, e.m), err
+	}
 	if !poleLimit {
 		if err := eval(pt, data); err != nil {
 			return nil, err
@@ -379,6 +437,20 @@ func (e frequencyEvaluator) pointEval() func(frequencyPoint, []complex128) error
 		}
 		copy(dst, ws.g[:e.p*e.m])
 		return nil
+	}
+}
+
+// withinTerms returns the point evaluation of the sweep with solver:
+// evalWithinTerms for an explicit model without internal delays, else
+// evalWithPoleLimit.
+func (e frequencyEvaluator) withinTerms(solver frequencyPointSolver) func(frequencyPoint, []complex128) error {
+	if ts, ok := solver.(termsSolver); ok && !e.sys.HasInternalDelay() && !e.sys.IsDescriptor() {
+		return func(pt frequencyPoint, dst []complex128) error {
+			return evalWithinTerms(ts, e.sys, pt, dst)
+		}
+	}
+	return func(pt frequencyPoint, dst []complex128) error {
+		return evalWithPoleLimit(solver.evalInto, e.sys, pt, dst)
 	}
 }
 
@@ -589,6 +661,51 @@ func applyIODelayPhase(sys *System, omega []float64, data []complex128, p, m int
 	for k, w := range omega {
 		applyIODelayMatrixAtS(sys, td.frequencyPoint(w), data[k*pm:(k+1)*pm], p, m, delay)
 	}
+}
+
+// dcResponseInto sets dst to the response at the DC point of an explicit
+// sys without internal delays (s = 0, or z = 1 discrete), where every
+// delay factor is exactly 1: DCGain's gain where DCGain returns nil, and
+// DCGain's value and error where it is unverified and pI + qA is exactly
+// singular there (for n > exactDetMaxOrder on a small diagonal block,
+// blockSingularAt); any other DCGain error is returned. done is false off
+// DC, for a model without inputs or outputs, for descriptor and
+// internal-delay models, and where DCGain is unverified at a pencil not
+// shown exactly singular: there FreqResponse runs its own chain
+// (evalWithinTerms).
+func dcResponseInto(sys *System, pt frequencyPoint, dst []complex128) (done bool, err error) {
+	_, m, p := sys.Dims()
+	if m == 0 || p == 0 || sys.internalDelayCount() > 0 || sys.IsDescriptor() || pt.value() != dcPoint(sys) {
+		return false, nil
+	}
+	g, err := sys.DCGain()
+	if errors.Is(err, ErrAccuracyUnverified) && !dcPencilSingular(sys, pt) {
+		return false, nil
+	}
+	if g == nil {
+		for i := range dst {
+			dst[i] = complex(math.NaN(), math.NaN())
+		}
+		return true, err
+	}
+	raw := g.RawMatrix()
+	for i := range p {
+		for j := range m {
+			dst[i*m+j] = complex(raw.Data[i*raw.Stride+j], 0)
+		}
+	}
+	return true, err
+}
+
+// dcPencilSingular reports whether pI + qA of the explicit sys is exactly
+// singular at the DC point pt.
+func dcPencilSingular(sys *System, pt frequencyPoint) bool {
+	n, _, _ := sys.Dims()
+	if n > exactDetMaxOrder {
+		return blockSingularAt(sys, pt)
+	}
+	_, _, ok := exactResponseOf(sys, pt)
+	return !ok
 }
 
 func applyIODelayAtS(sys *System, pt frequencyPoint, data []complex128, p, m int, includeDelayMatrix bool) {

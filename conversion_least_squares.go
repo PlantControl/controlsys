@@ -352,9 +352,14 @@ type discreteFitGrid struct {
 // discreteFitTheta is θ_k of the closed grid πk/(samples−1), which samples
 // DC, or of the open grid π(k+½)/samples, which does not. The fit holding
 // integrators samples the open grid, as does a free fit whose source
-// response is nonfinite at DC: FreqResponse takes the pole limit at s = 0
-// beside a near pole the count resolves from zero, ±Inf although G(0) of
-// the stored model is finite (NDFJC6).
+// response is nonfinite at DC. For an explicit source of order up to 16
+// that happens only at an exact pole at DC: FreqResponse(0) is DCGain's
+// value, or the stored model's exact one, not the pole limit's spurious ±Inf
+// beside a near pole the count resolves from zero (NDFJC6, fixed by
+// FKYKOG). It can still happen at an exact DC pole, and for sources of
+// order above 16 (DCGain's Inf, or a pole proven only on a small diagonal
+// block), descriptor sources and sources with internal delays, whose DC
+// response keeps the pole limit.
 func discreteFitTheta(k, samples int, open bool) float64 {
 	if open {
 		return math.Pi * (float64(k) + .5) / float64(samples)
@@ -374,8 +379,12 @@ func newDiscreteFitGrid(samples int, open bool) discreteFitGrid {
 	return grid
 }
 
+// leastSquaresSourceResponse is source's response at omega for fitting. A
+// sample FreqResponse leaves unverified (ErrAccuracyUnverified, value
+// returned) is used as it is: the fit's residual, not the sample's last
+// ulps, decides its accuracy.
 func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, error) {
-	response, err := source.FreqResponse(omega)
+	response, err := fitResponse(source, omega)
 	if err != nil {
 		return nil, err
 	}
@@ -390,6 +399,16 @@ func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, 
 	return response.Data, nil
 }
 
+// fitResponse is FreqResponse with an unverified response taken as its
+// value.
+func fitResponse(sys *System, omega []float64) (*FreqResponseMatrix, error) {
+	response, err := sys.FreqResponse(omega)
+	if response != nil && errors.Is(err, ErrAccuracyUnverified) {
+		err = nil
+	}
+	return response, err
+}
+
 // errLeastSquaresDCPole is a source response nonfinite at DC.
 var errLeastSquaresDCPole = fmt.Errorf("least-squares: singular or nonfinite source frequency response at DC: %w", ErrSingularTransform)
 
@@ -402,7 +421,7 @@ func leastSquaresFitQuality(source, fitted *System, dt float64, samples int) (fl
 	if err != nil {
 		return 0, 0, err
 	}
-	predicted, err := fitted.FreqResponse(omega)
+	predicted, err := fitResponse(fitted, omega)
 	if err != nil {
 		return 0, 0, err
 	}

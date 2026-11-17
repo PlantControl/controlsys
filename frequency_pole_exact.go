@@ -46,6 +46,48 @@ func exactResponseAt(ps *poleSchurData, pt frequencyPoint) (g []complex128, over
 
 func solveExactAt(ps *poleSchurData, pt frequencyPoint) (g []complex128, overflow, ok bool) {
 	n, m, p := ps.n, ps.m, ps.p
+	a, cHat, qr, qi, exp := exactPencilSystem(ps, pt)
+	n2 := 2 * n
+	y := make([]*big.Int, n2*m)
+	for i := range y {
+		y[i] = new(big.Int)
+	}
+	t := new(big.Int)
+	det, ok := bareissSolve(a, y, n2, m, t)
+	if !ok {
+		return nil, false, false
+	}
+	g = make([]complex128, p*m)
+	cyr, cyi, vr, vi := new(big.Int), new(big.Int), new(big.Int), new(big.Int)
+	for i := range p {
+		for j := range m {
+			cyr.SetInt64(0)
+			cyi.SetInt64(0)
+			for l, c := range cHat[i*n : i*n+n] {
+				if c.Sign() != 0 {
+					cyr.Add(cyr, t.Mul(c, y[l*m+j]))
+					cyi.Add(cyi, t.Mul(c, y[(n+l)*m+j]))
+				}
+			}
+			vr.Mul(qr, cyr)
+			vr.Sub(vr, t.Mul(qi, cyi))
+			vr.Neg(vr)
+			vi.Mul(qr, cyi)
+			vi.Add(vi, t.Mul(qi, cyr))
+			vi.Neg(vi)
+			h := complex(dyadicQuoFloat64(vr, det, exp, ps.d[i*m+j]), dyadicQuoFloat64(vi, det, exp, 0))
+			overflow = overflow || cmplx.IsInf(h)
+			g[i*m+j] = h
+		}
+	}
+	return g, overflow, true
+}
+
+// exactPencilSystem is solveExactAt's integer system at pt: the real 2n×2n
+// embedding of pI + qA scaled to integers, with right side [B̂; 0], row-major
+// 2n×(2n+m), and the scaled Ĉ, q and the exponent that undoes the scaling.
+func exactPencilSystem(ps *poleSchurData, pt frequencyPoint) (a, cHat []*big.Int, qr, qi *big.Int, exp int) {
+	n, m, p := ps.n, ps.m, ps.p
 	A := mat.NewDense(n, n, ps.a)
 	B := mat.NewDense(n, m, ps.b)
 	C := mat.NewDense(p, n, ps.c)
@@ -79,17 +121,17 @@ func solveExactAt(ps *poleSchurData, pt frequencyPoint) (g []complex128, overflo
 		}
 		pq[i] = x
 	}
-	pr, pi, qr, qi := pq[0], pq[1], pq[2], pq[3]
+	pr, pi := pq[0], pq[1]
+	qr, qi = pq[2], pq[3]
 	if k < 0 {
 		pr.Lsh(pr, uint(-k))
 		pi.Lsh(pi, uint(-k))
 	}
 	n2, w := 2*n, 2*n+m
-	a := make([]*big.Int, n2*w)
+	a = make([]*big.Int, n2*w)
 	for i := range a {
 		a[i] = new(big.Int)
 	}
-	t := new(big.Int)
 	for i := range n {
 		for j := range n {
 			ah := new(big.Int).Neg(pHat[i*n+j])
@@ -110,39 +152,67 @@ func solveExactAt(ps *poleSchurData, pt frequencyPoint) (g []complex128, overflo
 			a[i*w+n2+j].Set(bHat[i*m+j])
 		}
 	}
-	y := make([]*big.Int, n2*m)
-	for i := range y {
-		y[i] = new(big.Int)
-	}
-	det, ok := bareissSolve(a, y, n2, m, t)
-	if !ok {
-		return nil, false, false
-	}
-	exp := shift + max(k, 0)
-	g = make([]complex128, p*m)
-	cyr, cyi, vr, vi := new(big.Int), new(big.Int), new(big.Int), new(big.Int)
-	for i := range p {
-		for j := range m {
-			cyr.SetInt64(0)
-			cyi.SetInt64(0)
-			for l, c := range cHat[i*n : i*n+n] {
-				if c.Sign() != 0 {
-					cyr.Add(cyr, t.Mul(c, y[l*m+j]))
-					cyi.Add(cyi, t.Mul(c, y[(n+l)*m+j]))
-				}
-			}
-			vr.Mul(qr, cyr)
-			vr.Sub(vr, t.Mul(qi, cyi))
-			vr.Neg(vr)
-			vi.Mul(qr, cyi)
-			vi.Add(vi, t.Mul(qi, cyr))
-			vi.Neg(vi)
-			h := complex(dyadicQuoFloat64(vr, det, exp, ps.d[i*m+j]), dyadicQuoFloat64(vi, det, exp, 0))
-			overflow = overflow || cmplx.IsInf(h)
-			g[i*m+j] = h
+	return a, cHat, qr, qi, shift + max(k, 0)
+}
+
+// exactNonsingularModP reports whether the leading n×n block of the
+// integer matrix a (row stride w) is nonsingular modulo the prime
+// modPPrime: its determinant is then a nonzero integer. false decides
+// nothing. det mod P is the image of det under the ring map ℤ → ℤ/P, so a
+// nonzero image proves det ≠ 0.
+func exactNonsingularModP(a []*big.Int, n, w int) bool {
+	pb := new(big.Int).SetUint64(modPPrime)
+	r := new(big.Int)
+	f := make([]uint64, n*n)
+	for i := range n {
+		for j := range n {
+			f[i*n+j] = r.Mod(a[i*w+j], pb).Uint64()
 		}
 	}
-	return g, overflow, true
+	for k := range n {
+		piv := -1
+		for i := k; i < n; i++ {
+			if f[i*n+k] != 0 {
+				piv = i
+				break
+			}
+		}
+		if piv < 0 {
+			return false
+		}
+		if piv != k {
+			for j := k; j < n; j++ {
+				f[k*n+j], f[piv*n+j] = f[piv*n+j], f[k*n+j]
+			}
+		}
+		inv := modPInverse(f[k*n+k])
+		for i := k + 1; i < n; i++ {
+			c := f[i*n+k] * inv % modPPrime
+			if c == 0 {
+				continue
+			}
+			for j := k + 1; j < n; j++ {
+				f[i*n+j] = (f[i*n+j] + (modPPrime-c)*f[k*n+j]) % modPPrime
+			}
+		}
+	}
+	return true
+}
+
+// modPPrime is the largest prime below 2³², so a product of two residues
+// fits in a uint64.
+const modPPrime = 4294967291
+
+// modPInverse is x⁻¹ mod modPPrime, x ≠ 0, by Fermat.
+func modPInverse(x uint64) uint64 {
+	r, b := uint64(1), x
+	for e := uint64(modPPrime - 2); e > 0; e >>= 1 {
+		if e&1 != 0 {
+			r = r * b % modPPrime
+		}
+		b = b * b % modPPrime
+	}
+	return r
 }
 
 // inExactDiskScope reports whether s, off DC, lies within the dc rounding
