@@ -89,9 +89,12 @@ type ReduceResult struct {
 // reference, and its data resolution is not a tolerance. A nil error with
 // a reduced model R of the stored model G certifies, within the limits of
 // the sampled check below, at every axis point s outside the windows of
-// the poles within rounding of the axis that the two share (there a
-// rounding-level move of either realization's pole changes the response by
-// more than tol, so neither is determined to tol),
+// the poles within rounding of the axis that the two share (a pole whose
+// nearest axis point lies within the rounding bounds of the model's and the
+// cut's pole; there a rounding-level move of either realization's pole
+// changes the response by more than tol, so neither is determined to tol,
+// the location of such a kept pole is not promised and nothing inside its
+// window is certified),
 //
 //	|G_ij(s) − R_ij(s)| ≤ tol·max(max|G(s)|, max|R(s)|, Σ_l |C_il||X_lj(s)|),
 //

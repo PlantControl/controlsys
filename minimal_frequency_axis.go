@@ -421,24 +421,25 @@ func (d *ddJudge) verdict() probeVerdict {
 // of a pole the data place off the axis, where a cut that moves the pole
 // within its rounding bound β_G (≤ tol·|λ_G|) is wrong beyond tol near it:
 // double-double resolves both, so they are judged, and may refute. Inside
-// the window of a pole within rounding of the axis that the cut shares
-// (axisPoleExempt) the probes keep the band's data slack.
+// the window of a shared pole within rounding of the axis (axisShared:
+// its foot within β_G + β_R of it) the probes keep the band's data slack,
+// and Reduce certifies nothing there: neither the stored model nor the
+// cut places that pole better than its rounding bound.
 //
-// A hidden model pole (modelPoles) that no window shares is one the cut
-// drops, or carries only off its location, while the data do not place it
-// off the axis: the stored model's exact pole may lie on the axis, so a
-// rounding-level residue r on it (a rotated uncontrollable or unobservable
-// integrator, z = −1, e^{jθ} or ±jω mode) puts r/d into the response at
-// the foot, d the pole's distance from it. axisProbes drops the foot, and a
-// probe at distance D ≫ d bounds r only to tol·D·scale, so the probes at
-// √ε and beyond verify a cut that is O(1) wrong at the foot. Double-double
+// A hidden model pole (modelPoles) that is not axisShared is one the cut
+// drops, carries only off its location, or shares where the data place it
+// off the axis by more than β_G + β_R, while within its reach of the axis:
+// the stored model's exact pole may lie on the axis, so a rounding-level
+// residue r on it (a rotated uncontrollable or unobservable integrator,
+// z = −1, e^{jθ} or ±jω mode) puts r/d into the response at the foot, d
+// the pole's distance from it. axisProbes drops the foot, and a probe at
+// distance D ≫ d bounds r only to tol·D·scale, so the probes at √ε and
+// beyond verify a cut that is O(1) wrong at the foot. Double-double
 // resolves the pole to ε² of the data, far inside the reach, so the foot is
 // judged and, at axial distance reach on either side (one side for a real
 // pole, its mirror the conjugate), the side points must verify: where the
 // stored model's residue on the pole is exactly zero the response there is
-// smooth and determined, and where it is not, it is r/reach there. With
-// axisPoleExempt false the hidden shared poles and their windows are
-// judged the same way.
+// smooth and determined, and where it is not, it is r/reach there.
 func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []bool, mp modelPoles, win poleWindows, discrete bool, tol float64) bool {
 	var dd *ddJudge
 	judge := func() *ddJudge {
@@ -458,7 +459,7 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 	var near []complex128
 	var sides []int
 	for j, ev := range mp.evals {
-		if !mp.hidden[j] || imag(ev) < 0 || axisPoleExempt && win.modelShared[j] {
+		if !mp.hidden[j] || imag(ev) < 0 || win.axisShared[j] {
 			continue
 		}
 		foot, d := mp.foot[j], mp.reach[j]
@@ -934,10 +935,11 @@ type poleWindows struct {
 	radius []float64
 	// cutPoles are the eigenvalues of the cut sharedPoleWindows judged.
 	cutPoles []complex128
-	// axisPole marks a window that shares a hidden model pole (modelPoles),
-	// modelShared a model pole some window shares.
-	axisPole    []bool
-	modelShared []bool
+	// axisPole marks a window that shares a model pole within rounding of
+	// the axis, axisShared such a model pole: its foot (modelPoles) within
+	// β_G + β_R of it, β_R that of the window's cut pole.
+	axisPole   []bool
+	axisShared []bool
 }
 
 func (w poleWindows) contain(s complex128) bool {
@@ -958,19 +960,13 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 		if cmplx.Abs(s-c) > w.radius[i] {
 			continue
 		}
-		if w.axisPole[i] && axisPoleExempt {
+		if w.axisPole[i] {
 			return false
 		}
 		in = true
 	}
 	return in
 }
-
-// axisPoleExempt selects the policy for a pole the model shares with the
-// cut within rounding of the axis: true keeps such a window's data slack and
-// skips the pole's own points (judgeNearPoles), false judges them against
-// the stored model like every other point.
-var axisPoleExempt = true
 
 // sharedPoleWindows returns, for every pole λ_R of red such that every
 // model pole λ_G it shares (|λ_R − λ_G| ≤ β_R + β_G + ρ_G + ρ_R, each pole
@@ -1000,10 +996,13 @@ var axisPoleExempt = true
 // not the shared pole, so the radius is capped at the distance |λ_R − λ_G′|
 // to the nearest one. On a stiff model ε‖A‖ is O(1), so a slow pole can
 // pass as a rounding-level zero, and an uncapped window would span the
-// slow band where the cut is wrong. False when the eigenvalues of red do not
-// converge.
+// slow band where the cut is wrong. A window that shares a model pole
+// within rounding of the axis, its foot within β_G + β_R of it, is an axis
+// window (axisPole): the cut may carry that pole anywhere within rounding,
+// and inside the window the stored model is not judged (judgeNearPoles).
+// False when the eigenvalues of red do not converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
-	w := poleWindows{modelShared: make([]bool, len(mp.evals))}
+	w := poleWindows{axisShared: make([]bool, len(mp.evals))}
 	nr, _, _ := red.Dims()
 	if nr == 0 {
 		return w, true
@@ -1020,7 +1019,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 	rho0R *= float64(nr) * eps()
 	var with []int
 	for i, lr := range evR {
-		shared, ok, rad, lim, hidden := false, true, betaR[i], math.Inf(1), false
+		shared, ok, rad, lim, axis := false, true, betaR[i], math.Inf(1), false
 		rR := math.Min(rho0R, 2*float64(nr)*betaR[i])
 		with = with[:0]
 		for j, lg := range mp.evals {
@@ -1034,8 +1033,10 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 				break
 			}
 			shared = true
-			with = append(with, j)
-			hidden = hidden || mp.hidden != nil && mp.hidden[j]
+			if mp.foot != nil && cmplx.Abs(mp.foot[j]-lg) <= bG+betaR[i] {
+				with = append(with, j)
+				axis = true
+			}
 			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
 				if k != j {
@@ -1046,9 +1047,9 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		if ok && shared {
 			w.centre = append(w.centre, lr)
 			w.radius = append(w.radius, math.Min(rad/tol, lim))
-			w.axisPole = append(w.axisPole, hidden)
+			w.axisPole = append(w.axisPole, axis)
 			for _, j := range with {
-				w.modelShared[j] = true
+				w.axisShared[j] = true
 			}
 		}
 	}
