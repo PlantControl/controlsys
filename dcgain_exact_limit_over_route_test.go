@@ -3,7 +3,6 @@ package controlsys
 import (
 	"errors"
 	"math"
-	"math/cmplx"
 	"testing"
 )
 
@@ -36,12 +35,7 @@ func TestDCGainExactLimitOverFloatRoute(t *testing.T) {
 			t.Errorf("%s: FreqResponse(0): %v", tc.name, ferr)
 			continue
 		}
-		h := fr.At(0, 0, 0)
-		if math.IsInf(want, 0) {
-			if !cmplx.IsInf(h) {
-				t.Errorf("%s: FreqResponse(0) = %v, want Inf", tc.name, h)
-			}
-		} else if h != complex(want, 0) {
+		if h := fr.At(0, 0, 0); h != complex(want, 0) {
 			t.Errorf("%s: FreqResponse(0) = %v, want %v", tc.name, h, want)
 		}
 	}
