@@ -27,16 +27,18 @@ func checkDCGainExactLimitEntries(t *testing.T, name string, n, m, p int, a, b, 
 	}
 }
 
-// INGGF2: where the exact limit of the float model and the deflated block
-// expansion disagree on a pole at DC (Inf against finite, or the Inf sign),
-// DCGain returns the exact limit with ErrAccuracyUnverified rather than
-// either reading with a nil error. Over-cancelled discrete Series
+// INGGF2, ZEYADU: where the exact limit of the float model and the deflated
+// block expansion disagree on a pole at DC (Inf against finite, or the Inf
+// sign), DCGain returns the exact limit with a nil error. User decision
+// 2026-11-17 (ZEYADU) overturns INGGF2's ErrAccuracyUnverified rule: DCGain
+// is the stored model's exact limit, even where a 1-ulp rounding of the data
+// flips the Inf sign or finiteness. Over-cancelled discrete Series
 // k(z−1)²/((z−a)(z−b))·1/(z−1) (intended 0), Parallel residue cancellation
 // k/(z−1) − k(1−a)/((z−1)(z−a)) (intended k/(1−a)) and its zero-gain variant
 // have an exact pole at z = 1 the given coefficients leave uncancelled; the
 // fuzz rows 0xcc, 0xf7 and the w18#41 row have exact poles the deflation
 // misreads or fails on.
-func TestDCGainPoleCancelAmbiguityUnverified(t *testing.T) {
+func TestDCGainPoleCancelExactLimit(t *testing.T) {
 	type row struct {
 		name       string
 		n, m, p    int
@@ -74,11 +76,8 @@ func TestDCGainPoleCancelAmbiguityUnverified(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		g, err := sys.DCGain()
-		if !errors.Is(err, ErrAccuracyUnverified) {
-			t.Errorf("%s: DCGain error %v, want ErrAccuracyUnverified", tc.name, err)
-		}
-		if g == nil {
-			t.Errorf("%s: no gain with %v", tc.name, err)
+		if err != nil {
+			t.Errorf("%s: DCGain error %v, want nil", tc.name, err)
 			continue
 		}
 		checkDCGainExactLimitEntries(t, tc.name, tc.n, tc.m, tc.p, tc.a, tc.b, tc.c, tc.d, g.RawMatrix().Data, tc.dt)
