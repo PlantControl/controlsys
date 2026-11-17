@@ -303,11 +303,12 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 // T), U = (sE − A)⁻¹B in the terms, at n + nf + polyDeg + 1 axis points
 // where GEPP on sE − A determines the response (n the order, nf the
 // largest row denominator degree, polyDeg the polynomial degree), and that
-// no such point outside the windows of the roots puts |G − Z| beyond
+// no judged point outside the windows of the roots puts |G − Z| beyond
 // tol·max(scale, T) + δ_data, δ_data the change of G when every stored
-// entry moves by ε relative, as TransferFunction's own certificate; a form
-// that does not verify is returned with an error wrapping
-// ErrAccuracyUnverified. Delayed and LFT models keep the transfer-function
+// entry moves by ε relative, as TransferFunction's own certificate; as
+// there, only the in-band response is certified, at the points judged and
+// nowhere between them. A form that does not verify is returned with an
+// error wrapping ErrAccuracyUnverified. Delayed and LFT models keep the transfer-function
 // roots with no such certificate.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
