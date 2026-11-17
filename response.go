@@ -429,8 +429,9 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // value: where the float model has an exact pole at DC whose residue lies
 // below ε of its own terms, so the given coefficients cannot fix whether it
 // cancels, and every float reading is finite, the finite regular part;
-// where a deflated expansion disagrees with the exact limit, the exact
-// limit; and where a pole within rounding of DC reads as
+// where an infinite exact limit rests on such a residue and a deflated
+// expansion reads it otherwise, the exact limit; and where a pole within
+// rounding of DC reads as
 // an integrator, the Inf MATLAB returns, the float model's exact limit
 // being finite. Reduce removes cancelling modes for a certified gain.
 // FreqResponse at DC agrees with a certified gain: for an explicit
@@ -849,10 +850,16 @@ type dcExactLimits struct{ rounded, strict *mat.Dense }
 //     its own terms (exactDCGainLimitRounded differs from the strict limit)
 //     and the route is finite there too, the given coefficients cannot fix
 //     whether the pole cancels: the entry is the finite regular part, with
-//     ErrAccuracyUnverified. Every other entry is the strict limit, with
-//     ErrAccuracyUnverified where a deflated route failed or disagrees with
-//     it on which entries are infinite or on an Inf sign (deflation moves
-//     poles onto x0), and a nil error otherwise.
+//     ErrAccuracyUnverified. Every other entry is the strict limit. Where
+//     each entry's lowest nonzero pole coefficient exceeds ε of its own
+//     terms, or every pole coefficient is exactly 0, the strict limit is
+//     certified and the error nil, whatever a float route read: a deflated
+//     expansion or the transfer limit moves poles within rounding of DC onto
+//     x0, or drops a coefficient as rounding, so it may disagree on which
+//     entries are infinite or on an Inf sign. Where an entry's Inf rests on
+//     a coefficient below ε of its terms and a deflated route failed or
+//     disagrees with it on which entries are infinite or on an Inf sign,
+//     the error wraps ErrAccuracyUnverified (ZEYADU).
 //   - x0·I − A exactly nonsingular: the strict limit. Where the route read
 //     a pole at DC (an infinite entry: a pole within rounding of DC), that
 //     entry stays infinite, as in MATLAB, with ErrAccuracyUnverified, or
@@ -898,7 +905,7 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 	}
 	out := mat.DenseCopyOf(lim.strict)
 	or, rr := out.RawMatrix(), lim.rounded.RawMatrix()
-	ambiguous := false
+	ambiguous, unsettled := false, false
 	for i := range or.Rows {
 		for j := range or.Cols {
 			s, v := or.Data[i*or.Stride+j], rr.Data[i*rr.Stride+j]
@@ -908,15 +915,17 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 			if !math.IsInf(v, 0) && g != nil {
 				if x := g.At(i, j); !math.IsInf(x, 0) && !math.IsNaN(x) {
 					or.Data[i*or.Stride+j], ambiguous = v, true
+					continue
 				}
 			}
+			unsettled = true
 		}
 	}
 	if ambiguous {
 		return out, fmt.Errorf("DCGain: residue of a pole at DC below rounding of its own terms; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
 	}
-	if r.deflated && (g == nil || !samePoleClasses(out, g)) {
-		return out, fmt.Errorf("DCGain: exact limit and deflated expansion disagree on a pole at DC; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
+	if r.deflated && unsettled && (g == nil || !samePoleClasses(out, g)) {
+		return out, fmt.Errorf("DCGain: exact limit at a pole at DC rests on a residue below rounding of its own terms, which the deflated expansion reads otherwise; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
 	}
 	return out, nil
 }

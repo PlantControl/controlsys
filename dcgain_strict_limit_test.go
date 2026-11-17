@@ -178,8 +178,9 @@ func TestDCGainFreqResponseAtDCConsistency(t *testing.T) {
 		fr, ferr := sys.FreqResponse([]float64{0})
 		if ferr != nil {
 			// An exactly singular DC pencil with DCGain unverified leaves FR(0)
-			// unverified (FKYKOG); the sub-rounding residue's exact limit is a
-			// provable pole, which DCGain should certify (ZEYADU).
+			// unverified (FKYKOG): the sub-rounding residue lies below ε of its
+			// own terms, so the given coefficients cannot fix whether the pole
+			// cancels (ZEYADU leaves it unverified).
 			if err != nil && errors.Is(ferr, ErrAccuracyUnverified) {
 				continue
 			}
