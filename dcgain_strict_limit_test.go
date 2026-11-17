@@ -180,7 +180,9 @@ func TestDCGainFreqResponseAtDCConsistency(t *testing.T) {
 			// An exactly singular DC pencil with DCGain unverified leaves FR(0)
 			// unverified (FKYKOG): the sub-rounding residue lies below ε of its
 			// own terms, so the given coefficients cannot fix whether the pole
-			// cancels (ZEYADU leaves it unverified).
+			// cancels, and its exact limit is an Inf, whose sign is not robust
+			// to rounding of the stored data (ZEYADU certifies only finite
+			// exact limits).
 			if err != nil && errors.Is(ferr, ErrAccuracyUnverified) {
 				continue
 			}
