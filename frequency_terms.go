@@ -145,8 +145,6 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 		kappa = pt.scale()
 	}
 	ka, km, pa, qa := cabs1(kappa), termsAbs(kappa), cabs1(pt.p), cabs1(pt.q)
-	lam := cabs1(pt.value())
-	slack := 2 * float64(n+2) * termsEps * termsEps
 	for i := range n {
 		bi := br.b[i*m+j]
 		s := math.Abs(bi)
@@ -176,11 +174,11 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 				continue
 			}
 		}
-		rc := pencilResidualRow(xc, row, i, bi, pt.p, pt.q, kappa)
+		rc, e := pencilResidualRow(xc, row, i, bi, pt.p, pt.q, kappa)
 		if kappa != 1 {
 			rc *= crecip(kappa)
 		}
-		rb := termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*xm[i]+cabs1(xi))
+		rb := termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + e/km*(1+4*termsEps)
 		if !(rb <= theta*s) {
 			return false, 0, cheap
 		}
@@ -192,16 +190,28 @@ func (tc *termsCert) rows(br *balancedRealization, pt frequencyPoint, j int, com
 }
 
 // pencilResidualRow is row i of pencilResidual for an explicit model:
-// κbᵢ − p·xᵢ − q·(Ax)ᵢ in compensated arithmetic, row the row of A.
-func pencilResidualRow(x []complex128, row []float64, i int, b float64, p, q, kappa complex128) complex128 {
+// κbᵢ − p·xᵢ − q·(Ax)ᵢ in compensated arithmetic, row the row of A, and e
+// bounding the distance of the exact residual from the sums' unrounded
+// s + c, before value() rounds them: the inner sums of (Ax)ᵢ hold their
+// exact value within dot2Err(nnz)·Σ|aₖ||xₖ| (real and imaginary parts
+// together) and enter both outer sums scaled by q; each outer sum has at
+// most 7 terms, q times both words of an inner sum among them, and adds
+// dot2Err(7) times their moduli, and every rounding into the subnormal
+// range, where TwoProduct's FMA residual and the bound's relative terms
+// fail, at most 2⁻¹⁰⁷⁴ more.
+func pencilResidualRow(x []complex128, row []float64, i int, b float64, p, q, kappa complex128) (r complex128, e float64) {
 	pr, pi, qr, qi := real(p), imag(p), real(q), imag(q)
 	var axr, axi compensatedSum
+	var inner float64
+	nnz := 0
 	for k, av := range row {
 		if av == 0 {
 			continue
 		}
 		axr.addProd(av, real(x[k]))
 		axi.addProd(av, imag(x[k]))
+		inner += math.Abs(av) * cabs1(x[k])
+		nnz++
 	}
 	var re, im compensatedSum
 	if kappa == 1 {
@@ -219,7 +229,30 @@ func pencilResidualRow(x []complex128, row []float64, i int, b float64, p, q, ka
 	re.addScaled(qi, axi)
 	im.addScaled(-qr, axi)
 	im.addScaled(-qi, axr)
-	return complex(re.value(), im.value())
+	qa := cabs1(q)
+	outer := cabs1(kappa)*math.Abs(b) + cabs1(p)*cabs1(x[i]) +
+		qa*(math.Abs(axr.s)+math.Abs(axr.c)+math.Abs(axi.s)+math.Abs(axi.c))
+	e = (dot2Err(7)*outer+qa*dot2Err(nnz)*inner)*(1+float64(nnz+16)*termsEps) +
+		(float64(4*nnz)*max(qa, 1)+64)*0x1p-1074
+	return complex(re.value(), im.value()), e
+}
+
+// dot2Err is γₖ², γₖ = kε/(1 − kε) with ε = termsEps = 2⁻⁵², twice the
+// unit roundoff u: a compensatedSum of k add or addProd calls represents
+// its exact sum Στᵢ, s + c unrounded, within dot2Err(k)·Σ|τᵢ| (Ogita, Rump
+// and Oishi's Dot2 bound, quadratic in k). Of the exact Στᵢ = s +
+// Σ(TwoSum and TwoProduct errors), c sums at most 2k error terms with
+// 2k − 1 roundings, and those terms total at most u·k(1 + γₖ(u))·Σ|τᵢ|, so
+// c's rounding is at most γ₂ₖ₋₁(u)·u·k(1 + γₖ(u))·Σ|τᵢ| ≤ γ₂ₖ(u)²/2·Σ|τᵢ|,
+// and γ₂ₖ(u) = γₖ(ε), without underflow, which callers bound apart. It is
+// +Inf where kε ≥ 1.
+func dot2Err(k int) float64 {
+	ke := float64(k) * termsEps
+	if !(ke < 1) {
+		return math.Inf(1)
+	}
+	g := ke / (1 - ke) * (1 + 2*termsEps)
+	return g * g * (1 + 2*termsEps)
 }
 
 // mUpper overwrites the nonnegative y with an upper bound on |M|y and
@@ -327,7 +360,7 @@ func (tc *termsCert) output(br *balancedRealization, dst []complex128, j int, th
 		}
 		re.add(-real(h))
 		im.add(-imag(h))
-		o := termsAbs(complex(re.value(), im.value()))*(1+2*termsEps) + 2*float64(n+2)*termsEps*termsEps*(mag+math.Abs(d)+cabs1(h))
+		o := termsAbs(complex(re.value(), im.value()))*(1+2*termsEps) + dot2Err(n+2)*(mag+math.Abs(d)+cabs1(h))*(1+float64(n+4)*termsEps) + float64(4*n+16)*0x1p-1074
 		t2 := theta * theta * ct * grow
 		if !(o <= math.MaxFloat64 && t2 <= math.MaxFloat64) {
 			return false
@@ -554,8 +587,7 @@ func (ib *inverseBound) compensatedResidual(br *balancedRealization, pt frequenc
 	if !pt.isPlain() {
 		kappa = pt.scale()
 	}
-	lam := cabs1(pt.value())
-	slack := 2 * float64(n+2) * termsEps * termsEps
+	km := termsAbs(kappa)
 	col := make([]complex128, n)
 	for j := range n {
 		for k := range n {
@@ -566,22 +598,16 @@ func (ib *inverseBound) compensatedResidual(br *balancedRealization, pt frequenc
 			if i == j {
 				b = 1
 			}
-			row := br.a[i*n : (i+1)*n]
-			s := b
-			for k, a := range ib.absA[i*n : (i+1)*n] {
-				s += a * ib.yUp[k*n+j]
-			}
-			rc := pencilResidualRow(col, row, i, b, pt.p, pt.q, kappa)
+			rc, e := pencilResidualRow(col, br.a[i*n:(i+1)*n], i, b, pt.p, pt.q, kappa)
 			if kappa != 1 {
 				rc *= crecip(kappa)
 			}
-			yi := ib.yUp[i*n+j]
-			ib.rbar[i*n+j] = termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + slack*(s+lam*yi+yi)
+			ib.rbar[i*n+j] = termsAbs(rc)*(1+4*termsEps)*(1+2*termsEps) + e/km*(1+4*termsEps)
 		}
 	}
 }
 
-// upper is inverseBound's mUpper: |Y|(I − R̄)⁻¹y ≤ |Y|(y + z + maxₗ(zₗ/vₗ)·
+// upper is inverseBound's mUpper:|Y|(I − R̄)⁻¹y ≤ |Y|(y + z + maxₗ(zₗ/vₗ)·
 // q/(1−q)·v), z = R̄y.
 func (ib *inverseBound) upper(y []float64) bool {
 	n := ib.n
