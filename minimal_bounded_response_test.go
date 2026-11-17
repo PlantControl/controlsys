@@ -649,8 +649,17 @@ func TestClassifyProbeRefutesBeyondTerms(t *testing.T) {
 // are exactly zero, which is an exact interpolation condition, not noise.
 // The model's response is exact zero too except at the two probes beside
 // the pole z = 1 (e^{0.01i}, e^{0.1i}), where it is fill rounding within
-// comp: those are uninformative, the other seven verify, and the band
-// accepts. The
+// comp: those are uninformative and the other seven verify. The band then
+// refuses the cut (HO6UP6): the stored transfer is exactly zero, but the
+// pole within rounding of z = 1 is hidden and dropped, and its side points
+// must verify; there the double-double bound on the model's response is
+// absolute, 1.6e-29, against an exact zero, so no relative measure
+// verifies them. The side-point rule is sound and kept, so the cut is
+// judged through Reduce instead: the structural pre-pass removes the
+// disconnected states, order 2, and both transfers are exactly zero (no
+// state B reaches is seen by C), so the contract holds with no deviation;
+// the 320-bit oracle cannot show it beside z = 1, where its floor, 2e-97,
+// is the whole response. The
 // ReduceUnobservable cut carries the staircase's rounding in B (R ≈ 1e-16
 // against G_sp = 0) and is refuted.
 func TestClassifyProbeExactZeroCutIsDetermined(t *testing.T) {
@@ -672,8 +681,34 @@ func TestClassifyProbeExactZeroCutIsDetermined(t *testing.T) {
 			t.Errorf("z=%v: verdict %d, want %d (Ĝ %v comp %.3g, R̂ %v comp %.3g)", s, v, want, full.g[k], full.comp[k], cut.g[k], cut.comp[k])
 		}
 	}
-	if !frequencyAxisCutInBand(sys, red, removed, tol) {
-		t.Error("band rejects the exact ReduceUncontrollable cut")
+	res, err := sys.Reduce(&ReduceOpts{Mode: ReduceUncontrollable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order != 2 {
+		t.Errorf("Reduce order %d, want 2", res.Order)
+	}
+	n, _, _ := sys.Dims()
+	reach := []int{}
+	for i := range n {
+		if sys.B.At(i, 0) != 0 {
+			reach = append(reach, i)
+		}
+	}
+	for k := 0; k < len(reach); k++ {
+		for i := range n {
+			if sys.A.At(i, reach[k]) != 0 && !slices.Contains(reach, i) {
+				reach = append(reach, i)
+			}
+		}
+	}
+	for _, i := range reach {
+		if sys.C.At(0, i) != 0 {
+			t.Fatalf("state %d reachable from B and seen by C: the stored transfer is not exactly zero", i)
+		}
+	}
+	if !mat.Equal(res.Sys.C, mat.NewDense(1, res.Order, nil)) || res.Sys.D.At(0, 0) != sys.D.At(0, 0) {
+		t.Errorf("Reduce C %v D %v, want an exactly zero transfer", res.Sys.C.RawMatrix().Data, res.Sys.D.RawMatrix().Data)
 	}
 	red, removed = bandStaircaseCut(t, sys, &ReduceOpts{Mode: ReduceUnobservable})
 	if frequencyAxisCutInBand(sys, red, removed, tol) {
