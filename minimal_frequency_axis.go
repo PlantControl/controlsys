@@ -240,6 +240,9 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 			return false
 		}
 	}
+	if !judgeNearPoles(&full, &cut, pts, isVerified, poles, win, discrete, tol) {
+		return false
+	}
 	return accept()
 }
 
@@ -259,33 +262,129 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 // bound stays open. Points inside a window stay open: there the
 // refutation charges the data bounds, which are not formed here.
 func resolveOpenProbes(full, cut *boundedResponse, pts []complex128, verified []bool, win poleWindows, tol float64) bool {
-	pm := full.p * full.m
-	var w zpkDDWork
-	g, r := make([]zpkEntryBounds, pm), make([]zpkEntryBounds, pm)
+	dd := newDDJudge(full, tol)
 	for k, s := range pts {
 		if verified[k] || !full.ok[k] || !cut.ok[k] || win.contain(s) {
 			continue
 		}
-		if !ddEntryBounds(&full.ev.br, s, &w, g) || !ddEntryBounds(&cut.ev.br, s, &w, r) {
+		switch dd.judge(full, cut, s) {
+		case probeReject:
+			return false
+		case probeVerified:
+			verified[k] = true
+		}
+	}
+	return true
+}
+
+// ddJudge judges a point in complex double-double (resolveOpenProbes),
+// with its buffers.
+type ddJudge struct {
+	w    zpkDDWork
+	g, r []zpkEntryBounds
+	tol  float64
+}
+
+func newDDJudge(full *boundedResponse, tol float64) *ddJudge {
+	pm := full.p * full.m
+	return &ddJudge{g: make([]zpkEntryBounds, pm), r: make([]zpkEntryBounds, pm), tol: tol}
+}
+
+// judge is resolveOpenProbes' verdict at s: uninformative where either
+// double-double solve cannot bound its response.
+func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
+	g, r, tol := d.g, d.r, d.tol
+	if !ddEntryBounds(&full.ev.br, s, &d.w, g) || !ddEntryBounds(&cut.ev.br, s, &d.w, r) {
+		return probeUninformative
+	}
+	scale := 0.0
+	for i := range g {
+		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
+	}
+	v := probeVerified
+	for i := range g {
+		diff := cmplx.Abs(g[i].g - r[i].g)
+		lhs := diff + g[i].ver + r[i].ver
+		if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
 			continue
 		}
-		scale := 0.0
-		for i := range g {
-			scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
+		if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
+			return probeReject
 		}
-		ok := true
-		for i := range g {
-			diff := cmplx.Abs(g[i].g - r[i].g)
-			lhs := diff + g[i].ver + r[i].ver
-			if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
-				continue
+		v = probeUninformative
+	}
+	return v
+}
+
+// judgeNearPoles judges, in complex double-double (ddJudge) against the
+// stored model, the axis points beside the poles that the band's double
+// probes cannot see, for a cut the band would accept; false when one
+// refutes the cut or a hidden pole's side point does not verify it.
+//
+// A hidden model pole (modelPoles) that no window shares is one the cut
+// drops, or carries only off its location, while the data do not place it
+// off the axis: the stored model's exact pole may lie on the axis, so a
+// rounding-level residue r on it (a rotated uncontrollable or unobservable
+// integrator, z = −1 or e^{jθ} mode) puts r/d into the response at the
+// foot, d the pole's distance from it. axisProbes drops the foot, and a
+// probe at distance D ≫ d bounds r only to tol·D·scale, so the probes at
+// √ε and beyond verify a cut that is O(1) wrong at the foot. In double the
+// solve is singular there to its own precision; double-double resolves
+// the pole to ε² of the data, far inside the reach, so the foot is judged
+// and, at axial distance reach on either side (one side for a real pole,
+// its mirror the conjugate), the side points must verify: where the stored
+// model's residue on the pole is exactly zero the response there is smooth
+// and determined, and where it is not, it is r/reach at the side point.
+// Inside a window the double probes are judged with the data slack; a
+// window that shares no hidden pole is a pole the data place off the axis,
+// so its open probes are judged too and may only refute or verify.
+// With axisPoleExempt false the hidden shared poles and their windows are
+// judged the same way.
+func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []bool, mp modelPoles, win poleWindows, discrete bool, tol float64) bool {
+	var dd *ddJudge
+	judge := func(s complex128) probeVerdict {
+		if dd == nil {
+			dd = newDDJudge(full, tol)
+		}
+		return dd.judge(full, cut, s)
+	}
+	for k, s := range pts {
+		if verified[k] || !win.strictlyJudged(s) {
+			continue
+		}
+		switch judge(s) {
+		case probeReject:
+			return false
+		case probeVerified:
+			verified[k] = true
+		}
+	}
+	for j, ev := range mp.evals {
+		if !mp.hidden[j] || imag(ev) < 0 || axisPoleExempt && win.modelShared[j] {
+			continue
+		}
+		foot, d := mp.foot[j], mp.reach[j]
+		if judge(foot) == probeReject {
+			return false
+		}
+		var side []complex128
+		if discrete {
+			th := cmplx.Phase(foot)
+			side = append(side, cmplx.Rect(1, th+d))
+			if imag(ev) != 0 {
+				side = append(side, cmplx.Rect(1, th-d))
 			}
-			if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
+		} else {
+			side = append(side, complex(0, imag(foot)+d))
+			if imag(ev) != 0 {
+				side = append(side, complex(0, imag(foot)-d))
+			}
+		}
+		for _, s := range side {
+			if judge(s) != probeVerified {
 				return false
 			}
-			ok = false
 		}
-		verified[k] = ok
 	}
 	return true
 }
@@ -597,6 +696,11 @@ func probeWeight(s complex128) int {
 // on a dense matrix and the rounding of its own rows on a graded one. The
 // factor 2 calibrates a Gaussian-dense pole with κ = 1 (n·β_j ≈ ρ₀/2) to
 // ρ₀; on non-stiff census models n·β_j/ρ₀ has quartiles 0.38, 0.75, 2.3.
+//
+// foot is a pole's nearest axis point (z = 1 for λ = 0 on the unit
+// circle), reach its drop radius n·ε·|foot| + ρ_j there, and hidden marks
+// a pole within its reach of the axis, whose nearest axis point
+// axisProbes drops: the data do not place it off the axis.
 type modelPoles struct {
 	evals    []complex128
 	beta     []float64
@@ -604,6 +708,9 @@ type modelPoles struct {
 	rho      []float64
 	norm     float64
 	rho0     float64
+	foot     []complex128
+	reach    []float64
+	hidden   []bool
 }
 
 // axisProbes returns the deduplicated frequency-axis points the cut is
@@ -626,7 +733,9 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	if !ok {
 		return nil, modelPoles{}, false
 	}
-	mp := modelPoles{evals: evals, beta: beta, resolved: make([]bool, len(evals)), rho: make([]float64, len(evals))}
+	ne := len(evals)
+	mp := modelPoles{evals: evals, beta: beta, resolved: make([]bool, ne), rho: make([]float64, ne),
+		foot: make([]complex128, ne), reach: make([]float64, ne), hidden: make([]bool, ne)}
 	norm := 0.0
 	for _, a := range newBalancedRealization(sys, n, m, p).a {
 		norm = math.Hypot(norm, a)
@@ -641,6 +750,16 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 		} else {
 			resolved = false
 		}
+		foot := complex(0, imag(ev))
+		if discrete {
+			foot = 1
+			if r := cmplx.Abs(ev); r > 0 {
+				foot = ev / complex(r, 0)
+			}
+		}
+		mp.foot[k] = foot
+		mp.reach[k] = float64(n)*eps()*cmplx.Abs(foot) + mp.rho[k]
+		mp.hidden[k] = cmplx.Abs(foot-ev) <= mp.reach[k]
 	}
 	var pts []complex128
 	push := func(s complex128) {
@@ -708,6 +827,10 @@ type poleWindows struct {
 	radius []float64
 	// cutPoles are the eigenvalues of the cut sharedPoleWindows judged.
 	cutPoles []complex128
+	// axisPole marks a window that shares a hidden model pole (modelPoles),
+	// modelShared a model pole some window shares.
+	axisPole    []bool
+	modelShared []bool
 }
 
 func (w poleWindows) contain(s complex128) bool {
@@ -718,6 +841,29 @@ func (w poleWindows) contain(s complex128) bool {
 	}
 	return false
 }
+
+// strictlyJudged reports whether s lies inside some window but inside none
+// that shares a pole within rounding of the axis (axisPole), so that
+// judgeNearPoles judges it against the stored model.
+func (w poleWindows) strictlyJudged(s complex128) bool {
+	in := false
+	for i, c := range w.centre {
+		if cmplx.Abs(s-c) > w.radius[i] {
+			continue
+		}
+		if w.axisPole[i] && axisPoleExempt {
+			return false
+		}
+		in = true
+	}
+	return in
+}
+
+// axisPoleExempt selects the policy for a pole the model shares with the
+// cut within rounding of the axis: true keeps such a window's data slack and
+// skips the pole's own points (judgeNearPoles), false judges them against
+// the stored model like every other point.
+var axisPoleExempt = true
 
 // sharedPoleWindows returns, for every pole λ_R of red such that every
 // model pole λ_G it shares (|λ_R − λ_G| ≤ β_R + β_G + ρ_G + ρ_R, each pole
@@ -765,9 +911,12 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		rho0R = math.Hypot(rho0R, a)
 	}
 	rho0R *= float64(nr) * eps()
+	w.modelShared = make([]bool, len(mp.evals))
+	var with []int
 	for i, lr := range evR {
-		shared, ok, rad, lim := false, true, betaR[i], math.Inf(1)
+		shared, ok, rad, lim, hidden := false, true, betaR[i], math.Inf(1), false
 		rR := math.Min(rho0R, 2*float64(nr)*betaR[i])
+		with = with[:0]
 		for j, lg := range mp.evals {
 			rj, bG := mp.rho[j], mp.beta[j]
 			if cmplx.Abs(lr-lg) > betaR[i]+bG+rj+rR {
@@ -779,6 +928,8 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 				break
 			}
 			shared = true
+			with = append(with, j)
+			hidden = hidden || mp.hidden != nil && mp.hidden[j]
 			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
 				if k != j {
@@ -789,6 +940,10 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		if ok && shared {
 			w.centre = append(w.centre, lr)
 			w.radius = append(w.radius, math.Min(rad/tol, lim))
+			w.axisPole = append(w.axisPole, hidden)
+			for _, j := range with {
+				w.modelShared[j] = true
+			}
 		}
 	}
 	return w, true
