@@ -144,10 +144,13 @@ func TestZPKModelDescriptorRefutesPerturbedForm(t *testing.T) {
 
 // TestZPKModelDescriptorRootLossUnverified checks a discrete descriptor with
 // nearly singular E (census row nse-dt/614, R4JG5M) whose transfer function
-// verifies but whose roots, with a pole and a zero near −1.4e15, lose the
-// response: at z = −0.99 + 0.1411j the returned form is 1.17·√ε of
-// max(scale, terms) from the 320-bit response, beyond the data bound too,
-// so ZPKModel must return it with ErrAccuracyUnverified, not nil.
+// verifies. The reduction is build-dependent: on arm64 it keeps a pole and
+// a zero near −1.4e15 whose roots lose the response, the form is 1.17·√ε
+// of max(scale, terms) from the 320-bit response at z = −0.99 + 0.1411j,
+// beyond the data bound too, and ZPKModel must return it with
+// ErrAccuracyUnverified, not nil; on amd64 it drops that pair (order 4,
+// 2.9e-6·√ε there) and nil is correct. Either way the outcome must match
+// the oracle at that point.
 func TestZPKModelDescriptorRootLossUnverified(t *testing.T) {
 	sys := zpkDescriptorCase(t, 5, 1, 1,
 		[]float64{-1.867235453097552, 0.26869448282682806, 0.34767806491133224, -0.6513009728904159, -0.20964928641572542, -0.5035160174784982, 1.3198309872649163, -0.028499691681299323, -0.1724267794991691, -1.8923731079617157, -0.236200648115944, 0.042725880803948305, 0.9729534362192397, 0.16988616385952138, -0.45419257954694414, -0.181769934854848, -0.4523947296568792, -0.3250213398014731, -0.19913805355784317, 0.3574191656123325, 0.11192359587163864, 1.3610212058640727, -0.30122849520914113, -0.24290493274262595, -0.8155070495478653},
@@ -159,13 +162,16 @@ func TestZPKModelDescriptorRootLossUnverified(t *testing.T) {
 		t.Fatalf("TransferFunction: %v", err)
 	}
 	res, err := sys.ZPKModel(nil)
-	if !errors.Is(err, ErrAccuracyUnverified) {
-		t.Fatalf("err = %v, want ErrAccuracyUnverified", err)
-	}
 	if res == nil || res.ZPK == nil {
-		t.Fatal("no zero-pole-gain form returned with ErrAccuracyUnverified")
+		t.Fatalf("no zero-pole-gain form (err %v)", err)
 	}
-	if r := zpkDescriptorOracleRatio(t, sys, res.ZPK, complex(-0.99, 0.1411)); !(r > 1) {
-		t.Errorf("|Z − G| = %.3g·√ε·max(scale, T) at −0.99 + 0.1411j, want > 1", r)
+	r := zpkDescriptorOracleRatio(t, sys, res.ZPK, complex(-0.99, 0.1411))
+	switch {
+	case err == nil && !(r <= 1):
+		t.Errorf("nil error with |Z − G| = %.3g·√ε·max(scale, T) at −0.99 + 0.1411j", r)
+	case err != nil && !errors.Is(err, ErrAccuracyUnverified):
+		t.Errorf("err = %v, want nil or ErrAccuracyUnverified", err)
+	case err != nil && !(r > 1):
+		t.Errorf("ErrAccuracyUnverified with |Z − G| = %.3g·√ε·max(scale, T) at −0.99 + 0.1411j, want > 1", r)
 	}
 }
