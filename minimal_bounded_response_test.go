@@ -649,10 +649,13 @@ func TestClassifyProbeRefutesBeyondTerms(t *testing.T) {
 // are exactly zero, which is an exact interpolation condition, not noise.
 // The model's response is exact zero too except at the two probes beside
 // the pole z = 1 (e^{0.01i}, e^{0.1i}), where it is fill rounding within
-// comp: those are uninformative, the other seven verify, and the band
-// accepts. The
-// ReduceUnobservable cut carries the staircase's rounding in B (R ≈ 1e-16
-// against G_sp = 0) and is refuted.
+// comp: those are uninformative and the other seven verify. The stored
+// data leave a rounding-level residue on that pole, within rounding of the
+// axis, which the cut drops: the stored model's response beside z = 1 is
+// O(1e7)·tol off the cut's (320-bit), so the band may accept the cut only
+// within Reduce's contract (HO6UP6 judges the pole's foot and sides and
+// refuses it). The ReduceUnobservable cut carries the staircase's rounding
+// in B (R ≈ 1e-16 against G_sp = 0) and is refuted.
 func TestClassifyProbeExactZeroCutIsDetermined(t *testing.T) {
 	sys := gwnbqeLiteral.system(t)
 	tol := math.Sqrt(eps())
@@ -672,8 +675,10 @@ func TestClassifyProbeExactZeroCutIsDetermined(t *testing.T) {
 			t.Errorf("z=%v: verdict %d, want %d (Ĝ %v comp %.3g, R̂ %v comp %.3g)", s, v, want, full.g[k], full.comp[k], cut.g[k], cut.comp[k])
 		}
 	}
-	if !frequencyAxisCutInBand(sys, red, removed, tol) {
-		t.Error("band rejects the exact ReduceUncontrollable cut")
+	if frequencyAxisCutInBand(sys, red, removed, tol) {
+		if c, at := contractSweepAtPoles(sys, red, tol); c > 1 {
+			t.Errorf("band accepts the ReduceUncontrollable cut, off by %.3g·tol·max(scale, terms) at %v", c, at)
+		}
 	}
 	red, removed = bandStaircaseCut(t, sys, &ReduceOpts{Mode: ReduceUnobservable})
 	if frequencyAxisCutInBand(sys, red, removed, tol) {
