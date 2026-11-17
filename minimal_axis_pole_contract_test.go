@@ -259,3 +259,66 @@ func TestReduceBandJudgesOrderZeroCutBesideAxisPole(t *testing.T) {
 		}
 	}
 }
+
+// TestSharedPoleWindowsAxisPoleWithinRoundingBounds checks the per-pole
+// test that exempts a shared window from the stored model's judgement
+// (NGG5TW ruling 4(c), HO6UP6): a model pole is axisShared exactly when a
+// window shares it and its foot lies within β_G + β_R of it. On the
+// rotated discrete models of TestReduceAcceptsCutBesideExactAxisPole the
+// kept integrator beside a removed −0.5 is within its bounds of z = 1 and
+// exempt; beside a removed 0.5 the data place it 1.78e-15 off z = 1,
+// beyond them though within its drop radius, so its window is judged; the
+// pole at −1 the cut drops is shared by no window, so judgeNearPoles judges
+// its foot.
+func TestSharedPoleWindowsAxisPoleWithinRoundingBounds(t *testing.T) {
+	q := mat.NewDense(3, 3, []float64{7.0 / 9, -4.0 / 9, -4.0 / 9, -4.0 / 9, 1.0 / 9, -8.0 / 9, -4.0 / 9, -8.0 / 9, 1.0 / 9})
+	tol := math.Sqrt(eps())
+	for _, tc := range []struct {
+		removed float64
+		atOne   bool
+	}{
+		{-0.5, true},
+		{0.5, false},
+		{-1, true},
+	} {
+		var tmp, a, b, c mat.Dense
+		tmp.Mul(q, mat.NewDense(3, 3, []float64{1, 0.7, 0.2, 0, 0.6, 0.3, 0, 0, tc.removed}))
+		a.Mul(&tmp, q.T())
+		b.Mul(q, mat.NewDense(3, 1, []float64{1, 1, 0}))
+		c.Mul(mat.NewDense(1, 3, []float64{1, -0.5, 2}), q.T())
+		sys, err := New(&a, &b, &c, mat.NewDense(1, 1, nil), 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, opts := range []*ReduceOpts{{}, {Equalize: true}} {
+			red, _ := bandStaircaseCut(t, sys, opts)
+			_, mp, ok := axisProbes(sys, nil)
+			if !ok {
+				t.Fatal("eigenvalues did not converge")
+			}
+			win, ok := sharedPoleWindows(mp, red, tol)
+			if !ok {
+				t.Fatal("cut eigenvalues did not converge")
+			}
+			evR, betaR, _ := eigenRoundingBounds(red.A)
+			for j, lg := range mp.evals {
+				want := false
+				for i, lr := range evR {
+					d := cmplx.Abs(mp.foot[j] - lg)
+					if cmplx.Abs(lr-lg) < 1e-12 && d <= mp.beta[j]+betaR[i] {
+						want = true
+					}
+				}
+				if win.axisShared[j] != want {
+					t.Errorf("removed %g eq=%v: pole %v axisShared %v, want %v", tc.removed, opts.Equalize, lg, win.axisShared[j], want)
+				}
+				switch {
+				case math.Abs(real(lg)-1) < 1e-9 && win.axisShared[j] != tc.atOne:
+					t.Errorf("removed %g eq=%v: integrator %v axisShared %v, want %v", tc.removed, opts.Equalize, lg, win.axisShared[j], tc.atOne)
+				case math.Abs(real(lg)+1) < 1e-9 && (win.axisShared[j] || !mp.hidden[j]):
+					t.Errorf("removed %g eq=%v: dropped pole %v axisShared %v hidden %v", tc.removed, opts.Equalize, lg, win.axisShared[j], mp.hidden[j])
+				}
+			}
+		}
+	}
+}

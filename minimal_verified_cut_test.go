@@ -101,22 +101,26 @@ func TestReduceReturnsModelWhenCutUnverifiable(t *testing.T) {
 // stored model's exact response (Reduce's contract), so the order is kept
 // and the exact oracle refutes the cut (the continuous integrator at s = 0;
 // the discrete integrator at z = 1 and the mode at z = −1, HO6UP6). A
-// rotated cut that keeps the integrator may be refused too, where the data
-// place the model's pole off the axis and the oracle refutes the cut
-// beside it; then the oracle must refute it.
+// rotated cut that keeps the integrator is refused too where the data
+// place the model's pole off the axis by more than the model's and the
+// cut's rounding bounds on it, β_G + β_R (NGG5TW ruling 4(c)): the rotated
+// discrete model with the removed pole at 0.5 stores its integrator 1.78e-15
+// from z = 1 against β_G + β_R ≤ 1.15e-15 on both arches, and the oracle
+// refutes the cut beside it.
 func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 	q := mat.NewDense(3, 3, []float64{7.0 / 9, -4.0 / 9, -4.0 / 9, -4.0 / 9, 1.0 / 9, -8.0 / 9, -4.0 / 9, -8.0 / 9, 1.0 / 9})
 	for _, tc := range []struct {
-		name string
-		d    [3]float64
-		dt   float64
+		name     string
+		d        [3]float64
+		dt       float64
+		rotOrder int
 	}{
-		{"discrete kept integrator, removed 0.5", [3]float64{1, 0.6, 0.5}, 0.1},
-		{"discrete kept integrator, removed -0.5", [3]float64{1, 0.6, -0.5}, 0.1},
-		{"discrete kept integrator, removed -1", [3]float64{1, 0.6, -1}, 0.1},
-		{"discrete removed integrator", [3]float64{0.5, 0.6, 1}, 0.1},
-		{"continuous kept integrator, removed -3", [3]float64{0, -1, -3}, 0},
-		{"continuous removed integrator", [3]float64{-2, -1, 0}, 0},
+		{"discrete kept integrator, removed 0.5", [3]float64{1, 0.6, 0.5}, 0.1, 3},
+		{"discrete kept integrator, removed -0.5", [3]float64{1, 0.6, -0.5}, 0.1, 2},
+		{"discrete kept integrator, removed -1", [3]float64{1, 0.6, -1}, 0.1, 3},
+		{"discrete removed integrator", [3]float64{0.5, 0.6, 1}, 0.1, 3},
+		{"continuous kept integrator, removed -3", [3]float64{0, -1, -3}, 0, 2},
+		{"continuous removed integrator", [3]float64{-2, -1, 0}, 0, 3},
 	} {
 		for _, rot := range []bool{false, true} {
 			// The third state is uncontrollable: no input reaches it.
@@ -144,8 +148,7 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s rot=%v: %v", tc.name, rot, err)
 				}
-				dropsAxisPole := tc.d[2] == 0 || math.Abs(tc.d[2]) == 1
-				if rot && (dropsAxisPole || res.Order == 3) {
+				if rot && tc.rotOrder == 3 {
 					if res.Order != 3 {
 						t.Errorf("%s rot=%v eq=%v: order %d, want 3", tc.name, rot, opts.Equalize, res.Order)
 					}
