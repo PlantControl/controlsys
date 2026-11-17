@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // contractSweepAtPoles is the largest exact |G−R|/(tol·max(scale, terms))
@@ -208,6 +210,46 @@ func TestReduceAcceptedCutMatchesStoredModelAtAxisPoles(t *testing.T) {
 		}
 		if _, arch, ok := strings.Cut(name, "@"); ok && arch == runtime.GOARCH && !wrong {
 			t.Errorf("%s: no staircase cut outside the contract", name)
+		}
+	}
+}
+
+// TestReduceBandJudgesOrderZeroCutBesideAxisPole checks the band on an
+// order-0 cut of a model with a pole within rounding of the axis (HO6UP6):
+// the Hadamard-rotated discrete model of an uncontrollable integrator and
+// an unobservable 0.5, whose transfer function is exactly zero. The cut
+// has no poles and so no windows; the double-double judgement of the
+// hidden integrator must not panic, and a cut Reduce accepts must be
+// within its contract. (The band refuses it, as on main: the model's
+// response is rounding everywhere, so no point verifies the cut.)
+func TestReduceBandJudgesOrderZeroCutBesideAxisPole(t *testing.T) {
+	Ar, Br, Cr := hadamardSimilarity(
+		mat.NewDense(2, 2, []float64{1, 0.25, 0, 0.5}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}), 0, 1)
+	sys, err := New(Ar, Br, Cr, mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, poles, ok := axisProbes(sys, nil)
+	if !ok {
+		t.Fatal("eigenvalues did not converge")
+	}
+	if !slices.Contains(poles.hidden, true) {
+		t.Fatalf("no hidden pole: %v", poles.evals)
+	}
+	zero, err := zeroOrderResult(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frequencyAxisCutInBand(sys, zero.Sys, nil, math.Sqrt(eps()))
+	res, err := sys.Reduce(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order < 2 {
+		if c, at := contractSweepAtPoles(sys, res.Sys, math.Sqrt(eps())); c > 1 {
+			t.Errorf("order %d off by %.3g·tol·max(scale, terms) at %v", res.Order, c, at)
 		}
 	}
 }

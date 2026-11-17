@@ -902,7 +902,7 @@ var axisPoleExempt = true
 // slow band where the cut is wrong. False when the eigenvalues of red do not
 // converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
-	var w poleWindows
+	w := poleWindows{modelShared: make([]bool, len(mp.evals))}
 	nr, _, _ := red.Dims()
 	if nr == 0 {
 		return w, true
@@ -917,7 +917,6 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		rho0R = math.Hypot(rho0R, a)
 	}
 	rho0R *= float64(nr) * eps()
-	w.modelShared = make([]bool, len(mp.evals))
 	var with []int
 	for i, lr := range evR {
 		shared, ok, rad, lim, hidden := false, true, betaR[i], math.Inf(1), false
