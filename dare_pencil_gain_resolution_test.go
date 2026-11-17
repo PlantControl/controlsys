@@ -136,3 +136,69 @@ func TestPencilGainResolved(t *testing.T) {
 		}
 	}
 }
+
+// TestDarePencilGainIllConditionedWRejected: with R of condition 2e12 and
+// B's columns 1% apart, W = R + BᵀXB is ill-conditioned while BᵀXB does
+// not round R away (rLost false) and the inputs are not reduced. The
+// certificate of pencilGainResolved cannot bound the float64 gain there,
+// not even for the 320-bit X and K, though Cholesky factors W; Dare takes
+// the fallback and returns a K within gainFloor of the 320-bit gain, else
+// Accuracy 1.
+func TestDarePencilGainIllConditionedWRejected(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0.6, 0.4, -0.2, -0.3, 0.5, 0.5, 0.1, -0.6, 0.4})
+	B := mat.NewDense(3, 2, []float64{1e-4, 1.01e-4, -0.4e-4, -0.38e-4, 0.3e-4, 0.29e-4})
+	Q := mat.NewDense(3, 3, []float64{2, 0.3, 0.1, 0.3, 1.5, -0.2, 0.1, -0.2, 1})
+	R := mat.NewDense(2, 2, []float64{1, 1 - 1e-12, 1 - 1e-12, 1})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, nil, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("reference not certified")
+	}
+	if red, _ := reduceInputs(A, B, Q, R, nil); red != nil || rLost(B, R, ref.X) {
+		t.Fatal("case left the non-rLost exit of the given inputs")
+	}
+	var bx, w mat.Dense
+	bx.Mul(B.T(), ref.X)
+	w.Mul(&bx, B)
+	w.Add(&w, R)
+	var ch mat.Cholesky
+	if !ch.Factorize(mat.NewSymDense(2, w.RawMatrix().Data)) {
+		t.Fatal("W not factored")
+	}
+	if pencilGainResolved(A, B, R, nil, &RiccatiResult{X: ref.X, K: ref.K}) {
+		t.Error("320-bit gain resolved at ill-conditioned W")
+	}
+	sr, err := dareSolve(A, B, Q, R, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pencilGainResolved(A, B, R, nil, sr) {
+		t.Error("pencil gain resolved at ill-conditioned W")
+	}
+	res, err := Dare(A, B, Q, R, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d mat.Dense
+	d.Sub(res.K, ref.K)
+	if e := mat.Norm(&d, 1) / mat.Norm(ref.K, 1); res.accuracy == 0 && !(e <= gainFloor) {
+		t.Errorf("Accuracy 0 K %.3g off the 320-bit gain", e)
+	}
+}
+
+// TestPencilGainResolvedRejectsUnderflow: with X = 2e-323·I, BᵀX
+// underflows to zero, so the computed residual and its magnitudes of a
+// zero K vanish though the gain W⁻¹BᵀXA is not zero. The bound of
+// 4(n + m)·eps·(1 + cond₁(W)) accepted it; the certificate rejects a
+// product of nonzero factors below the normal range.
+func TestPencilGainResolvedRejectsUnderflow(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0.9, 0.4, -0.2, -0.3, 0.7, 0.5, 0.1, -0.6, 0.8})
+	B := mat.NewDense(3, 2, []float64{0.1, 0.02, -0.04, 0.1, 0.03, -0.05})
+	R := mat.NewDense(2, 2, []float64{1, 0.1, 0.1, 2})
+	X := mat.NewDense(3, 3, []float64{2e-323, 0, 0, 0, 2e-323, 0, 0, 0, 2e-323})
+	if pencilGainResolved(A, B, R, nil, &RiccatiResult{X: X, K: mat.NewDense(2, 3, nil)}) {
+		t.Error("zero K resolved from an underflowed residual")
+	}
+	if !pencilGainResolved(A, B, R, nil, &RiccatiResult{X: mat.NewDense(3, 3, nil), K: mat.NewDense(2, 3, nil)}) {
+		t.Error("zero K of zero X not resolved")
+	}
+}
