@@ -349,14 +349,11 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 		return dd.judge(full, cut, s)
 	}
 	for k, s := range pts {
-		if verified[k] || !win.strictlyJudged(s) {
+		if verified[k] || win.contain(s) && !win.strictlyJudged(s) {
 			continue
 		}
-		switch judge(s) {
-		case probeReject:
+		if judge(s) == probeReject {
 			return false
-		case probeVerified:
-			verified[k] = true
 		}
 	}
 	for j, ev := range mp.evals {
