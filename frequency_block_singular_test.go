@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math/big"
 	"math/rand/v2"
 	"testing"
 )
@@ -152,4 +153,57 @@ func unitVec(n int) []float64 {
 	v := make([]float64, n)
 	v[0] = 1
 	return v
+}
+
+// A determinant that is a nonzero multiple of the prime vanishes mod p: the
+// filter must stay undecided and the fraction-free solve still proves the
+// block nonsingular (Fable 2026-11-16, FKYKOG).
+func TestExactNonsingularModPDeterminantMultipleOfPrime(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 23))
+	for _, n := range []int{1, 2, 5, 9} {
+		lo, up := make([]*big.Int, n*n), make([]*big.Int, n*n)
+		for i := range n {
+			for j := range n {
+				lo[i*n+j], up[i*n+j] = new(big.Int), new(big.Int)
+				switch {
+				case i == j:
+					lo[i*n+j].SetInt64(1)
+					up[i*n+j].SetInt64(1)
+				case i > j:
+					lo[i*n+j].SetInt64(int64(rng.IntN(9) - 4))
+				default:
+					up[i*n+j].SetInt64(int64(rng.IntN(9) - 4))
+				}
+			}
+		}
+		for j := range n {
+			lo[j*n].Mul(lo[j*n], new(big.Int).SetUint64(modPPrime))
+		}
+		w := n + 1
+		a := make([]*big.Int, n*w)
+		for i := range n {
+			for j := range n {
+				s := new(big.Int)
+				for k := range n {
+					s.Add(s, new(big.Int).Mul(lo[i*n+k], up[k*n+j]))
+				}
+				a[i*w+j] = s
+			}
+			a[i*w+n] = big.NewInt(int64(i + 1))
+		}
+		if exactNonsingularModP(a, n, w) {
+			t.Fatalf("n=%d: filter claims nonsingular where det ≡ 0 mod p", n)
+		}
+		y := make([]*big.Int, n)
+		for i := range y {
+			y[i] = new(big.Int)
+		}
+		det, ok := bareissSolve(a, y, n, 1, new(big.Int))
+		if !ok {
+			t.Fatalf("n=%d: Bareiss reports singular", n)
+		}
+		if want := new(big.Int).SetUint64(modPPrime); new(big.Int).Abs(det).Cmp(want) != 0 {
+			t.Errorf("n=%d: |det| = %v, want %v", n, det, want)
+		}
+	}
 }
