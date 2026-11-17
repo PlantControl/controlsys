@@ -1044,7 +1044,12 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // R (rLost), a K of the given inputs whose gain the rounding of X to float64 may move, by
 // ‖W⁻¹‖‖Bᵀ‖‖A − BK‖·eps‖X‖ with W = R + BᵀXB, beyond 1e-6 of ‖K‖
 // together with its distance from the gain of X (gainResolved), else it
-// is returned with ErrAccuracyUnverified.
+// is returned with ErrAccuracyUnverified. Where BᵀXB leaves R (rLost
+// false), the pencil K is held to the same bound, its distance bounded in
+// float64 (pencilGainResolved) else measured in double-double: with ‖X‖
+// 1e6 to 1e8 from a stable mode B does not reach, it was 2e-5 to 3.5e-4
+// off the 320-bit gain (band 1.5e-6 to 3.1e-5) at Accuracy 0, the Hewer
+// gain exact (HFGUNG).
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare). With E better
@@ -1167,8 +1172,18 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if red == nil {
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
 		n, m := B.Dims()
-		if err != nil || res.accuracy != 0 || n == 0 || m == 0 || !rLost(B, R, res.X) {
+		if err != nil || res.accuracy != 0 || n == 0 || m == 0 {
 			return res, err
+		}
+		if !rLost(B, R, res.X) {
+			if res.channelLost || res.xe != nil || pencilGainResolved(A, B, R, opts, res) {
+				return res, nil
+			}
+			if r, _, ok := resolvedGain(A, B, Q, R, opts, res, gainMissIn(A, B, R, opts, nil, res)); ok {
+				return r, nil
+			}
+			res.accuracy = 1
+			return res, nil
 		}
 		if r, _, ok := gainOfX(A, B, Q, R, opts, nil, res); ok {
 			return r, nil
@@ -1973,6 +1988,130 @@ func gainResolved(A, B, R *mat.Dense, res *RiccatiResult, miss float64) bool {
 		return false
 	}
 	return miss+(mat.Norm(&t, 1)+q*miss*nk)/((1-q)*nk) <= gainFloor
+}
+
+// pencilGainResolved is gainResolved of res with miss bounded in float64
+// from above, in one pass with no double-double gain, which cost Dare 21%
+// at n = 10: miss is at most the distance gainMissIn measures, that of
+// res.K from the gain K̂ = W⁻¹(BᵀXA + Sᵀ), W = R + BᵀXB, of its X and of
+// its Newton iterate x1 relative to ‖K̂‖₁, as d/(1 − d) for d the distance
+// from the float64 gain plus 4(n + m)·eps·(1 + cond₁(W)) times
+// ‖|W⁻¹|((|R| + |Bᵀ||X||B|)|K| + |Bᵀ||X||A| + |S|ᵀ)‖₁, the componentwise
+// condition of ddGain, over ‖K‖₁.
+func pencilGainResolved(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) bool {
+	nk := mat.Norm(res.K, 1)
+	if nk == 0 {
+		return false
+	}
+	n, m := B.Dims()
+	S := crossTerm(opts)
+	ws := make([]float64, 3*n*n+10*m*n+5*m*m)
+	take := func(r, c int) blas64.General {
+		g := blas64.General{Rows: r, Cols: c, Stride: c, Data: ws[: r*c : r*c]}
+		ws = ws[r*c:]
+		return g
+	}
+	absTo := func(dst, src blas64.General) blas64.General {
+		for i := range dst.Rows {
+			for j := range dst.Cols {
+				dst.Data[i*dst.Stride+j] = math.Abs(src.Data[i*src.Stride+j])
+			}
+		}
+		return dst
+	}
+	norm1 := func(g blas64.General) float64 {
+		v := 0.0
+		for j := range g.Cols {
+			c := 0.0
+			for i := range g.Rows {
+				c += math.Abs(g.Data[i*g.Stride+j])
+			}
+			v = max(v, c)
+		}
+		return v
+	}
+	a, b, k, r := A.RawMatrix(), B.RawMatrix(), res.K.RawMatrix(), R.RawMatrix()
+	aa, ab, ak, ar := absTo(take(n, n), a), absTo(take(n, m), b), absTo(take(m, n), k), absTo(take(m, m), r)
+	ax, acl := take(n, n), take(n, n)
+	bx, abx, rhs, p, kf := take(m, n), take(m, n), take(m, n), take(m, n), take(m, n)
+	g, pg, t := take(m, n), take(m, n), take(m, n)
+	w, wa, u, wi := take(m, m), take(m, m), take(m, m), take(m, m)
+	of := func(X *mat.Dense) float64 {
+		x := X.RawMatrix()
+		absTo(ax, x)
+		blas64.Gemm(blas.Trans, blas.NoTrans, 1, b, x, 0, bx)
+		blas64.Gemm(blas.Trans, blas.NoTrans, 1, ab, ax, 0, abx)
+		for i := range m {
+			copy(w.Data[i*m:i*m+m], r.Data[i*r.Stride:])
+		}
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, bx, b, 1, w)
+		copy(wa.Data, ar.Data)
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, abx, ab, 1, wa)
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, bx, a, 0, rhs)
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, abx, aa, 0, p)
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, wa, ak, 1, p)
+		if S != nil {
+			sr := S.RawMatrix()
+			for i := range n {
+				for j := range m {
+					v := sr.Data[i*sr.Stride+j]
+					rhs.Data[j*n+i] += v
+					p.Data[j*n+i] += math.Abs(v)
+				}
+			}
+		}
+		copy(wi.Data, w.Data)
+		if !impl.Dpotrf(blas.Upper, m, wi.Data, m) || !impl.Dpotri(blas.Upper, m, wi.Data, m) {
+			return math.Inf(1)
+		}
+		for i := range m {
+			for j := range i {
+				wi.Data[i*m+j] = wi.Data[j*m+i]
+			}
+		}
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, wi, rhs, 0, kf)
+		dk, e := 0.0, 0.0
+		for j := range n {
+			cd, ce := 0.0, 0.0
+			for i := range m {
+				cd += math.Abs(k.Data[i*k.Stride+j] - kf.Data[i*n+j])
+				for l := range m {
+					ce += math.Abs(wi.Data[i*m+l]) * p.Data[l*n+j]
+				}
+			}
+			dk, e = max(dk, cd), max(e, ce)
+		}
+		c := float64(4*(n+m)) * eps() * (1 + norm1(w)*norm1(wi))
+		return (dk + c*e) / nk
+	}
+	d := 0.0
+	if res.x1 != nil {
+		d = of(res.x1)
+	}
+	d = max(d, of(res.X))
+	if !(d < 1) {
+		return false
+	}
+	miss := d / (1 - d)
+	blas64.Gemm(blas.NoTrans, blas.Trans, 1, wi, b, 0, g)
+	absTo(g, g)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, eps(), g, ax, 0, pg)
+	for i := range n {
+		for j := range n {
+			v := a.Data[i*a.Stride+j]
+			for l := range m {
+				v -= b.Data[i*b.Stride+l] * k.Data[l*k.Stride+j]
+			}
+			acl.Data[i*n+j] = math.Abs(v)
+		}
+	}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, pg, acl, 0, t)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, pg, ab, 0, u)
+	q := norm1(u)
+	if !(q < 1) {
+		return false
+	}
+	return miss+(norm1(t)+q*miss*nk)/((1-q)*nk) <= gainFloor
 }
 
 // rotatedHewer returns c, a rotated-input K gainOfX refined from p at
