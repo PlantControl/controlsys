@@ -197,3 +197,5 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"new_task","ts":"2026-11-17T16:55:07.72905Z","data":{"id":"BSORLL","uuid":"0fe27f53-1488-4e99-a42a-8fb8e0693ac4","epic_id":"","state":"todo","title":"LOW: ddGain ok=false at K=0 makes gainMissIn +Inf","body":"From HFGUNG (#541). ddGain returns ok=false at K=0 so gainMissIn gives +Inf. Repro X=0, A=[.5 .1;-.2 .3], B=[1;.5], R=1. riccati.go ddGain/gainMissIn; may hit gainOfX sites with zero gain.\n","created_at":"2026-11-17T16:55:07.72905Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"new_task","ts":"2026-11-17T16:55:07.749171Z","data":{"id":"AHJYVO","uuid":"69950906-9c0c-45cd-add7-f3e5d312d8c3","epic_id":"","state":"todo","title":"EDGE: audit Dare reduced-input exit coverage","body":"From HFGUNG (#541). Dare reduced-input exit (!(sigma^2||X|| \u003e ||R||)) unaudited: 460 probe rows reached it, none wrong; weak coverage. Audit with targeted hunt.\n","created_at":"2026-11-17T16:55:07.749171Z"}}]}
