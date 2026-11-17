@@ -308,6 +308,7 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
 	bad := sys.zpkModelRows(zpk, tfResult.RowDegrees)
+	descBad := sys.IsDescriptor() && !sys.HasDelay() && sys.LFT == nil && !descriptorZPKVerified(sys, tfResult.TF, zpk)
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
 	res := &ZPKResult{
@@ -317,6 +318,9 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	}
 	if bad >= 0 {
 		return res, fmt.Errorf("ZPKModel: output %d: zero-pole-gain form not verified against the model's response: %w", bad, ErrAccuracyUnverified)
+	}
+	if descBad {
+		return res, fmt.Errorf("ZPKModel: zero-pole-gain form not verified against the descriptor pencil's response: %w", ErrAccuracyUnverified)
 	}
 	return res, nil
 }

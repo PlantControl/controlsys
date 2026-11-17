@@ -1277,3 +1277,14 @@ func ldexpNeg(x float64, e int) float64 {
 	}
 	return math.Ldexp(x, -e)
 }
+
+// descriptorZPKVerified reports whether z, the zero-pole-gain form of tf
+// (TransferFunc.ZPK), verifies against the descriptor sys by the
+// certificate of descriptorTFVerified with z in place of tf's
+// coefficients: z evaluated by zpkEvalBounded at the points of tf's roots,
+// which are z's, with tf's windows, verified count and verdict at ∞, z's
+// gain and degree excess being tf's.
+func descriptorZPKVerified(sys *System, tf *TransferFunc, z *ZPK) bool {
+	v, _, _ := descriptorJudgeWhy(sys, tf, zpkRows{z}, newPencilCache())
+	return v
+}

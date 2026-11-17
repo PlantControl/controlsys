@@ -592,11 +592,58 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 // judgeDescriptorTFCached is judgeDescriptorTF taking exact evaluations of
 // open points from c (nil: none cached).
 func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
+	return judgeDescriptorCached(sys, tfRows{tf}, pts, full, win, c)
+}
+
+// descriptorRows evaluates a model judged against a descriptor's pencil
+// response (judgeDescriptorCached): at returns row i of the model at s in
+// r with the rounding magnitudes mag, |r̂_j − r_j| ≤ 4ε·mag_j, false where
+// the row is not finite at s.
+type descriptorRows interface {
+	at(i int, s complex128, r []complex128, mag []float64) bool
+}
+
+// tfRows evaluates a transfer function from its float64 coefficients as
+// returned, numerator and denominator at exactCertPrec bits, divided:
+// mag = |r| covers the three roundings.
+type tfRows struct{ tf *TransferFunc }
+
+func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
+	dv := floatPolyAt(t.tf.Den[i], s)
+	if dv == 0 {
+		return false
+	}
+	for j := range r {
+		r[j] = floatPolyAt(t.tf.Num[i][j], s) / dv
+		mag[j] = cmplx.Abs(r[j])
+	}
+	return true
+}
+
+// zpkRows evaluates a zero-pole-gain model by zpkEvalBounded: mag is its
+// error bound over 4ε.
+type zpkRows struct{ z *ZPK }
+
+func (zr zpkRows) at(i int, s complex128, r []complex128, mag []float64) bool {
+	for j := range r {
+		v, b, ok := zpkEvalBounded(zr.z.Zeros[i][j], zr.z.Poles[i][j], zr.z.Gain[i][j], s)
+		if !ok {
+			return false
+		}
+		r[j], mag[j] = v, b/(4*eps())
+	}
+	return true
+}
+
+// judgeDescriptorCached is judgeDescriptorTFCached for any model rows
+// evaluate, with the bound 4ε·|tf| replaced by 4ε·mag.
+func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
 	_, m, p := sys.Dims()
 	tol := math.Sqrt(eps())
 	pm := p * m
 	out := make([]descriptorTFPoint, len(pts))
 	r := make([]complex128, m)
+	mag := make([]float64, m)
 	for k, s := range pts {
 		if !full.ok[k] || !(full.eta[k] < 1) {
 			continue
@@ -605,14 +652,12 @@ func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, fu
 		var ur, ui [][]*big.Rat
 		exact := false
 		for i := range p {
-			dv := floatPolyAt(tf.Den[i], s)
-			if dv == 0 {
+			if !rows.at(i, s, r, mag) {
 				jp.verified = false
 				break
 			}
 			scale := 0.0
 			for j := range m {
-				r[j] = floatPolyAt(tf.Num[i][j], s) / dv
 				g := full.g[k*pm+i*m+j] + complex(sys.D.At(i, j), 0)
 				scale = math.Max(scale, math.Max(cmplx.Abs(r[j]), cmplx.Abs(g)))
 			}
@@ -621,7 +666,7 @@ func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, fu
 				d := math.Abs(sys.D.At(i, j))
 				g := full.g[e] + complex(sys.D.At(i, j), 0)
 				diff := cmplx.Abs(g - r[j])
-				delta := full.comp[e] + eps()*(cmplx.Abs(g)+d) + 4*eps()*cmplx.Abs(r[j])
+				delta := full.comp[e] + eps()*(cmplx.Abs(g)+d) + 4*eps()*mag[j]
 				T, dT := full.terms[e], full.dTer[e]
 				ver := diff+delta <= tol*math.Max(scale, T-dT)
 				thr := tol*math.Max(scale, T+dT) + full.data[e]
@@ -640,7 +685,7 @@ func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, fu
 					if ur != nil {
 						g, T = exactEntry(sys, ur, ui, i, j)
 						diff = cmplx.Abs(g - r[j])
-						delta = 4 * eps() * (cmplx.Abs(g) + cmplx.Abs(r[j]) + T)
+						delta = 4 * eps() * (cmplx.Abs(g) + mag[j] + T)
 						ver = diff+delta <= tol*math.Max(scale, T)
 						thr = tol*math.Max(scale, T) + full.data[e]
 						ref = diff-delta > thr
@@ -809,6 +854,13 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 // not verified: the refuting point and its worst ratio, the point at ∞,
 // or the verified count short of the need. It is a diagnostic only.
 func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, []int, string) {
+	return descriptorJudgeWhy(sys, tf, tfRows{tf}, c)
+}
+
+// descriptorJudgeWhy is descriptorTFJudgeWhy judging the model rows
+// evaluates, with tf's roots, orders, windows and verdict at ∞: rows is tf
+// itself or a form with tf's roots and orders.
+func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *pencilCache) (bool, []int, string) {
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
 		return true, nil, ""
@@ -834,7 +886,7 @@ func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, 
 		if len(pts) == 0 {
 			return true
 		}
-		for k, jp := range judgeDescriptorTFCached(sys, tf, pts, c.response(sys, pts), win, c) {
+		for k, jp := range judgeDescriptorCached(sys, rows, pts, c.response(sys, pts), win, c) {
 			if jp.refuted {
 				refuted = jp.refutedEntries
 				why = fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", pts[k], jp.worst, jp.refutedEntries)
@@ -866,7 +918,7 @@ func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, 
 			if !full.ok[0] || !(full.eta[0] < 1) {
 				continue
 			}
-			jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
+			jp := judgeDescriptorCached(sys, rows, []complex128{s}, full, win, c)[0]
 			if jp.refuted {
 				return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
 			}
@@ -905,7 +957,7 @@ func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, 
 		if !full.ok[0] || !(full.eta[0] < 1) {
 			continue
 		}
-		jp := judgeDescriptorTFCached(sys, tf, []complex128{s}, full, win, c)[0]
+		jp := judgeDescriptorCached(sys, rows, []complex128{s}, full, win, c)[0]
 		if jp.refuted {
 			return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
 		}
