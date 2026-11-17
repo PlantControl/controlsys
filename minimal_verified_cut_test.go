@@ -93,13 +93,17 @@ func TestReduceReturnsModelWhenCutUnverifiable(t *testing.T) {
 
 // An exact axis pole, kept or removed, puts probes where both responses
 // are rounding noise (a kept integrator that the rotated cut carries only
-// to rounding); the correct cut must still be accepted. The rotated
-// continuous model with a removed integrator is the exception: rotation
-// leaves the integrator uncontrollable only to rounding, the stored model
-// carries a rounding-level residue on a pole within rounding of s = 0, and
-// the cut that drops it is off by O(1) of the response at s = 0 against
-// the stored model's exact response (Reduce's contract), so the order is
-// kept and the exact oracle refutes the cut there.
+// to rounding); the correct cut must still be accepted. A rotated model
+// whose cut drops a pole on the axis is the exception: rotation leaves the
+// pole uncontrollable only to rounding, the stored model carries a
+// rounding-level residue on a pole within rounding of the axis, and the
+// cut that drops it is off by O(1) of the response there against the
+// stored model's exact response (Reduce's contract), so the order is kept
+// and the exact oracle refutes the cut (the continuous integrator at s = 0;
+// the discrete integrator at z = 1 and the mode at z = −1, HO6UP6). A
+// rotated cut that keeps the integrator may be refused too, where the data
+// place the model's pole off the axis and the oracle refutes the cut
+// beside it; then the oracle must refute it.
 func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 	q := mat.NewDense(3, 3, []float64{7.0 / 9, -4.0 / 9, -4.0 / 9, -4.0 / 9, 1.0 / 9, -8.0 / 9, -4.0 / 9, -8.0 / 9, 1.0 / 9})
 	for _, tc := range []struct {
@@ -140,15 +144,14 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s rot=%v: %v", tc.name, rot, err)
 				}
-				if rot && tc.dt == 0 && tc.d[2] == 0 {
+				dropsAxisPole := tc.d[2] == 0 || math.Abs(tc.d[2]) == 1
+				if rot && (dropsAxisPole || res.Order == 3) {
 					if res.Order != 3 {
 						t.Errorf("%s rot=%v eq=%v: order %d, want 3", tc.name, rot, opts.Equalize, res.Order)
 					}
 					red, _ := bandStaircaseCut(t, sys, opts)
-					g, r, tg := oracleStrictlyProper(sys, 0), oracleStrictlyProper(red, 0), oracleTerms(sys, 0)
-					scale := math.Max(math.Max(oracleDist(g[0], oracleOf(0)), oracleDist(r[0], oracleOf(0))), tg[0])
-					if d := oracleDist(g[0], r[0]); !(d > math.Sqrt(eps())*scale) {
-						t.Errorf("%s rot=%v eq=%v: cut off by %.3g at s = 0, within tol·max(scale, terms)", tc.name, rot, opts.Equalize, d)
+					if c, at := contractSweepAtPoles(sys, red, math.Sqrt(eps())); !(c > 1) {
+						t.Errorf("%s rot=%v eq=%v: refused cut off by %.3g·tol·max(scale, terms) at %v, within the contract", tc.name, rot, opts.Equalize, c, at)
 					}
 					continue
 				}
@@ -168,11 +171,13 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 }
 
 // The rotated discrete model with a kept integrator and a removed pole at
-// −1 (TestReduceAcceptsCutBesideExactAxisPole), frozen: under exact
-// power-of-two Equalize scaling the integrator's window probe at θ = √ε
-// has both responses determined to 3e-8 but their real parts are rounding
-// of the 1.8e8 imaginary part, which a δ_R-blind heuristic rejected.
-func TestReduceEqualizeAcceptsCutInsideAxisPoleWindow(t *testing.T) {
+// −1 (TestReduceAcceptsCutBesideExactAxisPole), frozen. Equalize once
+// accepted its cut to order 2 (a δ_R-blind heuristic had rejected the
+// integrator's window probe at θ = √ε): the cut drops the pole at −1, which
+// rotation leaves uncontrollable only to rounding and within rounding of
+// z = −1, and is 4e7·tol off there against the stored model (HO6UP6), so
+// the order is kept.
+func TestReduceEqualizeRefusesCutDroppingPoleAtMinusOne(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{
 		0.27407407407407414, -0.7296296296296296, -0.5407407407407407,
 		-0.6074074074074074, -0.5703703703703703, 0.5074074074074073,
@@ -184,20 +189,17 @@ func TestReduceEqualizeAcceptsCutInsideAxisPoleWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := sys.Reduce(&ReduceOpts{Equalize: true})
+	opts := &ReduceOpts{Equalize: true}
+	res, err := sys.Reduce(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Order != 2 {
-		t.Fatalf("order %d, want 2", res.Order)
+	if res.Order != 3 {
+		t.Errorf("order %d, want 3", res.Order)
 	}
-	for _, th := range []float64{0x1p-26, 1e-4, 0.7, 2, 3} {
-		s := cmplx.Rect(1, th)
-		g, _ := sys.EvalFr(s)
-		r, _ := res.Sys.EvalFr(s)
-		if d := cmplx.Abs(g[0][0] - r[0][0]); d > 1e-6*cmplx.Abs(g[0][0]) {
-			t.Errorf("θ=%g: |G-R| = %g, |G| = %g", th, d, cmplx.Abs(g[0][0]))
-		}
+	red, _ := bandStaircaseCut(t, sys, opts)
+	if c, at := contractSweepAtPoles(sys, red, math.Sqrt(eps())); !(c > 1) {
+		t.Errorf("staircase cut off by %.3g·tol·max(scale, terms) at %v, within the contract", c, at)
 	}
 }
 

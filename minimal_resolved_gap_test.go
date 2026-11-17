@@ -132,8 +132,10 @@ func TestReduceResolvedGapSlowCountAtSlowScale(t *testing.T) {
 // TestReduceResolvedGapDiscreteGlobalCount checks that a discrete model
 // takes the global count alone (N3P7NO): fuzz case 4265, whose gap path
 // early-accepted the staircase's order-5 cut on amd64 by the float probe
-// alone, keeps that cut, now verified by the band (deviation 5.6e-14 of
-// the response beyond the model's bound).
+// alone. The order-5 cut, where it is accepted, must be within Reduce's
+// contract of the stored model at and beside its poles; on arm64 it is
+// 1.07·tol off inside a shared-pole window, which the double-double
+// judgement of the window refutes (HO6UP6), so the order is kept there.
 func TestReduceResolvedGapDiscreteGlobalCount(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	var kind uint8
@@ -149,8 +151,14 @@ func TestReduceResolvedGapDiscreteGlobalCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Order != 5 {
-		t.Errorf("order %d, want 5", res.Order)
+	switch res.Order {
+	case 5:
+		if c, at := contractSweepAtPoles(sys, res.Sys, math.Sqrt(eps())); c > 1 {
+			t.Errorf("order 5 cut off by %.3g·tol·max(scale, terms) at %v", c, at)
+		}
+	case 6:
+	default:
+		t.Errorf("order %d, want 5 or 6", res.Order)
 	}
 }
 

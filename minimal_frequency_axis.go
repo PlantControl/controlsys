@@ -61,8 +61,11 @@ import (
 // Nor is the count sufficient when the verified points lie far above a
 // group of poles, a cluster near the axis or unresolved slow poles:
 // poleScalesCovered counts per pole scale. Across a resolved spectral gap
-// frequencyAxisCutAcrossGap adds one count per side of the gap.
-// False also when the eigenvalues of A or of red do not converge.
+// frequencyAxisCutAcrossGap adds one count per side of the gap. A cut
+// that passes is then judged in double-double against the stored model at
+// the points left open and beside the poles within rounding of the axis
+// (judgeNearPoles). False also when the eigenvalues of A or of red do not
+// converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
 	return frequencyAxisCutAcrossGap(sys, red, removed, tol, 0)
 }
@@ -317,28 +320,34 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 }
 
 // judgeNearPoles judges, in complex double-double (ddJudge) against the
-// stored model, the axis points beside the poles that the band's double
-// probes cannot see, for a cut the band would accept; false when one
-// refutes the cut or a hidden pole's side point does not verify it.
+// stored model, the points the band's double bounds left open and the
+// axis points beside the poles its probes cannot see, for a cut the band
+// would accept; false when one refutes the cut or a hidden pole's side
+// point does not verify it. A point it verifies is not counted: the count
+// is the band's.
+//
+// An open probe beside a pole that lies just beyond its reach of the axis
+// is singular to the double solve's precision, as is one inside a window
+// of a pole the data place off the axis, where a cut that moves the pole
+// within its rounding bound β_G (≤ tol·|λ_G|) is wrong beyond tol near it:
+// double-double resolves both, so they are judged, and may refute. Inside
+// the window of a pole within rounding of the axis that the cut shares
+// (axisPoleExempt) the probes keep the band's data slack.
 //
 // A hidden model pole (modelPoles) that no window shares is one the cut
 // drops, or carries only off its location, while the data do not place it
 // off the axis: the stored model's exact pole may lie on the axis, so a
 // rounding-level residue r on it (a rotated uncontrollable or unobservable
-// integrator, z = −1 or e^{jθ} mode) puts r/d into the response at the
-// foot, d the pole's distance from it. axisProbes drops the foot, and a
+// integrator, z = −1, e^{jθ} or ±jω mode) puts r/d into the response at
+// the foot, d the pole's distance from it. axisProbes drops the foot, and a
 // probe at distance D ≫ d bounds r only to tol·D·scale, so the probes at
-// √ε and beyond verify a cut that is O(1) wrong at the foot. In double the
-// solve is singular there to its own precision; double-double resolves
-// the pole to ε² of the data, far inside the reach, so the foot is judged
-// and, at axial distance reach on either side (one side for a real pole,
-// its mirror the conjugate), the side points must verify: where the stored
-// model's residue on the pole is exactly zero the response there is smooth
-// and determined, and where it is not, it is r/reach at the side point.
-// Inside a window the double probes are judged with the data slack; a
-// window that shares no hidden pole is a pole the data place off the axis,
-// so its open probes are judged too and may only refute or verify.
-// With axisPoleExempt false the hidden shared poles and their windows are
+// √ε and beyond verify a cut that is O(1) wrong at the foot. Double-double
+// resolves the pole to ε² of the data, far inside the reach, so the foot is
+// judged and, at axial distance reach on either side (one side for a real
+// pole, its mirror the conjugate), the side points must verify: where the
+// stored model's residue on the pole is exactly zero the response there is
+// smooth and determined, and where it is not, it is r/reach there. With
+// axisPoleExempt false the hidden shared poles and their windows are
 // judged the same way.
 func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []bool, mp modelPoles, win poleWindows, discrete bool, tol float64) bool {
 	var dd *ddJudge
