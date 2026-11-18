@@ -178,25 +178,6 @@ func newPencilBoundedResponse(sys *System, pts []complex128) pencilBoundedResp {
 // the returned coefficients.
 const exactCertPrec = 320
 
-// ratPolyAt evaluates the ascending polynomial c at s by Horner's rule at
-// exactCertPrec bits, rounded to complex128.
-func ratPolyAt(c []*big.Rat, s complex128) complex128 {
-	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
-	sr, si := nw().SetFloat64(real(s)), nw().SetFloat64(imag(s))
-	re, im := nw(), nw()
-	var t1, t2 big.Float
-	t1.SetPrec(exactCertPrec)
-	t2.SetPrec(exactCertPrec)
-	for _, v := range slices.Backward(c) {
-		nr := nw().Sub(t1.Mul(re, sr), t2.Mul(im, si))
-		ni := nw().Add(t1.Mul(re, si), t2.Mul(im, sr))
-		re, im = nr.Add(nr, nw().SetRat(v)), ni
-	}
-	a, _ := re.Float64()
-	b, _ := im.Float64()
-	return complex(a, b)
-}
-
 // bigPolyAt evaluates the descending float64 coefficients c at s by
 // Horner's rule at exactCertPrec bits, unrounded: its exponent range does
 // not overflow where s^deg does in float64.
