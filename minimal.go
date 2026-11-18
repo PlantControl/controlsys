@@ -88,9 +88,16 @@ type ReduceResult struct {
 // the entry's own terms: the stored model's exact response is the
 // reference, and its data resolution is not a tolerance. A nil error with
 // a reduced model R of the stored model G certifies, within the limits of
-// the sampled check below, at every axis point s outside the windows of the poles the two share (there a rounding-level
-// move of either realization's pole changes the response by more than tol,
-// so neither is determined to tol),
+// the sampled check below, at every axis point s outside the windows of
+// the poles within rounding of the axis that the two share (a pole whose
+// nearest axis point lies within the rounding bounds of the model's and the
+// cut's pole; there a rounding-level move of either realization's pole
+// changes the response by more than tol, so neither is determined to tol,
+// the location of such a kept pole is not promised and nothing inside its
+// window is certified; the test is evaluated on the computed eigenvalues,
+// whose error can exceed their rounding bounds, and an error either way
+// only leaves a window uncertified or judges it: it never certifies a
+// point where the cut is wrong),
 //
 //	|G_ij(s) − R_ij(s)| ≤ tol·max(max|G(s)|, max|R(s)|, Σ_l |C_il||X_lj(s)|),
 //
@@ -100,11 +107,16 @@ type ReduceResult struct {
 // poles within rounding of the axis: a cut that keeps one, as a rotated
 // cut keeps a continuous integrator at s = 0 or a discrete one at z = 1
 // only to rounding, is judged outside the window of that shared pole and
-// accepted; a continuous cut that drops one is refused (a rotated
-// realization of an uncontrollable or unobservable integrator, which the
-// stored data leave with a rounding-level residue that is O(1) of the
-// response beside it, keeps that state: order 3 for a rotated third-order
-// model with one uncontrollable integrator); and a cut that moves an exact
+// accepted; a cut that drops one is refused (a rotated realization of an
+// uncontrollable or unobservable mode on the axis, an integrator at s = 0
+// or z = 1, a mode at z = −1, e^{jθ} or ±jω, which the stored data leave
+// with a rounding-level residue that is O(1) of the response beside it,
+// keeps that state: order 3 for a rotated third-order model with one
+// uncontrollable integrator); a cut that moves a shared pole the data
+// place off the axis within that pole's rounding bound is judged against
+// the stored model inside its window too, and refused where it is wrong
+// there (a contract change: such windows were exempt before, and a cut
+// wrong only inside one was accepted); and a cut that moves an exact
 // integrator of the stored model off the axis (a spectral-gap split
 // folding a coupling into it) is refused at every Tol. It is checked at
 // points beside every eigenvalue, on a fixed grid and on a decade grid:

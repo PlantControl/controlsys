@@ -61,8 +61,11 @@ import (
 // Nor is the count sufficient when the verified points lie far above a
 // group of poles, a cluster near the axis or unresolved slow poles:
 // poleScalesCovered counts per pole scale. Across a resolved spectral gap
-// frequencyAxisCutAcrossGap adds one count per side of the gap.
-// False also when the eigenvalues of A or of red do not converge.
+// frequencyAxisCutAcrossGap adds one count per side of the gap. A cut
+// that passes is then judged in double-double against the stored model at
+// the points left open and beside the poles within rounding of the axis
+// (judgeNearPoles). False also when the eigenvalues of A or of red do not
+// converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
 	return frequencyAxisCutAcrossGap(sys, red, removed, tol, 0)
 }
@@ -240,6 +243,9 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 			return false
 		}
 	}
+	if !judgeNearPoles(&full, &cut, pts, isVerified, poles, win, discrete, tol) {
+		return false
+	}
 	return accept()
 }
 
@@ -259,50 +265,300 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 // bound stays open. Points inside a window stay open: there the
 // refutation charges the data bounds, which are not formed here.
 func resolveOpenProbes(full, cut *boundedResponse, pts []complex128, verified []bool, win poleWindows, tol float64) bool {
-	pm := full.p * full.m
-	var w zpkDDWork
-	g, r := make([]zpkEntryBounds, pm), make([]zpkEntryBounds, pm)
+	dd := newDDJudge(full, tol)
 	for k, s := range pts {
 		if verified[k] || !full.ok[k] || !cut.ok[k] || win.contain(s) {
 			continue
 		}
-		if !ddEntryBounds(&full.ev.br, s, &w, g) || !ddEntryBounds(&cut.ev.br, s, &w, r) {
+		switch dd.judge(full, cut, s) {
+		case probeReject:
+			return false
+		case probeVerified:
+			verified[k] = true
+		}
+	}
+	return true
+}
+
+// ddJudge judges a point in complex double-double (resolveOpenProbes),
+// with its buffers.
+type ddJudge struct {
+	w    zpkDDWork
+	g, r []zpkEntryBounds
+	tol  float64
+}
+
+func newDDJudge(full *boundedResponse, tol float64) *ddJudge {
+	pm := full.p * full.m
+	return &ddJudge{g: make([]zpkEntryBounds, pm), r: make([]zpkEntryBounds, pm), tol: tol}
+}
+
+// judge is resolveOpenProbes' verdict at s: uninformative where either
+// double-double solve cannot bound its response.
+func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
+	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) || !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
+		return probeUninformative
+	}
+	return d.verdict()
+}
+
+// refutes reports whether judge rejects at pts[k] of cb, the cut's double
+// response with its bounds. The cut's double-double solve is skipped where
+// cb shows judge cannot reject: with Ĝ the model's double-double response,
+// R̂ the cut's double one, R its exact one and δ_R ≥ |R − R̂| cb's ver
+// bound (rigorous, as a skip must be; comp is first order),
+// |Ĝ−R_dd| − δ_R,dd ≤ |Ĝ−R̂| + δ_R, so no entry is refuted when
+// |Ĝ−R̂| + δ_R − δ_G ≤ tol·max(max|Ĝ|, T_G,hi), T_G,hi its terms' upper
+// bound. The test is tried first on the model's solve stage alone
+// (ddEntrySolve), with comp = 0 and T_G,hi = T̂, either of which only
+// raises its left side or lowers its right: where that passes the full
+// bounds pass too, and their inverse and |L||U| are not formed.
+func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
+	if !ddEntrySolve(&full.ev.br, s, &d.w, d.g) {
+		return false
+	}
+	if d.cutCannotRefute(cb, k, false) {
+		return false
+	}
+	if !ddEntryBoundStage(&full.ev.br, &d.w, d.g) {
+		return false
+	}
+	if d.cutCannotRefute(cb, k, false) || cb != cut && d.cutCannotRefute(cb, k, true) {
+		return false
+	}
+	if !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
+		return false
+	}
+	return d.verdict() == probeReject
+}
+
+// verifies is judge at pts[k] of cb (refutes) for a point that must verify:
+// a verification by the cut's double response with its ver bounds, the
+// model's in double-double, stands without the cut's double-double solve.
+func (d *ddJudge) verifies(full, cut, cb *boundedResponse, k int, s complex128) bool {
+	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) {
+		return false
+	}
+	if d.cutVerifies(cb, k, false) || d.cutVerifies(cb, k, true) {
+		return true
+	}
+	if !ddEntryBounds(&cut.ev.br, s, &d.w, d.r) {
+		return false
+	}
+	return d.verdict() == probeVerified
+}
+
+// cutCannotRefute is refutes' test with cb's bounds at k, sharpened first
+// with sharpen.
+func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool {
+	if !cb.ok[k] || sharpen && cb.sharp[k] {
+		return false
+	}
+	if sharpen {
+		cb.sharpen(k)
+	}
+	g := d.g
+	o := k * len(g)
+	sg := 0.0
+	for i := range g {
+		sg = math.Max(sg, cmplx.Abs(g[i].g))
+	}
+	for i := range g {
+		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.ver[o+i])*(1+8*eps()) - g[i].comp
+		if !(up <= d.tol*math.Max(sg, g[i].hi)*(1-8*eps())) {
+			return false
+		}
+	}
+	return true
+}
+
+// cutVerifies is verdict's verification with cb's response and ver bounds
+// at k for the cut's, sharpened first with sharpen.
+func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
+	if !cb.ok[k] || sharpen && cb.sharp[k] {
+		return false
+	}
+	if sharpen {
+		cb.sharpen(k)
+	}
+	g, tol := d.g, d.tol
+	o := k * len(g)
+	scale := 0.0
+	for i := range g {
+		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(cb.g[o+i])))
+	}
+	for i := range g {
+		lhs := cmplx.Abs(g[i].g-cb.g[o+i]) + g[i].ver + cb.ver[o+i]
+		if !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
+			return false
+		}
+	}
+	return true
+}
+
+// verdict judges the bounds judge formed.
+func (d *ddJudge) verdict() probeVerdict {
+	g, r, tol := d.g, d.r, d.tol
+	scale := 0.0
+	for i := range g {
+		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
+	}
+	v := probeVerified
+	for i := range g {
+		diff := cmplx.Abs(g[i].g - r[i].g)
+		lhs := diff + g[i].ver + r[i].ver
+		if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
 			continue
 		}
-		scale := 0.0
-		for i := range g {
-			scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
+		if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
+			return probeReject
 		}
-		ok := true
-		for i := range g {
-			diff := cmplx.Abs(g[i].g - r[i].g)
-			lhs := diff + g[i].ver + r[i].ver
-			if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
-				continue
+		v = probeUninformative
+	}
+	return v
+}
+
+// judgeNearPoles judges, in complex double-double (ddJudge) against the
+// stored model, the points the band's double bounds left open and the
+// axis points beside the poles its probes cannot see, for a cut the band
+// would accept; false when one refutes the cut or a hidden pole's side
+// point does not verify it. A point it verifies is not counted: the count
+// is the band's.
+//
+// An open probe beside a pole that lies just beyond its reach of the axis
+// is singular to the double solve's precision, as is one inside a window
+// of a pole the data place off the axis, where a cut that moves the pole
+// within its rounding bound β_G (≤ tol·|λ_G|) is wrong beyond tol near it:
+// double-double resolves both, so they are judged, and may refute. Inside
+// the window of a shared pole within rounding of the axis (axisShared:
+// its foot within β_G + β_R of it) the probes keep the band's data slack,
+// and Reduce certifies nothing there: neither the stored model nor the
+// cut places that pole better than its rounding bound. The other shared
+// windows, exempt before, are judged (a contract change).
+//
+// A hidden model pole (modelPoles) that is not axisShared is one the cut
+// drops, carries only off its location, or shares where the data place it
+// off the axis by more than β_G + β_R, while within its reach of the axis:
+// the stored model's exact pole may lie on the axis, so a rounding-level
+// residue r on it (a rotated uncontrollable or unobservable integrator,
+// z = −1, e^{jθ} or ±jω mode) puts r/d into the response at the foot, d
+// the pole's distance from it. axisProbes drops the foot, and a probe at
+// distance D ≫ d bounds r only to tol·D·scale, so the probes at √ε and
+// beyond verify a cut that is O(1) wrong at the foot. Double-double
+// resolves the pole to ε² of the data, far inside the reach, so the foot is
+// judged and, at axial distance reach on either side (one side for a real
+// pole, its mirror the conjugate), the side points must verify: where the
+// stored model's residue on the pole is exactly zero the response there is
+// smooth and determined, and where it is not, it is r/reach there.
+func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []bool, mp modelPoles, win poleWindows, discrete bool, tol float64) bool {
+	var dd *ddJudge
+	judge := func() *ddJudge {
+		if dd == nil {
+			dd = newDDJudge(full, tol)
+		}
+		return dd
+	}
+	for k, s := range pts {
+		if verified[k] || win.contain(s) && !win.strictlyJudged(s) {
+			continue
+		}
+		if judge().refutes(full, cut, cut, k, s) {
+			return false
+		}
+	}
+	var near []complex128
+	var sides []int
+	for j, ev := range mp.evals {
+		if !mp.hidden[j] || imag(ev) < 0 || win.axisShared[j] {
+			continue
+		}
+		foot, d := mp.foot[j], mp.reach[j]
+		near = append(near, foot)
+		if discrete {
+			th := cmplx.Phase(foot)
+			near = append(near, cmplx.Rect(1, th+d))
+			if imag(ev) != 0 {
+				near = append(near, cmplx.Rect(1, th-d))
 			}
-			if diff-g[i].comp-r[i].comp > tol*math.Max(scale, g[i].hi) {
+		} else {
+			near = append(near, complex(0, imag(foot)+d))
+			if imag(ev) != 0 {
+				near = append(near, complex(0, imag(foot)-d))
+			}
+		}
+		sides = append(sides, len(near))
+	}
+	if len(near) == 0 {
+		return true
+	}
+	cb := boundedResponseOf(cut.ev.br, near)
+	defer cb.release()
+	k := 0
+	for _, end := range sides {
+		if judge().refutes(full, cut, &cb, k, near[k]) {
+			return false
+		}
+		for k++; k < end; k++ {
+			if !judge().verifies(full, cut, &cb, k, near[k]) {
 				return false
 			}
-			ok = false
 		}
-		verified[k] = ok
 	}
 	return true
 }
 
 // ddEntryBounds sets e, row-major p×m, to the strictly proper response of
-// br at s with zpkDDResponse's bounds, one output row at a time; false
-// where the double-double solve meets a zero pivot or cannot bound it.
+// br at s with zpkDDResponse's bounds, each output row's as zpkDDResponse
+// forms it alone; false where the double-double solve meets a zero pivot
+// or cannot bound it.
 func ddEntryBounds(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkEntryBounds) bool {
+	if br.p == 0 {
+		return true
+	}
+	if _, ok := zpkDDSolve(br, s, w); !ok {
+		return false
+	}
+	return ddEntryBoundStage(br, w, e)
+}
+
+// ddEntryBoundStage is ddEntryBounds after ddEntrySolve, continuing from
+// the factorization and solution in w: one factorization of sI − Â serves
+// every output row, as the rows share it.
+func ddEntryBoundStage(br *balancedRealization, w *zpkDDWork, e []zpkEntryBounds) bool {
+	n, m := br.n, br.m
+	if !zpkDDBound(n, m, w) {
+		return false
+	}
+	for i := range br.p {
+		for j := range m {
+			var ok bool
+			if e[i*m+j], ok = zpkDDEntryBounds(br.c[i*n:(i+1)*n], w, n, m, j); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ddEntrySolve is ddEntryBounds' solve stage alone: e holds the responses
+// Ĝ, bitwise those ddEntryBounds forms, with comp = 0 and hi = lo = T̂,
+// the terms before their bound is added (T̂ ≤ hi of ddEntryBounds).
+func ddEntrySolve(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkEntryBounds) bool {
+	if br.p == 0 {
+		return true
+	}
+	if _, ok := zpkDDSolve(br, s, w); !ok {
+		return false
+	}
 	n, m := br.n, br.m
 	for i := range br.p {
-		row := *br
-		row.p, row.c = 1, br.c[i*n:(i+1)*n]
-		got, _, ok := zpkDDResponseWork(&row, s, w)
-		if !ok {
-			return false
+		for j := range m {
+			g, t := zpkDDEntry(br.c[i*n:(i+1)*n], w, n, m, j)
+			if cmplx.IsNaN(g) || cmplx.IsInf(g) {
+				return false
+			}
+			e[i*m+j] = zpkEntryBounds{g: g, lo: t, hi: t, determined: true}
 		}
-		copy(e[i*m:(i+1)*m], got)
 	}
 	return true
 }
@@ -597,6 +853,11 @@ func probeWeight(s complex128) int {
 // on a dense matrix and the rounding of its own rows on a graded one. The
 // factor 2 calibrates a Gaussian-dense pole with κ = 1 (n·β_j ≈ ρ₀/2) to
 // ρ₀; on non-stiff census models n·β_j/ρ₀ has quartiles 0.38, 0.75, 2.3.
+//
+// foot is a pole's nearest axis point (z = 1 for λ = 0 on the unit
+// circle), reach its drop radius n·ε·|foot| + ρ_j there, and hidden marks
+// a pole within its reach of the axis, whose nearest axis point
+// axisProbes drops: the data do not place it off the axis.
 type modelPoles struct {
 	evals    []complex128
 	beta     []float64
@@ -604,6 +865,9 @@ type modelPoles struct {
 	rho      []float64
 	norm     float64
 	rho0     float64
+	foot     []complex128
+	reach    []float64
+	hidden   []bool
 }
 
 // axisProbes returns the deduplicated frequency-axis points the cut is
@@ -626,7 +890,9 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	if !ok {
 		return nil, modelPoles{}, false
 	}
-	mp := modelPoles{evals: evals, beta: beta, resolved: make([]bool, len(evals)), rho: make([]float64, len(evals))}
+	ne := len(evals)
+	mp := modelPoles{evals: evals, beta: beta, resolved: make([]bool, ne), rho: make([]float64, ne),
+		foot: make([]complex128, ne), reach: make([]float64, ne), hidden: make([]bool, ne)}
 	norm := 0.0
 	for _, a := range newBalancedRealization(sys, n, m, p).a {
 		norm = math.Hypot(norm, a)
@@ -641,6 +907,16 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 		} else {
 			resolved = false
 		}
+		foot := complex(0, imag(ev))
+		if discrete {
+			foot = 1
+			if r := cmplx.Abs(ev); r > 0 {
+				foot = ev / complex(r, 0)
+			}
+		}
+		mp.foot[k] = foot
+		mp.reach[k] = float64(n)*eps()*cmplx.Abs(foot) + mp.rho[k]
+		mp.hidden[k] = cmplx.Abs(foot-ev) <= mp.reach[k]
 	}
 	var pts []complex128
 	push := func(s complex128) {
@@ -708,6 +984,11 @@ type poleWindows struct {
 	radius []float64
 	// cutPoles are the eigenvalues of the cut sharedPoleWindows judged.
 	cutPoles []complex128
+	// axisPole marks a window that shares a model pole within rounding of
+	// the axis, axisShared such a model pole: its foot (modelPoles) within
+	// β_G + β_R of it, β_R that of the window's cut pole.
+	axisPole   []bool
+	axisShared []bool
 }
 
 func (w poleWindows) contain(s complex128) bool {
@@ -717,6 +998,23 @@ func (w poleWindows) contain(s complex128) bool {
 		}
 	}
 	return false
+}
+
+// strictlyJudged reports whether s lies inside some window but inside none
+// that shares a pole within rounding of the axis (axisPole), so that
+// judgeNearPoles judges it against the stored model.
+func (w poleWindows) strictlyJudged(s complex128) bool {
+	in := false
+	for i, c := range w.centre {
+		if cmplx.Abs(s-c) > w.radius[i] {
+			continue
+		}
+		if w.axisPole[i] {
+			return false
+		}
+		in = true
+	}
+	return in
 }
 
 // sharedPoleWindows returns, for every pole λ_R of red such that every
@@ -747,10 +1045,19 @@ func (w poleWindows) contain(s complex128) bool {
 // not the shared pole, so the radius is capped at the distance |λ_R − λ_G′|
 // to the nearest one. On a stiff model ε‖A‖ is O(1), so a slow pole can
 // pass as a rounding-level zero, and an uncapped window would span the
-// slow band where the cut is wrong. False when the eigenvalues of red do not
-// converge.
+// slow band where the cut is wrong. A window that shares a model pole
+// within rounding of the axis, its foot within β_G + β_R of it, is an axis
+// window (axisPole): the cut may carry that pole anywhere within rounding,
+// and inside the window the stored model is not judged (judgeNearPoles).
+// The windows of the other shared poles, exempt before, are now judged.
+// The test reads the computed eigenvalues, whose error can exceed β, so it
+// can err either way: a window wrongly exempted is only left uncertified,
+// and one wrongly judged is checked against the stored model, which can
+// only refuse a cut, so neither error certifies a point where the cut is
+// wrong.
+// False when the eigenvalues of red do not converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
-	var w poleWindows
+	w := poleWindows{axisShared: make([]bool, len(mp.evals))}
 	nr, _, _ := red.Dims()
 	if nr == 0 {
 		return w, true
@@ -765,9 +1072,11 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		rho0R = math.Hypot(rho0R, a)
 	}
 	rho0R *= float64(nr) * eps()
+	var with []int
 	for i, lr := range evR {
-		shared, ok, rad, lim := false, true, betaR[i], math.Inf(1)
+		shared, ok, rad, lim, axis := false, true, betaR[i], math.Inf(1), false
 		rR := math.Min(rho0R, 2*float64(nr)*betaR[i])
+		with = with[:0]
 		for j, lg := range mp.evals {
 			rj, bG := mp.rho[j], mp.beta[j]
 			if cmplx.Abs(lr-lg) > betaR[i]+bG+rj+rR {
@@ -779,6 +1088,10 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 				break
 			}
 			shared = true
+			if mp.foot != nil && cmplx.Abs(mp.foot[j]-lg) <= bG+betaR[i] {
+				with = append(with, j)
+				axis = true
+			}
 			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
 				if k != j {
@@ -789,6 +1102,10 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		if ok && shared {
 			w.centre = append(w.centre, lr)
 			w.radius = append(w.radius, math.Min(rad/tol, lim))
+			w.axisPole = append(w.axisPole, axis)
+			for _, j := range with {
+				w.axisShared[j] = true
+			}
 		}
 	}
 	return w, true
