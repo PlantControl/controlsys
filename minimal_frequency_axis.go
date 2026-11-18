@@ -424,7 +424,8 @@ func (d *ddJudge) verdict() probeVerdict {
 // the window of a shared pole within rounding of the axis (axisShared:
 // its foot within β_G + β_R of it) the probes keep the band's data slack,
 // and Reduce certifies nothing there: neither the stored model nor the
-// cut places that pole better than its rounding bound.
+// cut places that pole better than its rounding bound. The other shared
+// windows, exempt before, are judged (a contract change).
 //
 // A hidden model pole (modelPoles) that is not axisShared is one the cut
 // drops, carries only off its location, or shares where the data place it
@@ -1000,6 +1001,10 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // within rounding of the axis, its foot within β_G + β_R of it, is an axis
 // window (axisPole): the cut may carry that pole anywhere within rounding,
 // and inside the window the stored model is not judged (judgeNearPoles).
+// The windows of the other shared poles, exempt before, are now judged.
+// The test reads the computed eigenvalues, whose error can exceed β: that
+// can only exempt more windows, widening the uncertified region, never
+// certify a point the exact poles would leave open.
 // False when the eigenvalues of red do not converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	w := poleWindows{axisShared: make([]bool, len(mp.evals))}

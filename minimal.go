@@ -94,7 +94,9 @@ type ReduceResult struct {
 // cut's pole; there a rounding-level move of either realization's pole
 // changes the response by more than tol, so neither is determined to tol,
 // the location of such a kept pole is not promised and nothing inside its
-// window is certified),
+// window is certified; the test is evaluated on the computed eigenvalues,
+// whose error can exceed their rounding bounds, which only widens the
+// region left uncertified),
 //
 //	|G_ij(s) − R_ij(s)| ≤ tol·max(max|G(s)|, max|R(s)|, Σ_l |C_il||X_lj(s)|),
 //
@@ -112,7 +114,8 @@ type ReduceResult struct {
 // uncontrollable integrator); a cut that moves a shared pole the data
 // place off the axis within that pole's rounding bound is judged against
 // the stored model inside its window too, and refused where it is wrong
-// there; and a cut that moves an exact
+// there (a contract change: such windows were exempt before, and a cut
+// wrong only inside one was accepted); and a cut that moves an exact
 // integrator of the stored model off the axis (a spectral-gap split
 // folding a coupling into it) is refused at every Tol. It is checked at
 // points beside every eigenvalue, on a fixed grid and on a decade grid:
