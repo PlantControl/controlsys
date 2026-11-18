@@ -178,32 +178,55 @@ func newPencilBoundedResponse(sys *System, pts []complex128) pencilBoundedResp {
 // the returned coefficients.
 const exactCertPrec = 320
 
-// ratPolyAt evaluates the ascending polynomial c at s by Horner's rule at
-// exactCertPrec bits, rounded to complex128.
-func ratPolyAt(c []*big.Rat, s complex128) complex128 {
+// bigPolyAt evaluates the descending float64 coefficients c at s by
+// Horner's rule at exactCertPrec bits, unrounded: its exponent range does
+// not overflow where s^deg does in float64.
+func bigPolyAt(c []float64, s complex128) (re, im *big.Float) {
 	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
 	sr, si := nw().SetFloat64(real(s)), nw().SetFloat64(imag(s))
-	re, im := nw(), nw()
+	re, im = nw(), nw()
 	var t1, t2 big.Float
 	t1.SetPrec(exactCertPrec)
 	t2.SetPrec(exactCertPrec)
-	for _, v := range slices.Backward(c) {
+	for _, v := range c {
 		nr := nw().Sub(t1.Mul(re, sr), t2.Mul(im, si))
 		ni := nw().Add(t1.Mul(re, si), t2.Mul(im, sr))
-		re, im = nr.Add(nr, nw().SetRat(v)), ni
+		re, im = nr.Add(nr, nw().SetFloat64(v)), ni
 	}
-	a, _ := re.Float64()
-	b, _ := im.Float64()
-	return complex(a, b)
+	return re, im
 }
 
-// floatPolyAt is ratPolyAt for descending float64 coefficients.
-func floatPolyAt(c []float64, s complex128) complex128 {
-	r := make([]*big.Rat, len(c))
-	for k, v := range c {
-		r[len(c)-1-k] = new(big.Rat).SetFloat64(v)
+// bigDen is a denominator value d = dr + j·di at exactCertPrec bits with
+// |d|², the divisor of bigDen.quo.
+type bigDen struct{ dr, di, d2 *big.Float }
+
+func newBigDen(den []float64, s complex128) bigDen {
+	dr, di := bigPolyAt(den, s)
+	d2 := new(big.Float).SetPrec(exactCertPrec).Mul(dr, dr)
+	d2.Add(d2, new(big.Float).SetPrec(exactCertPrec).Mul(di, di))
+	return bigDen{dr, di, d2}
+}
+
+// quo returns num(s)/d at exactCertPrec bits, rounded once to complex128:
+// rounding numerator and denominator first would overflow when only
+// s^deg of one does (a false 0 or NaN). ok is false when d is zero.
+func (d bigDen) quo(num []float64, s complex128) (complex128, bool) {
+	if d.d2.Sign() == 0 {
+		return 0, false
 	}
-	return ratPolyAt(r, s)
+	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
+	nr, ni := bigPolyAt(num, s)
+	re := nw().Add(nw().Mul(nr, d.dr), nw().Mul(ni, d.di))
+	im := nw().Sub(nw().Mul(ni, d.dr), nw().Mul(nr, d.di))
+	a, _ := re.Quo(re, d.d2).Float64()
+	b, _ := im.Quo(im, d.d2).Float64()
+	return complex(a, b), true
+}
+
+// tfEntryAt is num(s)/den(s) of descending float64 coefficients, divided
+// at exactCertPrec bits and rounded once (bigDen.quo).
+func tfEntryAt(num, den []float64, s complex128) (complex128, bool) {
+	return newBigDen(den, s).quo(num, s)
 }
 
 // pencilRefineSteps is the number of refinement steps of the solve in
@@ -604,18 +627,21 @@ type descriptorRows interface {
 }
 
 // tfRows evaluates a transfer function from its float64 coefficients as
-// returned, numerator and denominator at exactCertPrec bits, divided:
-// mag = |r| covers the three roundings.
+// returned, numerator, denominator and quotient at exactCertPrec bits,
+// then rounded (bigDen.quo): mag = |r| covers the roundings.
 type tfRows struct{ tf *TransferFunc }
 
 func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
-	dv := floatPolyAt(t.tf.Den[i], s)
-	if dv == 0 {
+	d := newBigDen(t.tf.Den[i], s)
+	if d.d2.Sign() == 0 {
 		return false
 	}
 	for j := range r {
-		r[j] = floatPolyAt(t.tf.Num[i][j], s) / dv
-		mag[j] = cmplx.Abs(r[j])
+		v, ok := d.quo(t.tf.Num[i][j], s)
+		if !ok {
+			return false
+		}
+		r[j], mag[j] = v, cmplx.Abs(v)
 	}
 	return true
 }
@@ -717,9 +743,9 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 // scale the largest |G|, |tf| of the row and T = Σ_l |C_il||U_lj| + |D_ij|
 // the entry's terms, U = (sE − A)⁻¹B, as zpkRowCheck.check states it for an
 // explicit model. Ĝ and its bound δ_G come from pencilBoundedResp, and tf
-// from its float64 coefficients as returned, evaluated at exactCertPrec
-// bits and divided, δ_tf = 4ε·|tf| for the rounding of numerator,
-// denominator and quotient. An entry verifies when |Ĝ − tf| + δ ≤
+// from its float64 coefficients as returned, numerator, denominator and
+// quotient at exactCertPrec bits, then rounded (bigDen.quo), δ_tf =
+// 4ε·|tf| covering that rounding. An entry verifies when |Ĝ − tf| + δ ≤
 // tol·max(scale, T̂ − δ_T), δ = δ_G + ε(|Ĝ| + |D|) + δ_tf, and refutes tf
 // when |Ĝ − tf| − δ > tol·max(scale, T̂ + δ_T) + δ_data outside the
 // windows guarding it (tfPoleWindows: the row denominators' for every

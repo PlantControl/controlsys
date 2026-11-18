@@ -191,11 +191,15 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // nilpotent block (rounding-level ones dropped, as IsProper decides) are
 // added to the transfer function of the explicit part, so the numerator
 // degree exceeds the denominator's. MinimalOrder and RowDegrees then
-// describe that explicit part. A transfer function from that reduction is
-// verified against the pencil within the response's terms at points where
-// the stored data determine it (descriptorTFVerified); one that does not
-// verify is returned with an error wrapping ErrAccuracyUnverified, and
-// IsProper and Step share that verdict. When it does not verify and the
+// describe that explicit part. A transfer function from that reduction, or
+// from the split of an ill-conditioned E (stiffExplicitParts), is verified
+// against the pencil within the response's terms at points where the
+// stored data determine it (descriptorTFVerified); a split that does not
+// verify falls back to the reduction, kept when it verifies. One that does
+// not verify is returned with an error wrapping ErrAccuracyUnverified, and
+// IsProper and Step share that verdict for singular E. The E⁻¹ fold
+// returns the explicit model's transfer function, with the polynomial-form
+// limit above. When the reduction does not verify and the
 // pencil (E singular, not index 1, within a cost cap) has an index ≥ 2
 // chain, the exact rational num/den of the stored data, trimmed to the
 // least degrees whose model is within terms, is tried instead, and when
@@ -220,11 +224,11 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if rg := sys.chainRegime(); rg.kind == regimeExact {
 		res = rg.v.result()
 	} else {
-		var reduced bool
+		var certified bool
 		if opts == nil && (rg.mainRes != nil || rg.mainErr != nil) {
-			res, reduced, err = rg.mainRes, rg.reduced, rg.mainErr
+			res, certified, err = rg.mainRes, rg.certified, rg.mainErr
 		} else {
-			res, reduced, err = sys.transferRationalReduced(opts)
+			res, certified, err = sys.transferRationalCertified(opts, newPencilCache())
 		}
 		switch {
 		case err != nil && rg.kind == regimeNone && rg.hasV:
@@ -232,7 +236,7 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
 		case err != nil:
 			return nil, err
-		case reduced && !descriptorTFVerified(sys, res.TF):
+		case !certified:
 			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
 		}
 	}
@@ -243,39 +247,87 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 }
 
 func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult, error) {
-	res, _, err := sys.transferRationalReduced(opts)
+	res, _, err := sys.transferRationalRoute(opts)
 	return res, err
 }
 
-// transferRationalReduced is transferRational also reporting whether the
-// result came from the Weierstrass reduction of a singular-E descriptor
-// (weierstrassReduceParts), which TransferFunction verifies against the
-// pencil (descriptorTFVerified).
-func (sys *System) transferRationalReduced(opts *TransferFuncOpts) (*TransferFuncResult, bool, error) {
+// transferRationalCertified is transferRational for TransferFunction with
+// the stiff-split and Weierstrass routes verified against the pencil
+// (descriptorTFVerified, c's work shared): a split that does not verify
+// falls back to the reduction, kept when it verifies; otherwise the
+// route's value is returned with certified false. A model that is not a
+// descriptor, and the E⁻¹ fold, are returned certified.
+func (sys *System) transferRationalCertified(opts *TransferFuncOpts, c *pencilCache) (_ *TransferFuncResult, certified bool, _ error) {
+	res, route, err := sys.transferRationalRoute(opts)
+	if err != nil || route == tfRouteExplicit || route == tfRouteFold {
+		return res, err == nil, err
+	}
+	if descriptorTFVerifiedCached(sys, res.TF, c) {
+		return res, true, nil
+	}
+	if route == tfRouteStiff {
+		if alt, err := sys.reducedTransferFunction(opts); err == nil && descriptorTFVerifiedCached(sys, alt.TF, c) {
+			alt.TF.InputName = copyStringSlice(sys.InputName)
+			alt.TF.OutputName = copyStringSlice(sys.OutputName)
+			return alt, true, nil
+		}
+	}
+	return res, false, nil
+}
+
+// tfRoute is the route transferRationalRoute took.
+type tfRoute int
+
+const (
+	// tfRouteExplicit: sys is not a descriptor.
+	tfRouteExplicit tfRoute = iota
+	// tfRouteFold: the E⁻¹ fold (ToExplicit) of a well-conditioned E.
+	tfRouteFold
+	// tfRouteStiff: E is full rank but ill-conditioned (stiffExplicitParts
+	// ok) and the result is not the reduction's: the split's sum, its
+	// whole part, or a fall-through to the E⁻¹ fold.
+	tfRouteStiff
+	// tfRouteReduced: the Weierstrass reduction (weierstrassReduceParts).
+	tfRouteReduced
+)
+
+// transferRationalRoute is transferRational also reporting its route.
+func (sys *System) transferRationalRoute(opts *TransferFuncOpts) (*TransferFuncResult, tfRoute, error) {
+	stiff := false
 	if sys.IsDescriptor() {
 		if parts, deflated, ok := stiffExplicitParts(sys); ok {
+			stiff = true
 			if deflated {
 				if res, err := sys.reducedTransferFunction(opts); err == nil {
-					return res, true, nil
+					return res, tfRouteReduced, nil
 				}
 			}
 			if res, err := sumTransferFunction(parts, opts); err == nil {
 				res.TF.InputName = copyStringSlice(sys.InputName)
 				res.TF.OutputName = copyStringSlice(sys.OutputName)
-				return res, false, nil
+				return res, tfRouteStiff, nil
 			}
 		}
 	}
 	std, poly, reduced, err := transferStandardForm(sys)
 	if err != nil {
-		return nil, false, err
+		return nil, tfRouteExplicit, err
 	}
 	res, err := std.rationalTransferFunction(opts)
 	if err != nil {
-		return nil, false, err
+		return nil, tfRouteExplicit, err
 	}
 	addPolynomialPart(res.TF, poly)
-	return res, reduced, nil
+	route := tfRouteExplicit
+	switch {
+	case reduced:
+		route = tfRouteReduced
+	case stiff:
+		route = tfRouteStiff
+	case sys.IsDescriptor():
+		route = tfRouteFold
+	}
+	return res, route, nil
 }
 
 // reducedTransferFunction is the transfer function of the descriptor sys

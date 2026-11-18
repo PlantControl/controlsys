@@ -79,9 +79,9 @@ func chainCutoff(sys, oracle *System) float64 {
 	return math.Pow(eps(), 1/float64(2*k)) * lc
 }
 
-// withinTermsWorst judges tf against the 320-bit stored response of sys by
-// the certificate's refute rule at its own points (descriptorTFPoints) with
-// η < 1, |s| ≤ cutoff and outside tf's windows: the largest (|tf − G| − δ)/
+// withinTermsWorst judges tf, divided at 320 bits (bigDen.quo), against the
+// 320-bit stored response of sys by the certificate's refute rule at its
+// own points (descriptorTFPoints) with η < 1, |s| ≤ cutoff and outside tf's windows: the largest (|tf − G| − δ)/
 // (√ε·max(scale, T̂ + δ_T) + δ_data), δ = ε|G| + 4ε|tf|, and where. Above 1
 // tf is outside terms of the stored data. Points the GEPP bounds already
 // place within are not solved at 320 bits.
@@ -105,10 +105,14 @@ func withinTermsWorst(t *testing.T, sys *System, tf *TransferFunc, cutoff float6
 		}
 		need := false
 		for i := range p {
-			dv := floatPolyAt(tf.Den[i], s)
+			d := newBigDen(tf.Den[i], s)
 			scale := 0.0
 			for j := range m {
-				r[i*m+j] = floatPolyAt(tf.Num[i][j], s) / dv
+				v, ok := d.quo(tf.Num[i][j], s)
+				if !ok {
+					v = cmplx.Inf()
+				}
+				r[i*m+j] = v
 				g := full.g[k*pm+i*m+j] + complex(sys.D.At(i, j), 0)
 				scale = math.Max(scale, math.Max(cmplx.Abs(r[i*m+j]), cmplx.Abs(g)-full.comp[k*pm+i*m+j]))
 			}
