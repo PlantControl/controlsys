@@ -1002,9 +1002,10 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // window (axisPole): the cut may carry that pole anywhere within rounding,
 // and inside the window the stored model is not judged (judgeNearPoles).
 // The windows of the other shared poles, exempt before, are now judged.
-// The test reads the computed eigenvalues, whose error can exceed β: that
-// can only exempt more windows, widening the uncertified region, never
-// certify a point the exact poles would leave open.
+// The test reads the computed eigenvalues, whose error can exceed β, so it
+// can err either way: a window wrongly exempted is only left uncertified,
+// and one wrongly judged is checked against the stored model, which can
+// only refuse a cut, so neither error certifies a wrong one.
 // False when the eigenvalues of red do not converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	w := poleWindows{axisShared: make([]bool, len(mp.evals))}
