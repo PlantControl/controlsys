@@ -191,11 +191,14 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // nilpotent block (rounding-level ones dropped, as IsProper decides) are
 // added to the transfer function of the explicit part, so the numerator
 // degree exceeds the denominator's. MinimalOrder and RowDegrees then
-// describe that explicit part. A transfer function from that reduction is
+// describe that explicit part. A descriptor's transfer function, by any of
+// these routes (E⁻¹, the split of an ill-conditioned E, the reduction), is
 // verified against the pencil within the response's terms at points where
-// the stored data determine it (descriptorTFVerified); one that does not
-// verify is returned with an error wrapping ErrAccuracyUnverified, and
-// IsProper and Step share that verdict. When it does not verify and the
+// the stored data determine it (descriptorTFVerified); when E⁻¹ or the
+// split does not verify, the reduction is tried and kept when it does.
+// One that does not verify is returned with an error wrapping
+// ErrAccuracyUnverified, and for singular E IsProper and Step share that
+// verdict. When it does not verify and the
 // pencil (E singular, not index 1, within a cost cap) has an index ≥ 2
 // chain, the exact rational num/den of the stored data, trimmed to the
 // least degrees whose model is within terms, is tried instead, and when
@@ -220,11 +223,11 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if rg := sys.chainRegime(); rg.kind == regimeExact {
 		res = rg.v.result()
 	} else {
-		var reduced bool
+		var certified bool
 		if opts == nil && (rg.mainRes != nil || rg.mainErr != nil) {
-			res, reduced, err = rg.mainRes, rg.reduced, rg.mainErr
+			res, certified, err = rg.mainRes, rg.certified, rg.mainErr
 		} else {
-			res, reduced, err = sys.transferRationalReduced(opts)
+			res, certified, err = sys.transferRationalCertified(opts, newPencilCache())
 		}
 		switch {
 		case err != nil && rg.kind == regimeNone && rg.hasV:
@@ -232,7 +235,7 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
 		case err != nil:
 			return nil, err
-		case reduced && !descriptorTFVerified(sys, res.TF):
+		case !certified:
 			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
 		}
 	}
@@ -247,10 +250,34 @@ func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult
 	return res, err
 }
 
+// transferRationalCertified is transferRational for TransferFunction with
+// every descriptor route (E⁻¹, the stiff split and the Weierstrass
+// reduction) verified against the pencil (descriptorTFVerified, c's work
+// shared): a route that does not verify and is not the Weierstrass
+// reduction falls back to that reduction, kept when it verifies;
+// otherwise the first route's value is returned with certified false. A
+// model that is not a descriptor, or has internal delays, is certified.
+func (sys *System) transferRationalCertified(opts *TransferFuncOpts, c *pencilCache) (_ *TransferFuncResult, certified bool, _ error) {
+	res, reduced, err := sys.transferRationalReduced(opts)
+	if err != nil || !sys.IsDescriptor() || sys.internalDelayCount() > 0 {
+		return res, err == nil, err
+	}
+	if descriptorTFVerifiedCached(sys, res.TF, c) {
+		return res, true, nil
+	}
+	if !reduced {
+		if alt, err := sys.reducedTransferFunction(opts); err == nil && descriptorTFVerifiedCached(sys, alt.TF, c) {
+			alt.TF.InputName = copyStringSlice(sys.InputName)
+			alt.TF.OutputName = copyStringSlice(sys.OutputName)
+			return alt, true, nil
+		}
+	}
+	return res, false, nil
+}
+
 // transferRationalReduced is transferRational also reporting whether the
-// result came from the Weierstrass reduction of a singular-E descriptor
-// (weierstrassReduceParts), which TransferFunction verifies against the
-// pencil (descriptorTFVerified).
+// result came from the Weierstrass reduction of a descriptor
+// (weierstrassReduceParts).
 func (sys *System) transferRationalReduced(opts *TransferFuncOpts) (*TransferFuncResult, bool, error) {
 	if sys.IsDescriptor() {
 		if parts, deflated, ok := stiffExplicitParts(sys); ok {

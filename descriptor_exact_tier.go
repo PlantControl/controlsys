@@ -878,12 +878,12 @@ var exactChainTier = true
 // holds the exact tier's uncertified model, if any, which the APIs return
 // with ErrAccuracyUnverified only where the float path has no value.
 type descriptorRegime struct {
-	kind    int
-	v       chainVerdict
-	hasV    bool
-	mainRes *TransferFuncResult
-	mainErr error
-	reduced bool
+	kind      int
+	v         chainVerdict
+	hasV      bool
+	mainRes   *TransferFuncResult
+	mainErr   error
+	certified bool
 }
 
 const (
@@ -929,10 +929,10 @@ func (sys *System) chainRegime() descriptorRegime {
 }
 
 func (sys *System) decideRegime() descriptorRegime {
-	res, reduced, err := sys.transferRationalReduced(nil)
-	r := descriptorRegime{kind: regimeFloat, mainRes: res, mainErr: err, reduced: reduced}
 	c := newPencilCache()
-	if err == nil && (!reduced || descriptorTFVerifiedCached(sys, res.TF, c)) {
+	res, certified, err := sys.transferRationalCertified(nil, c)
+	r := descriptorRegime{kind: regimeFloat, mainRes: res, mainErr: err, certified: certified}
+	if err == nil && certified {
 		return r
 	}
 	r.v, r.hasV = sys.exactChainVerdictCached(c)
