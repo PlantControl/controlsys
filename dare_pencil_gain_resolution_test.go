@@ -142,7 +142,8 @@ func TestPencilGainResolved(t *testing.T) {
 // not round R away (rLost false) and the inputs are not reduced. The
 // certificate of pencilGainResolved cannot bound the float64 gain there,
 // not even for the 320-bit X and K, though Cholesky factors W; Dare takes
-// the fallback and returns a K within gainFloor of the 320-bit gain, else
+// the fallback and returns a K within its band, max(gainFloor, 4× its
+// move under eps perturbations of the data), of the 320-bit gain, else
 // Accuracy 1.
 func TestDarePencilGainIllConditionedWRejected(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{0.6, 0.4, -0.2, -0.3, 0.5, 0.5, 0.1, -0.6, 0.4})
@@ -150,7 +151,8 @@ func TestDarePencilGainIllConditionedWRejected(t *testing.T) {
 	Q := mat.NewDense(3, 3, []float64{2, 0.3, 0.1, 0.3, 1.5, -0.2, 0.1, -0.2, 1})
 	R := mat.NewDense(2, 2, []float64{1, 1 - 1e-12, 1 - 1e-12, 1})
 	ref := riccatiExactReference(false, A, B, Q, R, nil, nil, riccatiExactPrec)
-	if !ref.OK {
+	sens, ok := riccatiExactSensitivity(false, A, B, Q, R, nil, nil, ref, "ABQR")
+	if !ref.OK || !ok {
 		t.Fatal("reference not certified")
 	}
 	if red, _ := reduceInputs(A, B, Q, R, nil); red != nil || rLost(B, R, ref.X) {
@@ -180,8 +182,9 @@ func TestDarePencilGainIllConditionedWRejected(t *testing.T) {
 	}
 	var d mat.Dense
 	d.Sub(res.K, ref.K)
-	if e := mat.Norm(&d, 1) / mat.Norm(ref.K, 1); res.accuracy == 0 && !(e <= gainFloor) {
-		t.Errorf("Accuracy 0 K %.3g off the 320-bit gain", e)
+	kTol := max(gainFloor, 4*sens.K)
+	if e := mat.Norm(&d, 1) / mat.Norm(ref.K, 1); res.accuracy == 0 && !(e <= kTol) {
+		t.Errorf("Accuracy 0 K %.3g off the 320-bit gain, want within %.3g", e, kTol)
 	}
 }
 

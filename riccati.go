@@ -2004,8 +2004,9 @@ func gainResolved(A, B, R *mat.Dense, res *RiccatiResult, miss float64) bool {
 // Wₐ = |R| + |Bᵀ||X||B|, bounds ‖I − ZW‖₁; α < 1 proves W nonsingular and
 // ‖K − K̂‖₁ = ‖W⁻¹ρ‖₁ ≤ ‖|Z|(|ρ̂| + γₖP/(1 − γₖ))‖₁/(1 − α). Each
 // nonnegative quantity of the bound is itself evaluated with at most
-// j = 4(n + m) + 16 roundings and so taken times 1 + γⱼ. The bound holds
-// while no product of nonzero factors leaves the normal range: one whose
+// j = m² + 4(n + m) + 16 roundings (the column sums of |Z|E run over m²
+// products) and so taken times 1 + γⱼ. The bound holds while no product
+// of nonzero factors it forms leaves the normal range: one whose
 // factors' smallest nonzero magnitudes multiply below 2⁻¹⁰²¹, or a
 // non-finite bound, is rejected. The rounding-of-X terms of gainResolved,
 // through Z, are divided by the 1 − α of X. A zero K is resolved only
@@ -2019,7 +2020,7 @@ func pencilGainResolved(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResul
 		return ku / (1 - ku)
 	}
 	gk := gam(2*n + m + 3)
-	up := 1 + gam(4*(n+m)+16)
+	up := 1 + gam(m*m+4*(n+m)+16)
 	ws := make([]float64, 3*n*n+10*m*n+6*m*m)
 	take := func(r, c int) blas64.General {
 		g := blas64.General{Rows: r, Cols: c, Stride: c, Data: ws[: r*c : r*c]}
