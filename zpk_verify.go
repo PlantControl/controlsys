@@ -987,9 +987,28 @@ func zpkDDResponse(br *balancedRealization, s complex128) (e []zpkEntryBounds, z
 // zpkDDResponseWork is zpkDDResponse with the buffers of w.
 func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e []zpkEntryBounds, zero, ok bool) {
 	n, m := br.n, br.m
-	w.a, w.inv, w.x = zeroed(w.a, n*n), zeroed(w.inv, n*n), zeroed(w.x, n*m)
-	w.perm, w.absLU = zeroed(w.perm, n), zeroed(w.absLU, n*n)
-	w.v, w.w = zeroed(w.v, n), zeroed(w.w, n)
+	if zero, ok := zpkDDSolve(br, s, w); !ok {
+		return nil, zero, false
+	}
+	if !zpkDDBound(n, m, w) {
+		return nil, false, false
+	}
+	e = make([]zpkEntryBounds, m)
+	for j := range m {
+		if e[j], ok = zpkDDEntryBounds(br.c, w, n, m, j); !ok {
+			return nil, false, false
+		}
+	}
+	return e, false, true
+}
+
+// zpkDDSolve is zpkDDResponse's solve stage: the double-double LU of
+// sI − Â with partial pivoting and X̂ = (sI − Â)⁻¹B̂, left in w for
+// zpkDDEntry and zpkDDBound. zero reports an exactly zero pivot.
+func zpkDDSolve(br *balancedRealization, s complex128, w *zpkDDWork) (zero, ok bool) {
+	n, m := br.n, br.m
+	w.a, w.x = zeroed(w.a, n*n), zeroed(w.x, n*m)
+	w.perm = zeroed(w.perm, n)
 	a := w.a
 	for i := range n {
 		for j := range n {
@@ -1010,10 +1029,10 @@ func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e [
 			}
 		}
 		if best == 0 {
-			return nil, true, false
+			return true, false
 		}
 		if math.IsNaN(best) || math.IsInf(best, 0) {
-			return nil, false, false
+			return false, false
 		}
 		perm[k] = p
 		if p != k {
@@ -1032,11 +1051,6 @@ func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e [
 			}
 		}
 	}
-	inv := w.inv
-	for i := range n {
-		inv[i*n+i] = ddComplex{re: dd{1, 0}}
-	}
-	ddLUSolve(a, perm, inv, n, n)
 	x := w.x
 	for i := range n {
 		for j := range m {
@@ -1044,8 +1058,35 @@ func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e [
 		}
 	}
 	ddLUSolve(a, perm, x, n, m)
-	u := ddOpErr
-	g := zpkGEPPConstant(n, u)
+	return false, true
+}
+
+// zpkDDEntry is the response Ĝ of output row c to input j from the solve
+// stage and its terms T̂ = Σ|c||X̂|, formed as zpkDDEntryBounds forms them.
+func zpkDDEntry(c []float64, w *zpkDDWork, n, m, j int) (complex128, float64) {
+	x := w.x
+	var gs ddComplex
+	t := 0.0
+	for l := range n {
+		gs = gs.add(ddComplex{re: dd{c[l], 0}}.mul(x[l*m+j]))
+		t += math.Abs(c[l]) * cabs(x[l*m+j].complex128())
+	}
+	return gs.complex128(), t
+}
+
+// zpkDDBound is zpkDDResponse's bound stage, continuing from zpkDDSolve's
+// w: the inverse M̂⁻¹, |L_f||U_f| and η, and per input j the bound δ_U on
+// |U − Û| in w.du; false when η ≥ 1.
+func zpkDDBound(n, m int, w *zpkDDWork) bool {
+	w.inv, w.absLU = zeroed(w.inv, n*n), zeroed(w.absLU, n*n)
+	w.v, w.du = zeroed(w.v, n), zeroed(w.du, n*m)
+	a, perm, x := w.a, w.perm, w.x
+	inv := w.inv
+	for i := range n {
+		inv[i*n+i] = ddComplex{re: dd{1, 0}}
+	}
+	ddLUSolve(a, perm, inv, n, n)
+	g := zpkGEPPConstant(n, ddOpErr)
 	nInv, nLU := 0.0, 0.0
 	absLU := w.absLU
 	for i := range n {
@@ -1067,11 +1108,10 @@ func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e [
 	}
 	eta := g * nInv * nLU
 	if !(eta < 1) {
-		return nil, false, false
+		return false
 	}
 	f := 1 / (1 - eta)
-	v, wb := w.v, w.w
-	e = make([]zpkEntryBounds, m)
+	v := w.v
 	for j := range m {
 		for i := range n {
 			v[i] = 0
@@ -1084,36 +1124,44 @@ func zpkDDResponseWork(br *balancedRealization, s complex128, w *zpkDDWork) (e [
 				v[k], v[p] = v[p], v[k]
 			}
 		}
-		var gs ddComplex
-		cu, du, t := 0.0, 0.0, 0.0
 		for l := range n {
 			wl := 0.0
 			for q := range n {
 				wl += inv[l*n+q].abs() * v[q]
 			}
-			wb[l] = f * g * wl
-			c := math.Abs(br.c[l])
-			gs = gs.add(ddComplex{re: dd{br.c[l], 0}}.mul(x[l*m+j]))
-			cu += c * x[l*m+j].abs()
-			du += c * wb[l]
-			t += c * cabs(x[l*m+j].complex128())
+			w.du[l*m+j] = f * g * wl
 		}
-		gv := gs.complex128()
-		if cmplx.IsNaN(gv) || cmplx.IsInf(gv) || math.IsInf(du, 0) || math.IsNaN(du) {
-			return nil, false, false
-		}
-		vb := du + gammaDD(n+3)*cu + 2*eps()*cmplx.Abs(gv)
-		dT := du + gammaN(n+5)*t
-		e[j] = zpkEntryBounds{g: gv, ver: vb, comp: vb, lo: t - dT, hi: t + dT, determined: true}
 	}
-	return e, false, true
+	return true
+}
+
+// zpkDDEntryBounds is the response of output row c to input j with
+// zpkDDResponse's bounds, from both stages; false when it is not finite.
+func zpkDDEntryBounds(c []float64, w *zpkDDWork, n, m, j int) (zpkEntryBounds, bool) {
+	x := w.x
+	var gs ddComplex
+	cu, du, t := 0.0, 0.0, 0.0
+	for l := range n {
+		cl := math.Abs(c[l])
+		gs = gs.add(ddComplex{re: dd{c[l], 0}}.mul(x[l*m+j]))
+		cu += cl * x[l*m+j].abs()
+		du += cl * w.du[l*m+j]
+		t += cl * cabs(x[l*m+j].complex128())
+	}
+	gv := gs.complex128()
+	if cmplx.IsNaN(gv) || cmplx.IsInf(gv) || math.IsInf(du, 0) || math.IsNaN(du) {
+		return zpkEntryBounds{}, false
+	}
+	vb := du + gammaDD(n+3)*cu + 2*eps()*cmplx.Abs(gv)
+	dT := du + gammaN(n+5)*t
+	return zpkEntryBounds{g: gv, ver: vb, comp: vb, lo: t - dT, hi: t + dT, determined: true}, true
 }
 
 // zpkDDWork holds the buffers zpkDDResponse reuses across points.
 type zpkDDWork struct {
-	a, inv, x   []ddComplex
-	perm        []int
-	absLU, v, w []float64
+	a, inv, x    []ddComplex
+	perm         []int
+	absLU, v, du []float64
 }
 
 // gammaDD is γ_k at the double-double unit ddOpErr.

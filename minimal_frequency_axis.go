@@ -309,9 +309,18 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 // bound (rigorous, as a skip must be; comp is first order),
 // |Ĝ−R_dd| − δ_R,dd ≤ |Ĝ−R̂| + δ_R, so no entry is refuted when
 // |Ĝ−R̂| + δ_R − δ_G ≤ tol·max(max|Ĝ|, T_G,hi), T_G,hi its terms' upper
-// bound.
+// bound. The test is tried first on the model's solve stage alone
+// (ddEntrySolve), with comp = 0 and T_G,hi = T̂, either of which only
+// raises its left side or lowers its right: where that passes the full
+// bounds pass too, and their inverse and |L||U| are not formed.
 func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
-	if !ddEntryBounds(&full.ev.br, s, &d.w, d.g) {
+	if !ddEntrySolve(&full.ev.br, s, &d.w, d.g) {
+		return false
+	}
+	if d.cutCannotRefute(cb, k, false) {
+		return false
+	}
+	if !ddEntryBoundStage(&full.ev.br, &d.w, d.g) {
 		return false
 	}
 	if d.cutCannotRefute(cb, k, false) || cb != cut && d.cutCannotRefute(cb, k, true) {
@@ -499,18 +508,57 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 }
 
 // ddEntryBounds sets e, row-major p×m, to the strictly proper response of
-// br at s with zpkDDResponse's bounds, one output row at a time; false
-// where the double-double solve meets a zero pivot or cannot bound it.
+// br at s with zpkDDResponse's bounds, each output row's as zpkDDResponse
+// forms it alone; false where the double-double solve meets a zero pivot
+// or cannot bound it.
 func ddEntryBounds(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkEntryBounds) bool {
+	if br.p == 0 {
+		return true
+	}
+	if _, ok := zpkDDSolve(br, s, w); !ok {
+		return false
+	}
+	return ddEntryBoundStage(br, w, e)
+}
+
+// ddEntryBoundStage is ddEntryBounds after ddEntrySolve, continuing from
+// the factorization and solution in w: one factorization of sI − Â serves
+// every output row, as the rows share it.
+func ddEntryBoundStage(br *balancedRealization, w *zpkDDWork, e []zpkEntryBounds) bool {
+	n, m := br.n, br.m
+	if !zpkDDBound(n, m, w) {
+		return false
+	}
+	for i := range br.p {
+		for j := range m {
+			var ok bool
+			if e[i*m+j], ok = zpkDDEntryBounds(br.c[i*n:(i+1)*n], w, n, m, j); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ddEntrySolve is ddEntryBounds' solve stage alone: e holds the responses
+// Ĝ, bitwise those ddEntryBounds forms, with comp = 0 and hi = lo = T̂,
+// the terms before their bound is added (T̂ ≤ hi of ddEntryBounds).
+func ddEntrySolve(br *balancedRealization, s complex128, w *zpkDDWork, e []zpkEntryBounds) bool {
+	if br.p == 0 {
+		return true
+	}
+	if _, ok := zpkDDSolve(br, s, w); !ok {
+		return false
+	}
 	n, m := br.n, br.m
 	for i := range br.p {
-		row := *br
-		row.p, row.c = 1, br.c[i*n:(i+1)*n]
-		got, _, ok := zpkDDResponseWork(&row, s, w)
-		if !ok {
-			return false
+		for j := range m {
+			g, t := zpkDDEntry(br.c[i*n:(i+1)*n], w, n, m, j)
+			if cmplx.IsNaN(g) || cmplx.IsInf(g) {
+				return false
+			}
+			e[i*m+j] = zpkEntryBounds{g: g, lo: t, hi: t, determined: true}
 		}
-		copy(e[i*m:(i+1)*m], got)
 	}
 	return true
 }
@@ -1005,7 +1053,8 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // The test reads the computed eigenvalues, whose error can exceed β, so it
 // can err either way: a window wrongly exempted is only left uncertified,
 // and one wrongly judged is checked against the stored model, which can
-// only refuse a cut, so neither error certifies a wrong one.
+// only refuse a cut, so neither error certifies a point where the cut is
+// wrong.
 // False when the eigenvalues of red do not converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	w := poleWindows{axisShared: make([]bool, len(mp.evals))}
