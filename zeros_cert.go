@@ -175,7 +175,8 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 	}
 	br := newBalancedRealization(sys, n, m, p)
 	var ddw zpkDDWork
-	exactCost := n3 * zerosExactWords(sys) * zerosExactWords(sys)
+	nw := int64(n) * zerosExactWords(sys)
+	exactCost := n3 * nw * nw
 	escalate := func(q int, open bool) bool {
 		pt := &cp[q]
 		late := pt.late
@@ -335,13 +336,14 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 // zerosBudget is the deterministic work budget of one Zeros certification
 // (Tier 1 and Tier 2 together), in units of n³ complex double operations:
 // a point in double costs n³, in double-double 8n³, exactly
-// n³·w², w the 64-bit words zerosExactWords gives the stored entries; Tier
-// 2 charges its pencil determinant and root iterations alike. A
+// n³·(n·w)², w the 64-bit words zerosExactWords gives the stored entries
+// (the rationals of the elimination grow to about n·w words); Tier 2
+// charges its pencil determinant N⁴·(N·w)² and root iterations alike. A
 // certification that runs out is not verified.
 type zerosBudget struct{ used, cap int64 }
 
 // zerosWorkCap is the budget of one certification.
-const zerosWorkCap = 4 << 20
+const zerosWorkCap = 6_000_000
 
 func newZerosBudget() *zerosBudget { return &zerosBudget{cap: zerosWorkCap} }
 
@@ -1293,7 +1295,7 @@ func zerosExactZeroCount(sys *System, b *zerosBudget) (int, bool) {
 	}
 	var g []*big.Rat
 	for range 3 {
-		if !b.spend(int64(n) * int64(n) * int64(n) * int64(n) * w * w) {
+		if !b.spend(int64(n) * int64(n) * int64(n) * int64(n) * int64(n) * w * w) {
 			return 0, false
 		}
 		q1, q2 := make([]int64, n*R), make([]int64, Cc*n)
@@ -1470,9 +1472,9 @@ func zerosTier2B(sys *System, rank int, rankRefuted bool, b *zerosBudget) ([]com
 			M[(n+i)*N+n+j] = model.D.At(i, j)
 		}
 	}
-	w := zerosExactWords(model)
+	Nw := int64(N) * zerosExactWords(model)
 	N4 := int64(N) * int64(N) * int64(N) * int64(N)
-	if !b.spend(N4 * w * w) {
+	if !b.spend(N4 * Nw * Nw) {
 		return nil, 0, false
 	}
 	bp, ok := pencilDetBounded(L, M, N)
