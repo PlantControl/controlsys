@@ -1158,6 +1158,12 @@ const tfVerdictMemoSize = 1024
 
 // tfVerdictKey encodes sys's A, B, C, D, E and Dt and tf's coefficients.
 func tfVerdictKey(sys *System, tf *TransferFunc) string {
+	return tfVerdictKeyOf(sys, tf, false)
+}
+
+// tfVerdictKeyOf is tfVerdictKey, with identity encoding E as the identity
+// of an explicit sys under its own marker.
+func tfVerdictKeyOf(sys *System, tf *TransferFunc, identity bool) string {
 	var b []byte
 	put := func(v float64) { b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v)) }
 	putDense := func(a *mat.Dense) {
@@ -1174,8 +1180,13 @@ func tfVerdictKey(sys *System, tf *TransferFunc) string {
 			}
 		}
 	}
-	for _, a := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D, sys.E} {
+	for _, a := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D} {
 		putDense(a)
+	}
+	if identity {
+		put(-2)
+	} else {
+		putDense(sys.E)
 	}
 	put(sys.Dt)
 	for i, den := range tf.Den {
