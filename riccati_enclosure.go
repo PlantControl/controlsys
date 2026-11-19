@@ -1157,7 +1157,9 @@ func (r *RiccatiResult) xConfirmed() bool {
 // dareGate holds a Dare result at Accuracy 0 whose X is of float64
 // provenance to the enclosure of encloseDare on the stored data. A
 // certified X is kept; a corrected one is replaced by fl(X_c) and its
-// gain, whose K the gain gates then certify, else Accuracy 1. Without an
+// gain, whose K the gain gates then certify with X unchanged, else
+// Accuracy 1: their refinement replaced a certified fl(X_c) by a float64
+// Newton iterate 1.6e-6 to 3.9e-6 off (zrwreg 20196, 12124). Without an
 // enclosure, tier 2: hewerSolution, then the extended solve as
 // lostCandidateDare runs it, each accepted only at Accuracy 0 (the
 // extended pair replacing X and K unless X is within newtonTol and K
@@ -1185,7 +1187,7 @@ func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *Ric
 			return dareTier2(A, B, Q, R, opts, res)
 		}
 		red, _ := reduceInputs(A, B, Q, R, opts)
-		if r, _, ok := gainOfX(A, B, Q, R, opts, red, &c); ok && r.accuracy == 0 {
+		if r, _, ok := gainOfX(A, B, Q, R, opts, red, &c); ok && r.accuracy == 0 && mat.Equal(r.X, c.X) {
 			return r
 		}
 		c.accuracy = 1
