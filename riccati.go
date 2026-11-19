@@ -249,6 +249,10 @@ type RiccatiResult struct {
 	// confirmedX is X when an extended-precision solve returned or
 	// confirmed it (confirm); dareGate exempts X while it is unchanged.
 	confirmedX *mat.Dense
+	// newtonDelta is the Stein step Δ of the Newton step from newtonX,
+	// the X verifyRiccati certified (Dare): dareGate's centre X ⊕ Δ while
+	// X is newtonX.
+	newtonDelta, newtonX *mat.Dense
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -3920,6 +3924,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		fail = errNoCandidate
 	}
 	xData := X.RawMatrix().Data
+	problem.certDelta, problem.certDeltaX = nil, nil
 	bestStep, stalls := math.Inf(1), 0
 	kept, prevPoor := false, (*riccatiPoor)(nil)
 	defer func() {
@@ -3951,6 +3956,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		step := problem.newtonStep(x1, xData)
 		if it == 0 {
 			if step <= newtonTol {
+				delta := slices.Clone(problem.lastDelta)
 				problem.closedLoopEig(eig)
 				var c1 []float64
 				if !continuous && step > eps() {
@@ -3965,6 +3971,9 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 				if problem.xe == nil {
 					problem.certX1 = c1
 				}
+				if !continuous {
+					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
+				}
 				return K, nil
 			}
 			if p := problem.poor; p != nil && step < p.step {
@@ -3978,15 +3987,25 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, x2, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
+				delta := slices.Clone(problem.lastDelta)
 				if !problem.descriptorGainCertified(continuous, K1, xData, x2, eig) {
 					return nil, fail
+				}
+				if !continuous {
+					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 				}
 				return K1, nil
 			}
 			copy(xData, prev)
-			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil ||
-				!problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
+			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil {
 				return nil, fail
+			}
+			delta := slices.Clone(problem.lastDelta)
+			if !problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
+				return nil, fail
+			}
+			if !continuous {
+				problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 			}
 			return K, nil
 		}
@@ -4086,6 +4105,7 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 		return nil, err
 	}
 	problem.newtonDelta(x1)
+	problem.lastDelta = append(problem.lastDelta[:0], x1...)
 	for i, v := range xData {
 		x1[i] += v
 	}

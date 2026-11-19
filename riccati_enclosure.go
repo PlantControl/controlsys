@@ -333,10 +333,7 @@ type encOps[M encNum[M]] struct {
 
 func (o *encOps[M]) acl(k M) M { return o.a.add(o.b.mul(k, false), -1) }
 
-
-
 func (o *encOps[M]) w(x M) M { return encSym(o.r.add(o.b.mul(x.mul(o.b, false), true), 1)) }
-
 
 // encData is the stored data of a gated Dare with its absolute values,
 // in both evaluation arithmetics (encPrec bits on first use).
@@ -575,6 +572,15 @@ func catBound(hr, hg, hw *mat.Dense) *mat.Dense {
 	return o
 }
 
+// encTiers selects evaluation tiers.
+type encTiers int
+
+const (
+	encDDOnly encTiers = 1 << iota
+	encBigOnly
+	encAllTiers = encDDOnly | encBigOnly
+)
+
 // encTier records the evaluation tier that proved an enclosure.
 type encTier int
 
@@ -716,6 +722,11 @@ func (d *encData) sdirBounds(b encBounds, du, dl *mat.Dense, v float64) (*mat.De
 // encCentre is a centre with its gain and pieces in both arithmetics
 // (encPrec bits on first use).
 type encCentre struct {
+	// zeroLo: the centre is a float64 X itself; k1, cPD its budget scale
+	// and definiteness, on first use.
+	zeroLo bool
+	k1     float64
+	cPD    bool
 	d      *encData
 	c, k   encDD
 	p      encPieces[encDD]
@@ -740,17 +751,21 @@ func (e *encCentre) big() *encPieces[encBig] {
 	return e.pb
 }
 
-// testX proves −Ric_K(c(1 + s)) ⪰ 0 and N_K(c(1 − s)) ≻ 0, double-double
-// first.
-func (e *encCentre) testX(s float64) encTier {
-	u2 := math.Ldexp(1, -106)
-	zu, zl := encXDir(&e.d.dd, e.p, s, catDD)
-	hu, hl := e.d.xdirBounds(e.b, s, u2)
-	if encPDDD(zu, hu) && encPDDD(zl, hl) {
-		return encTierDD
+// testX proves −Ric_K(c(1 + s)) ⪰ 0 and N_K(c(1 − s)) ≻ 0 in the tiers
+// allowed, double-double first.
+func (e *encCentre) testX(s float64, tiers encTiers) encTier {
+	if tiers&encDDOnly != 0 {
+		zu, zl := encXDir(&e.d.dd, e.p, s, catDD)
+		hu, hl := e.d.xdirBounds(e.b, s, math.Ldexp(1, -106))
+		if encPDDD(zu, hu) && encPDDD(zl, hl) {
+			return encTierDD
+		}
+	}
+	if tiers&encBigOnly == 0 {
+		return encNone
 	}
 	bu, bl := encXDir(e.d.big(), *e.big(), s, catBig)
-	hu, hl = e.d.xdirBounds(e.b, s, math.Ldexp(1, -encPrec))
+	hu, hl := e.d.xdirBounds(e.b, s, math.Ldexp(1, -encPrec))
 	if encPDBig(bu, hu) && encPDBig(bl, hl) {
 		return encTierBig
 	}
@@ -1019,24 +1034,12 @@ type encVerdict struct {
 // m + b(D_U + D_L). −D ⪯ M ⪯ D bounds the measure of M by b(D) =
 // max(‖D‖_F, max_j √D_jj Σ_i √D_ii) relative to X_c.
 func (e *encCentre) enclose(x *mat.Dense) (encVerdict, bool) {
+	if v, ok := e.encloseX(x, encAllTiers); ok {
+		return v, true
+	}
 	d, n := e.d, e.d.n
 	cf := e.c.round()
-	var diff mat.Dense
-	diff.Sub(x, cf)
-	m := encMeasure(&diff, cf)
-	mr := encMeasure(mat.NewDense(n, n, append([]float64(nil), e.c.l...)), cf)
-	k1 := encRadius(cf, cf)
-	if k1 > 0 && !math.IsInf(k1, 0) && exactPD(e.c) {
-		for _, mm := range []float64{m, mr} {
-			if !(mm < newtonTol) {
-				continue
-			}
-			s := 0.999 * (newtonTol - mm) / k1
-			if t := e.testX(s); t != encNone {
-				return encVerdict{tier: t, ret: m+s*k1 <= newtonTol}, true
-			}
-		}
-	}
+	m, mr := e.budget(x, cf)
 	r := e.p.r.round()
 	gc := e.p.g.round()
 	var lu mat.LU
@@ -1072,6 +1075,41 @@ func (e *encCentre) enclose(x *mat.Dense) (encVerdict, bool) {
 	return encVerdict{}, false
 }
 
+// budget returns the measures of X − X_c and fl(X_c) − X_c.
+func (e *encCentre) budget(x, cf *mat.Dense) (m, mr float64) {
+	n := e.d.n
+	var diff mat.Dense
+	diff.Sub(x, cf)
+	m = encMeasure(&diff, cf)
+	if e.zeroLo {
+		return m, m
+	}
+	return m, encMeasure(mat.NewDense(n, n, append([]float64(nil), e.c.l...)), cf)
+}
+
+// encloseX is enclose's X-direction radius alone, in the tiers allowed.
+func (e *encCentre) encloseX(x *mat.Dense, tiers encTiers) (encVerdict, bool) {
+	cf := e.c.round()
+	m, mr := e.budget(x, cf)
+	if e.k1 == 0 {
+		e.k1 = encRadius(cf, cf)
+		e.cPD = e.k1 > 0 && !math.IsInf(e.k1, 0) && exactPD(e.c)
+	}
+	if !e.cPD {
+		return encVerdict{}, false
+	}
+	for i, mm := range []float64{m, mr} {
+		if !(mm < newtonTol) || i == 1 && e.zeroLo {
+			continue
+		}
+		s := 0.999 * (newtonTol - mm) / e.k1
+		if t := e.testX(s, tiers); t != encNone {
+			return encVerdict{tier: t, ret: m+s*e.k1 <= newtonTol}, true
+		}
+	}
+	return encVerdict{}, false
+}
+
 // encResult is the enclosure's outcome for a float64 Newton X.
 type encResult int
 
@@ -1082,19 +1120,49 @@ const (
 )
 
 // encloseDare certifies the float64 Newton solution X of the stored Dare
-// (A, B, Q, R, S, E), its gain K: from the centre X + Δ, Δ the float64
-// Stein step of Ric_K(X) for the double-double gain of X, the enclosure
-// at up to encMaxRefine further centres, each one Stein step on with a
-// fresh double-double gain. While W(X_c) is not proved positive definite
-// the step takes the returned K, and W-not-PD fails only at the last
-// centre. corrected is fl(X_c) and its gain where X_c, not X, is within
-// the budget.
-func encloseDare(A, B, Q, R, S, E, X, K *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
+// (A, B, Q, R, S, E), its gain K, cheapest first: the X-direction radius
+// at X itself with K, in double-double; then at the centre X ⊕ Δ of the
+// Newton step Δ verifyRiccati certified X with (dx, nil without), with its
+// double-double gain; at both in encPrec bits; then from that centre (or
+// X + Δ, Δ the float64 Stein step of Ric_K(X) for the gain of X) the
+// enclosure at up to encMaxRefine further centres, each one Stein step on
+// with a fresh gain. While W(X_c) is not proved positive definite the
+// step takes the returned K, and W-not-PD fails only at the last centre.
+// corrected is fl(X_c) and its gain where X_c, not X, is within budget.
+func encloseDare(A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
 	d := newEncData(A, B, Q, R, S, E)
 	c := encDDOf(X)
 	symmetrize(c.h, d.n, d.n)
 	kret := encDDOf(K)
-	for it := 0; it <= encMaxRefine+1; it++ {
+	e0 := d.centre(c, kret)
+	e0.zeroLo = true
+	if v, ok := e0.encloseX(X, encDDOnly); ok && v.ret {
+		return encCertified, nil, nil, v.tier
+	}
+	var e1 *encCentre
+	if dx != nil {
+		c1 := encSym(c.add(encDDOf(dx), 1))
+		if k1, ok := d.gain(c1); ok {
+			e1 = d.centre(c1, k1)
+			if v, ok := e1.encloseX(X, encDDOnly); ok {
+				return e1.outcome(v)
+			}
+		}
+	}
+	if v, ok := e0.encloseX(X, encBigOnly); ok && v.ret {
+		return encCertified, nil, nil, v.tier
+	}
+	if e1 != nil {
+		if v, ok := e1.encloseX(X, encBigOnly); ok {
+			return e1.outcome(v)
+		}
+		c = e1.c
+	}
+	start := 0
+	if e1 != nil {
+		start = 1
+	}
+	for it := start; it <= encMaxRefine+1; it++ {
 		k, ok := d.gain(c)
 		var e *encCentre
 		if ok {
@@ -1109,22 +1177,26 @@ func encloseDare(A, B, Q, R, S, E, X, K *mat.Dense) (out encResult, xc, kc *mat.
 			e = d.centre(c, k)
 		} else if it > 0 {
 			if v, ok := e.enclose(X); ok {
-				if v.ret {
-					return encCertified, nil, nil, v.tier
-				}
-				return encCorrected, c.round(), k.round(), v.tier
+				return e.outcome(v)
 			}
 		}
 		if it == encMaxRefine+1 {
 			break
 		}
-		dx, ok := d.stein(k, e.p.r.round())
+		step, ok := d.stein(k, e.p.r.round())
 		if !ok {
 			break
 		}
-		c = encSym(c.add(dx, 1))
+		c = encSym(c.add(step, 1))
 	}
 	return encFailed, nil, nil, encNone
+}
+
+func (e *encCentre) outcome(v encVerdict) (encResult, *mat.Dense, *mat.Dense, encTier) {
+	if v.ret {
+		return encCertified, nil, nil, v.tier
+	}
+	return encCorrected, e.c.round(), e.k.round(), v.tier
 }
 
 // confirm records X as confirmed in extended precision (an extended
@@ -1157,9 +1229,9 @@ func (r *RiccatiResult) xConfirmed() bool {
 // dareGate holds a Dare result at Accuracy 0 whose X is of float64
 // provenance to the enclosure of encloseDare on the stored data. A
 // certified X is kept; a corrected one is replaced by fl(X_c) and its
-// gain, whose K the gain gates then certify with X unchanged, else
-// Accuracy 1: their refinement replaced a certified fl(X_c) by a float64
-// Newton iterate 1.6e-6 to 3.9e-6 off (zrwreg 20196, 12124). Without an
+// gain once the gain gates certify K with X unchanged (their refinement
+// replaced a certified fl(X_c) by a float64 Newton iterate 1.6e-6 to
+// 3.9e-6 off, zrwreg 20196, 12124), else the given X and K go to tier 2. Without an
 // enclosure, tier 2: hewerSolution, then the extended solve as
 // lostCandidateDare runs it, each accepted only at Accuracy 0 (the
 // extended pair replacing X and K unless X is within newtonTol and K
@@ -1173,7 +1245,11 @@ func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *Ric
 	if opts != nil {
 		S, E = opts.S, opts.E
 	}
-	out, xc, kc, _ := encloseDare(A, B, Q, R, S, E, res.X, res.K)
+	var dx *mat.Dense
+	if res.newtonDelta != nil && mat.Equal(res.X, res.newtonX) {
+		dx = res.newtonDelta
+	}
+	out, xc, kc, _ := encloseDare(A, B, Q, R, S, E, res.X, res.K, dx)
 	switch out {
 	case encCertified:
 		return res
@@ -1190,8 +1266,7 @@ func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *Ric
 		if r, _, ok := gainOfX(A, B, Q, R, opts, red, &c); ok && r.accuracy == 0 && mat.Equal(r.X, c.X) {
 			return r
 		}
-		c.accuracy = 1
-		return &c
+		return dareTier2(A, B, Q, R, opts, res)
 	}
 	return dareTier2(A, B, Q, R, opts, res)
 }
