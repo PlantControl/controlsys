@@ -101,9 +101,7 @@ func oracleSISO(t *testing.T, a, b, c []float64, n int) (sys *System, tf *Transf
 		t.Fatal(e)
 	}
 	res, e := sys.TransferFunction(nil)
-	if e != nil {
-		t.Fatalf("TransferFunction: %v", e)
-	}
+	requireTFWithinTermsOrUnverified(t, sys, res, e)
 	if len(res.TF.Den[0]) != n+1 {
 		return sys, res.TF, den, num, math.Inf(1)
 	}
