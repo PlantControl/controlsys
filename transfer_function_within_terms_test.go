@@ -146,3 +146,68 @@ func TestExplicitFastTierVerifiedPointsWithinTerms(t *testing.T) {
 		t.Fatal("no point verified")
 	}
 }
+
+// TestTransferFunctionZeroCScaledDescriptorExact: C scaled by 2⁻⁶⁰⁰ down
+// to zero leaves a static model, G ≡ D, while U = (sE − A)⁻¹B overflows
+// (E ~ 1e-200, B ~ 1e123), so the pencil judge has no determined point.
+// The TF D/1 is exact and must come back nil (frozen sc-gen/113 of the
+// SL352H census).
+func TestTransferFunctionZeroCScaledDescriptorExact(t *testing.T) {
+	a := mat.NewDense(5, 5, []float64{
+		-6.482423315255261e-201, -7.250941381473191e-201, 5.155605915063175e-201, -1.2434300787758613e-200, -1.83533648919143e-200,
+		-1.0402641242474691e-201, -4.214240534898938e-201, -2.4816805079909427e-200, -2.0144040984927038e-203, -9.801294119610885e-201,
+		2.0357266285170537e-200, 1.2565499319135401e-200, 7.758038980908553e-201, -4.765353965737153e-202, 1.520672725799147e-200,
+		1.2045186531148942e-200, -6.4255718592128355e-201, -1.6420397995601e-201, -1.544348677424788e-200, -7.007907380410447e-201,
+		-2.4049249727189326e-200, 2.2199916002675208e-200, 1.2823443819231273e-200, -2.5246436946572457e-200, -3.2318749969325064e-200,
+	})
+	b := mat.NewDense(5, 1, []float64{-8.12919484825432e+123, 3.6995818016749145e+123, 1.2392441003926717e+123, 7.834799232951917e+123, -1.394379773316501e+123})
+	e := mat.NewDense(5, 5, []float64{
+		2.5170928702310347e-200, -5.924589804764107e-203, -5.382197770318307e-203, -1.0188940353240161e-202, 2.3345487718398027e-202,
+		5.540693782708861e-204, 2.4277706590083818e-200, 1.053590388266575e-202, 1.1016820817092456e-202, 7.20880380189886e-204,
+		8.103077018562128e-203, -4.834222709103202e-203, 1.3352154878628966e-200, -5.95195524544102e-203, 1.4765322776866952e-202,
+		-1.4681517269163384e-202, -2.5488814121823532e-203, 2.5467787872254975e-202, 2.1455705121684678e-200, 1.3550959087921906e-202,
+		8.538773842545555e-203, -1.3228385392385017e-202, 1.3979997042035615e-203, 7.718123013228834e-203, 1.3229212666202935e-200,
+	})
+	d := mat.NewDense(2, 1, []float64{-0.4159759885164252, -0.3049029936182224})
+	sys, err := NewDescriptor(a, b, mat.NewDense(2, 5, nil), d, e, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.TransferFunction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if v, _ := tfEntryAt(res.TF.Num[i][0], res.TF.Den[i], 1i); v != complex(d.At(i, 0), 0) {
+			t.Fatalf("row %d: TF(j) = %v, want D = %v", i, v, d.At(i, 0))
+		}
+	}
+}
+
+// TestDescriptorExactEntryTermsBeyondFloatRange: at s = 1e10j the exact U
+// of this 2^±600 model is ~1e-324, below float64, while C ~ 1e295 brings
+// C·U back to ~1e-30. exactEntry rounded each |U| first and returned the
+// terms T = 0 < |G|, so the pencil judge refuted a TF within 0.21× of the
+// threshold at 2.07× (frozen ovf/988 of the SL352H census).
+func TestDescriptorExactEntryTermsBeyondFloatRange(t *testing.T) {
+	a := mat.NewDense(3, 3, []float64{3.8348409356454316e+188, 6.943510581867232e+187, 9.190267969656211e+187, 5.997618646428171e+188, 6.29897391141415e+187, 9.846928918499896e+187, 2.935262921736679e+188, 1.4695591477171504e+189, -4.95373929706092e+188})
+	b := mat.NewDense(3, 1, []float64{1.3505940664608903e-126, 1.0275053260571309e-126, 9.127785212276266e-127})
+	c := mat.NewDense(2, 3, []float64{-5.629540717275584e+294, -5.911275284317662e+294, 2.379019455318654e+295, -5.301639358489369e+294, -2.4805886895083824e+295, -1.0879334013493183e+295})
+	e := mat.NewDense(3, 3, []float64{5.942926229080493e+188, -5.58589092223062e+186, 4.116237123017461e+187, 8.486583687200944e+185, 9.49149520197582e+188, -9.750041938651018e+187, 3.108555377628159e+187, 5.495528316163908e+187, 1.0328571138978448e+189})
+	sys, err := NewDescriptor(a, b, c, mat.NewDense(2, 1, nil), e, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ur, ui := exactPencilAt(sys, 1e10i)
+	if ur == nil {
+		t.Fatal("singular pencil")
+	}
+	for i := range 2 {
+		g, T := exactEntry(sys, ur, ui, i, 0)
+		if !(T >= cmplx.Abs(g)*(1-4*eps())) || g == 0 {
+			t.Fatalf("row %d: terms %g below |G| = %g", i, T, cmplx.Abs(g))
+		}
+	}
+	res, err := sys.TransferFunction(nil)
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
+}

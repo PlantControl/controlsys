@@ -17,9 +17,14 @@ import (
 // (E⁻¹A, E⁻¹B, C, D) as ToExplicit forms it, and the fast tier runs on it
 // only when foldWithinRounding charges its whole residual to one
 // ε-rounding of A and B; otherwise every point goes to the pencil judge.
+// A model whose B or C is zero has the response D everywhere, and tf is
+// verified when it is D exactly (staticTFExact).
 func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) bool {
 	if n, m, p := sys.Dims(); n == 0 || m == 0 || p == 0 {
 		return true
+	}
+	if allZeroDense(sys.B) || allZeroDense(sys.C) {
+		return staticTFExact(sys, tf)
 	}
 	if !tfVerdictMemo {
 		v, _, _ := explicitRouteJudgeWhy(sys, route, tf, c)
@@ -177,6 +182,35 @@ func identityInfinityRefutes(sys *System, tf *TransferFunc, c *pencilCache) bool
 		}
 	}
 	return false
+}
+
+// staticTFExact reports whether every entry of tf is exactly D_ij of sys,
+// num = D_ij·den coefficient by coefficient without rounding: the response
+// of a model with B or C zero is D at every point, the stored data's terms.
+func staticTFExact(sys *System, tf *TransferFunc) bool {
+	for i, den := range tf.Den {
+		for j, num := range tf.Num[i] {
+			d := sys.D.At(i, j)
+			if len(num) > len(den) {
+				return false
+			}
+			off := len(den) - len(num)
+			for k, dk := range den {
+				want := d * dk
+				if math.FMA(d, dk, -want) != 0 || !isFinite(want) {
+					return false
+				}
+				got := 0.0
+				if k >= off {
+					got = num[k-off]
+				}
+				if got != want {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // identityPencil is the explicit sys as the descriptor (A, B, C, D, I),

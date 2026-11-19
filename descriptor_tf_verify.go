@@ -1592,23 +1592,31 @@ func exactPencilAt(sys *System, s complex128) (ur, ui [][]*big.Rat) {
 }
 
 // exactEntry returns G_ij = Σ_l C_il·U_lj + D_ij from the exact U of
-// exactPencilAt, rounded, and its terms T = Σ_l |C_il||U_lj| + |D_ij|.
+// exactPencilAt, rounded, and its terms T = Σ_l |C_il||U_lj| + |D_ij|,
+// summed at exactCertPrec bits so that a |U_lj| beyond float64's range
+// against a C_il that brings it back still counts, then rounded.
 func exactEntry(sys *System, ur, ui [][]*big.Rat, i, j int) (complex128, float64) {
 	n, _, _ := sys.Dims()
 	gr, gi := new(big.Rat).SetFloat64(sys.D.At(i, j)), new(big.Rat)
 	var t big.Rat
-	T := math.Abs(sys.D.At(i, j))
+	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
+	T := nw().SetFloat64(math.Abs(sys.D.At(i, j)))
 	for l := range n {
-		c := new(big.Rat).SetFloat64(sys.C.At(i, l))
+		cl := sys.C.At(i, l)
+		c := new(big.Rat).SetFloat64(cl)
 		gr.Add(gr, t.Mul(c, ur[l][j]))
 		gi.Add(gi, t.Mul(c, ui[l][j]))
-		a, _ := ur[l][j].Float64()
-		b, _ := ui[l][j].Float64()
-		T += math.Abs(sys.C.At(i, l)) * cmplx.Abs(complex(a, b))
+		if cl == 0 {
+			continue
+		}
+		a, b := nw().SetRat(ur[l][j]), nw().SetRat(ui[l][j])
+		u := nw().Add(nw().Mul(a, a), nw().Mul(b, b))
+		T.Add(T, u.Sqrt(u).Mul(u, nw().SetFloat64(math.Abs(cl))))
 	}
 	a, _ := gr.Float64()
 	b, _ := gi.Float64()
-	return complex(a, b), T
+	tv, _ := T.Float64()
+	return complex(a, b), tv
 }
 
 // taylorCoef returns c^(m)(λ)/m! for the descending coefficients c.
