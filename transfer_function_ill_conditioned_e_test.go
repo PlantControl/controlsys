@@ -108,10 +108,10 @@ func TestTransferFunctionBadlyScaledDiagonalEStaysExact(t *testing.T) {
 		if err != nil && (!errors.Is(err, ErrAccuracyUnverified) || res == nil) {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-		if err == nil {
-			if w, at := withinTermsWorst(t, sys, res.TF, math.Inf(1)); w > 1 {
-				t.Errorf("seed %d (n=%d): nil TF outside terms at %v, %.3g× the threshold", seed, n, at, w)
-			}
+		if w, at := withinTermsWorst(t, sys, res.TF, math.Inf(1)); err == nil && w > 1 {
+			t.Errorf("seed %d (n=%d): nil TF outside terms at %v, %.3g× the threshold", seed, n, at, w)
+		} else if err != nil && !(w > 1) {
+			t.Errorf("seed %d (n=%d): TF within terms (%.3g×) returned with %v", seed, n, w, err)
 		}
 		worst := 0.0
 		for _, s := range pts {
