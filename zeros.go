@@ -36,23 +36,23 @@ type ZerosResult struct {
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 //
 // For a square model (as many inputs as outputs, at most four) a nil error
-// certifies the returned zeros and Rank within the stored data's rounding
-// terms: there is a real c with |det G(s) − c·Π(s − zᵢ)/det(sI − A)| ≤
-// √ε·max(|det G|, |c·Π(s − zᵢ)/det(sI − A)|, Σ|adj G_ji|·T_ij) at the
-// determined axis points of the check (beside every zero, the static
-// point and a geometric fill), G the k×k response of rank k (of rows and
-// columns spanning the others to rounding when k is below the number of
-// inputs) and T_ij = Σ_l|C_il||(sI − A)⁻¹B|_lj + |D_ij| the entry's terms
-// (zerosCertify): the zeros of a model whose response is within those
-// terms, as MATLAB tzero. Rank is the rank floor; the zero count is
-// certified, individual root locations are not. Where the computed zeros
-// do not verify, those of the exact determinant of the system pencil of
-// the stored data are tried (zerosTier2); where neither certifies within
-// a fixed work budget, the computed zeros and Rank are returned with an
-// error wrapping ErrAccuracyUnverified. Only points where det G is
-// determined nonzero count toward the check. A probe within √ε|ẑ| of a
-// nonzero zero is not judged: the zero's floating-point representation
-// alone moves G by its own size there.
+// certifies the returned zeros and Rank within the stored data's rounding:
+// there is a real c with |det G(s) − Z(s)| ≤ max(√ε·max(|det G|, |Z|),
+// K·ε·T_data) at the axis points of the check (beside every zero, the
+// static point and a geometric fill), Z = c·Π(s − zᵢ)/det(sI − A), G the
+// k×k response of rank k (of rows and columns spanning the others to
+// rounding when k is below the number of inputs), T_data = Σ|adj G_ji|·
+// T_ij and T_ij = Σ_l|C_il||X_lj| + |D_ij| + Σ_l|CY|_il(|A||X| + |B|)_lj,
+// Y = (sI − A)⁻¹, X = YB, the first-order change of G_ij when every stored
+// entry moves by ε relative, K = 8 (zerosCertify). Rank is the rank floor
+// at that rounding: det G must exceed K·ε·T_data at n + 1 of those points
+// (rank k), and every (k+1)-minor stays within it (rank below k). The zero
+// count is certified, individual root locations are not; a probe within
+// √ε|ẑ| of a nonzero zero is not judged. Where the computed zeros do not
+// verify, those of the exact determinant of the system pencil of the
+// stored data are tried (zerosTier2); where neither certifies within a
+// fixed work budget, the computed zeros and Rank are returned with an
+// error wrapping ErrAccuracyUnverified.
 //
 // Departures from that certificate: at Rank 0 the zeros (decoupling zeros
 // of the pencil) are returned unjudged, except where G ≡ 0 exactly, whose
