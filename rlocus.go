@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -144,9 +145,9 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	zeros, err := sys.Zeros()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+	zeros, zerr := sys.Zeros()
+	if zerr != nil && !errors.Is(zerr, ErrAccuracyUnverified) {
+		return nil, fmt.Errorf("%s: %w", op, zerr)
 	}
 
 	if gains == nil {
@@ -283,7 +284,7 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 		arrivalAngles[k] = phase0 - sumZeros + sumPoles
 	}
 
-	return &RootLocusResult{
+	res := &RootLocusResult{
 		Gains:           gains,
 		Branches:        branches,
 		Breakaway:       breakaway,
@@ -291,7 +292,11 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 		DepartureAngles: departAngles,
 		ArrivalAngles:   arrivalAngles,
 		centroid:        asymCentroid,
-	}, nil
+	}
+	if zerr != nil {
+		return res, fmt.Errorf("%s: %w", op, zerr)
+	}
+	return res, nil
 }
 
 func defaultGains() []float64 {

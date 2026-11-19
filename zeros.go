@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -33,18 +34,45 @@ type ZerosResult struct {
 // contribute no finite zeros and are ignored. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html and
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
+//
+// For a square model (as many inputs as outputs, at most four) a nil error
+// certifies the returned zeros and Rank within the stored data's rounding
+// terms: there is a real c with |det G(s) − c·Π(s − zᵢ)/det(sI − A)| ≤
+// √ε·max(|det G|, |c·Π(s − zᵢ)/det(sI − A)|, Σ|adj G_ji|·T_ij) at the
+// determined axis points of the check (beside every zero, the static
+// point and a geometric fill), G the k×k response of rank k (of rows and
+// columns spanning the others to rounding when k is below the number of
+// inputs) and T_ij = Σ_l|C_il||(sI − A)⁻¹B|_lj + |D_ij| the entry's terms
+// (zerosCertify): the zeros of a model whose response is within those
+// terms, as MATLAB tzero. Rank is the rank floor; the zero count is
+// certified, individual root locations are not. Where the computed zeros
+// do not verify, those of the exact determinant of the system pencil of
+// the stored data are tried (zerosTier2); where neither certifies, the
+// computed zeros and Rank are returned with an error wrapping
+// ErrAccuracyUnverified. Non-square models are not checked.
 func (sys *System) Zeros() ([]complex128, error) {
 	res, err := sys.zerosDetail("Zeros")
-	if err != nil {
+	if res == nil {
 		return nil, err
 	}
-	return res.Zeros, nil
+	return res.Zeros, err
+}
+
+// zerosValue is Zeros for callers that use the zeros as a value: an
+// ErrAccuracyUnverified result is taken as is.
+func (sys *System) zerosValue() ([]complex128, error) {
+	z, err := sys.Zeros()
+	if errors.Is(err, ErrAccuracyUnverified) {
+		return z, nil
+	}
+	return z, err
 }
 
 // ZerosDetail returns the invariant zeros together with the normal rank of
 // the transfer matrix, as MATLAB [z, nrank] = tzero(sys). A static gain has no
 // zeros and rank rank(D); a model with no inputs or outputs has rank 0.
-// Non-finite model data returns ErrInvalidArgument. See
+// Non-finite model data returns ErrInvalidArgument, and zeros not certified
+// within terms are returned with ErrAccuracyUnverified (see Zeros). See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) ZerosDetail() (*ZerosResult, error) {
 	return sys.zerosDetail("ZerosDetail")
@@ -71,8 +99,14 @@ func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
 		res, err = descriptorZeros(sys)
 	default:
 		res, err = mimoZeros(sys)
+		if err == nil {
+			res, err = certifyZeros(sys, res)
+		}
 	}
 	if err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return res, fmt.Errorf("%s: %w", op, err)
+		}
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	return res, nil

@@ -3663,7 +3663,7 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 	if err != nil {
 		return lo, 0
 	}
-	zeros, err := plant.Zeros()
+	zeros, err := plant.zerosValue()
 	if err != nil {
 		zeros = nil
 	}
@@ -3968,7 +3968,7 @@ func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0, false
 	}
-	zeros, err := plant.Zeros()
+	zeros, err := plant.zerosValue()
 	if err != nil {
 		return 0, false
 	}
@@ -3989,7 +3989,7 @@ func pidTuningModes(plant *System) []complex128 {
 	if err != nil {
 		return nil
 	}
-	zeros, err := plant.Zeros()
+	zeros, err := plant.zerosValue()
 	if err != nil {
 		zeros = nil
 	}
@@ -4452,7 +4452,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 // zero within 1e-9·wc of the origin is taken as there; one further out
 // leaves a visible closed-loop root.
 func pidTuningLeastZero(plant *System) float64 {
-	zeros, err := plant.Zeros()
+	zeros, err := plant.zerosValue()
 	least := math.Inf(1)
 	if err != nil {
 		return least

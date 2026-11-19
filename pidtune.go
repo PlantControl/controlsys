@@ -834,7 +834,7 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 	if err != nil {
 		return false
 	}
-	zeros, _ := model.Zeros()
+	zeros, _ := model.zerosValue()
 	at, tol := pidtuneIntegratorTol(plant, poles, wc)
 	near := 0
 	for _, p := range poles {
@@ -865,7 +865,7 @@ func pidtuneZeroAtIntegrator(plant *System) bool {
 	if err != nil {
 		return false
 	}
-	zeros, err := model.Zeros()
+	zeros, err := model.zerosValue()
 	if err != nil {
 		return false
 	}
@@ -1160,7 +1160,7 @@ func (g *pidtuneGate) rotates(c PID2) bool {
 		if err != nil {
 			return false
 		}
-		zeros, err := model.Zeros()
+		zeros, err := model.zerosValue()
 		if err != nil {
 			return false
 		}
@@ -2023,7 +2023,7 @@ func pidtuneFastestRoot(plant *System) float64 {
 	if err != nil {
 		return math.Inf(1)
 	}
-	zeros, err := model.Zeros()
+	zeros, err := model.zerosValue()
 	if err != nil {
 		return math.Inf(1)
 	}
@@ -2064,7 +2064,7 @@ func pidtuneIntegratingCrossover(plant *System) (float64, error) {
 	}
 	w := pidtuneSlowestRoot(plant, poles, at, tol)
 	if math.IsInf(w, 1) {
-		zeros, err := model.Zeros()
+		zeros, err := model.zerosValue()
 		if err != nil {
 			return 0, err
 		}

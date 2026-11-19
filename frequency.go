@@ -555,7 +555,7 @@ func (sys *System) DefaultFrequencyGrid(nPoints int) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
-	zeros, err := sys.Zeros()
+	zeros, err := sys.zerosValue()
 	if err != nil {
 		return nil, err
 	}
