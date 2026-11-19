@@ -524,9 +524,10 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 // centre on either side (one side for a real centre, its mirror the
 // conjugate), but none inside another window that is not judged. Beyond the
 // window the cut is judged: a cut pole whose exact distance from the
-// model's exceeds the window's bound β_G + β_R + |λ_R − λ_G| (a first-order
-// bound, which eigensolver error can exceed) deviates there by that
-// distance over the radius, more than tol, and the deviation is largest at
+// model's exceeds the window's bound β_G + β_R + min(|λ_R − λ_G|, β_G +
+// β_R) (a first-order bound for one shared pole, which eigensolver error
+// can exceed, or a cut pole moved off it) deviates there by that distance
+// over the radius, more than tol, and the deviation is largest at
 // the edge, falling as 1/d beyond it, where no probe sees it.
 func axisWindowEdges(pts []complex128, win poleWindows, discrete bool) []complex128 {
 	f := 1 + math.Sqrt(eps())
@@ -1098,13 +1099,17 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // within rounding of the axis, its foot within β_G + β_R of it, is an axis
 // window (axisPole): the cut may carry that pole anywhere within rounding,
 // and inside the window the stored model is not judged (judgeNearPoles).
-// The exact poles of the two lie up to β_G + β_R + |λ_R − λ_G| apart to
-// first order, a distance δ the cut shows as a deviation δ/d at distance d
-// relative to the pole's term, so the radius of an axis window is
-// (β_G + β_R + |λ_R − λ_G|)/tol, the largest over its axis-shared poles:
-// the deviation that distance explains is tol at its edge. Beyond it the
-// cut is judged, at the edge first (axisWindowEdges), where a cut whose
-// exact pole lies further off deviates most.
+// The exact values of one shared pole lie, to first order, within β_G +
+// β_R of each computed one, so the computed λ_R and λ_G of a pole the cut
+// keeps differ by at most β_G + β_R and the exact ones by at most 2(β_G +
+// β_R); a distance δ the cut shows as a deviation δ/d at distance d
+// relative to the pole's term. The radius of an axis window is therefore
+// δ/tol, δ = β_G + β_R + min(|λ_R − λ_G|, β_G + β_R), the largest over its
+// axis-shared poles: the deviation rounding explains is tol at its edge. A
+// computed distance beyond β_G + β_R is a real move of the pole, which
+// buys no wider window (HO6UP6 condition 4): beyond the edge the cut is
+// judged, at the edge first (axisWindowEdges), where a cut whose exact
+// pole lies further off deviates most.
 // The windows of the other shared poles, exempt before, are now judged.
 // The test reads the computed eigenvalues, whose error can exceed β, so it
 // can err either way: a window wrongly exempted is only left uncertified,
@@ -1148,7 +1153,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 			if mp.foot != nil && cmplx.Abs(mp.foot[j]-lg) <= bG+betaR[i] {
 				with = append(with, j)
 				axis = true
-				axisRad = math.Max(axisRad, bG+betaR[i]+cmplx.Abs(lr-lg))
+				axisRad = math.Max(axisRad, bG+betaR[i]+math.Min(cmplx.Abs(lr-lg), bG+betaR[i]))
 			}
 			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
