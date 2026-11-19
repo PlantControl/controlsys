@@ -246,6 +246,9 @@ type RiccatiResult struct {
 	// eps perturbations of the data move it by at most newtonTol.
 	kw          *mat.Dense
 	kwCertified bool
+	// confirmedX is X when an extended-precision solve returned or
+	// confirmed it (confirm); dareGate exempts X while it is unchanged.
+	confirmedX *mat.Dense
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -1075,8 +1078,12 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, res, err); ok {
+		r.confirm()
 		res, err = r, nil
 	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err, explicit); ok {
+		if r != res {
+			r.confirm()
+		}
 		res, err = r, nil
 	} else if errors.As(err, new(unscaledBoundaryError)) {
 		var o RiccatiOpts
@@ -1088,6 +1095,7 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 			res, err = r, nil
 		}
 	} else if r, ok := lostCandidateDare(A, B, Q, R, opts, err); ok {
+		r.confirm()
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
@@ -1096,6 +1104,9 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 	}
 	if err == nil {
 		undetectableBoundary(false, A, B, Q, R, opts, res)
+	}
+	if err == nil && res.accuracy == 0 {
+		res = dareGate(A, B, Q, R, opts, res)
 	}
 	return res, err
 }

@@ -55,7 +55,11 @@ func hewerGainConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedIn
 // newtonUnproven voids its certificate. Under cheap control K converged
 // within newtonTol while Y was still 2.8e-4 off.
 func hewerSolution(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
-	return hewerGain(A, B, Q, R, opts, red, res, true, true)
+	r, ok := hewerGain(A, B, Q, R, opts, red, res, true, true)
+	if ok {
+		r.confirm()
+	}
+	return r, ok
 }
 
 func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, converge, takeX bool) (*RiccatiResult, bool) {
