@@ -763,9 +763,11 @@ func (zr zpkRows) at(i int, s complex128, r []complex128, mag []float64) bool {
 }
 
 // judgeDescriptorCached is judgeDescriptorTFCached for any model rows
-// evaluate, with the bound 4ε·|tf| replaced by 4ε·mag. A point where a row
-// is not finite or a quantity of the test is NaN or ±Inf is undetermined:
-// it neither verifies nor refutes.
+// evaluate, with the bound 4ε·|tf| replaced by 4ε·mag. A row rows cannot
+// evaluate finitely, a row whose scale is not finite, or an entry with a
+// NaN or ±Inf quantity of the test keeps the point from verifying and
+// refutes nothing itself; the finite entries are judged as ever, so their
+// refutations stand whatever the order of the rows.
 func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
 	_, m, p := sys.Dims()
 	tol := math.Sqrt(eps())
@@ -780,16 +782,19 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 		jp := descriptorTFPoint{determined: true, verified: true}
 		var ur, ui [][]*big.Rat
 		exact := false
-	rows:
 		for i := range p {
 			if !rows.at(i, s, r, mag) {
-				jp = descriptorTFPoint{}
-				break
+				jp.verified = false
+				continue
 			}
 			scale := 0.0
 			for j := range m {
 				g := full.g[k*pm+i*m+j] + complex(sys.D.At(i, j), 0)
 				scale = math.Max(scale, math.Max(cmplx.Abs(r[j]), cmplx.Abs(g)))
+			}
+			if !isFinite(scale) {
+				jp.verified = false
+				continue
 			}
 			for j := range m {
 				e := k*pm + i*m + j
@@ -805,9 +810,9 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 				lo, hi := math.Max(0, diff-delta), diff+delta
 				canRef := hi > tol*math.Max(scale, math.Max(0, T-dT))+full.data[e]
 				canVer := lo <= tol*math.Max(scale, T+dT)
-				if !finiteAll(diff, delta, T, dT, thr, scale) {
-					jp = descriptorTFPoint{}
-					break rows
+				if !finiteAll(diff, delta, T, dT, thr) {
+					jp.verified = false
+					continue
 				}
 				if !ver && !ref && !in && (canRef || canVer || !tfPruneExact) {
 					if !exact {
@@ -821,8 +826,8 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 						diff = cmplx.Abs(g - r[j])
 						delta = 4 * eps() * (cmplx.Abs(g) + mag[j] + T)
 						if !finiteAll(diff, delta, T) {
-							jp = descriptorTFPoint{}
-							break rows
+							jp.verified = false
+							continue
 						}
 						ver = diff+delta <= tol*math.Max(scale, T)
 						thr = tol*math.Max(scale, T) + full.data[e]

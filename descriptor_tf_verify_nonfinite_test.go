@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -46,14 +47,14 @@ func TestDescriptorTFJudgeNonFinitePointUndetermined(t *testing.T) {
 		tc.set(&r)
 		jp := judgeDescriptorCached(sys, tfRows{wrong}, pts, r, tfWindows{m: 1}, nil)[0]
 		if jp.verified || jp.refuted {
-			t.Errorf("%s non-finite: %+v, want neither verified nor refuted", tc.name, jp)
+			t.Errorf("%s non-finite: %+v, want not verified, not refuted", tc.name, jp)
 		}
 	}
 	overflow := &TransferFunc{Num: [][][]float64{{{1e308}}}, Den: [][]float64{{1e-300, 1e-300}}}
 	at0 := []complex128{0}
 	full0 := newPencilBoundedResponse(sys, at0)
 	if jp := judgeDescriptorCached(sys, tfRows{overflow}, at0, full0, tfWindows{m: 1}, nil)[0]; jp.verified || jp.refuted {
-		t.Errorf("overflowing model row: %+v, want neither verified nor refuted", jp)
+		t.Errorf("overflowing model row: %+v, want not verified, not refuted", jp)
 	}
 }
 
@@ -209,7 +210,67 @@ func TestDescriptorTFJudgeNonFiniteCoefficientUndetermined(t *testing.T) {
 		{Num: [][][]float64{{{1}}}, Den: [][]float64{{math.NaN(), 1}}},
 	} {
 		if jp := judgeDescriptorCached(sys, tfRows{tf}, pts, full, tfWindows{m: 1}, nil)[0]; jp.verified || jp.refuted {
-			t.Errorf("%v: %+v, want neither verified nor refuted", tf, jp)
+			t.Errorf("%v: %+v, want not verified, not refuted", tf, jp)
+		}
+	}
+}
+
+func nonFiniteJudgeDescriptor22(t *testing.T) *System {
+	t.Helper()
+	sys, err := NewDescriptor(mat.NewDense(2, 2, []float64{-1, 0.5, -0.3, -2}), mat.NewDense(2, 2, []float64{1, 0.4, -0.2, 0.8}),
+		mat.NewDense(2, 2, []float64{0.7, -1, 0.3, 0.9}), mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{1, 0.2, 0, 1.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// 5CFETF ruling (2b): a row that cannot be evaluated finitely keeps the
+// point from verifying but does not discard the refutation of a finite
+// wrong row, before or after it.
+func TestDescriptorTFJudgeNonFiniteRowKeepsFiniteRefutation(t *testing.T) {
+	sys := nonFiniteJudgeDescriptor22(t)
+	pts := []complex128{1i}
+	full := newPencilBoundedResponse(sys, pts)
+	wrong := [][]float64{{1e3}, {-2e3}}
+	bad := [][]float64{{math.Inf(1)}, {1}}
+	for _, tc := range []struct {
+		name string
+		num  [][][]float64
+		want int
+	}{
+		{"wrong row first", [][][]float64{wrong, bad}, 0},
+		{"wrong row second", [][][]float64{bad, wrong}, 2},
+	} {
+		tf := &TransferFunc{Num: tc.num, Den: [][]float64{{1}, {1}}}
+		jp := judgeDescriptorCached(sys, tfRows{tf}, pts, full, tfWindows{m: 2}, nil)[0]
+		if jp.verified || !jp.refuted || len(jp.refutedEntries) != 2 || jp.refutedEntries[0] != tc.want || jp.refutedEntries[1] != tc.want+1 {
+			t.Errorf("%s: %+v, want refuted entries [%d %d]", tc.name, jp, tc.want, tc.want+1)
+		}
+	}
+}
+
+// 5CFETF ruling (2b): a non-finite quantity of one entry does not discard
+// the refutation of the other entry of the same row.
+func TestDescriptorTFJudgeNonFiniteEntryKeepsFiniteRefutation(t *testing.T) {
+	sys := nonFiniteJudgeDescriptor22(t)
+	pts := []complex128{1i}
+	full := newPencilBoundedResponse(sys, pts)
+	g, err := sys.EvalFr(1i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for bad := range 2 {
+		wrongEntry := 1 - bad
+		num := [][][]float64{{{real(g[0][0])}, {real(g[0][1])}}, {{real(g[1][0])}, {real(g[1][1])}}}
+		num[0][wrongEntry] = []float64{1e3}
+		tf := &TransferFunc{Num: num, Den: [][]float64{{1}, {1}}}
+		r := full
+		r.comp = slices.Clone(full.comp)
+		r.comp[bad] = math.Inf(1)
+		jp := judgeDescriptorCached(sys, tfRows{tf}, pts, r, tfWindows{m: 2}, nil)[0]
+		if jp.verified || !jp.refuted || !slices.Contains(jp.refutedEntries, wrongEntry) || slices.Contains(jp.refutedEntries, bad) {
+			t.Errorf("non-finite comp on entry %d: %+v, want entry %d refuted", bad, jp, wrongEntry)
 		}
 	}
 }
