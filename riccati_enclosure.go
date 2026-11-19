@@ -426,14 +426,46 @@ func mul3T(a, b, c *mat.Dense) *mat.Dense {
 }
 
 // psi returns the entrywise magnitudes Ψ of the terms of Ric_K(x),
-// g_K(x) and W(x) at |x|, |k|, rounded up by 1e-10 against their own
-// float64 rounding.
-func (d *encData) psi(ax, ak *mat.Dense) (pr, pg, pw *mat.Dense) {
+// g_K(x) and W(x) at |x|, |k|, so that γ·Ψ (gam) bounds the evaluation
+// error, rounded up by 1e-10 against their own float64 rounding. ahat
+// bounds the computed |A_K| of every tier (encCentre: the double-double
+// A_K plus twice its formation error); the triple product then carries
+// Â = |A| + |B||K| once per side only through A_K's own error:
+//
+// The computed A_K is A_K + δ with |δ| ≤ ε·Â, ε = 4(m + 1)v (inner length
+// m, then one sum). The products in the computed A_K, here Ã, are within
+// γ_P·|Ã|ᵀ|x||Ã| of ÃᵀxÃ, γ_P ≤ γ. And ÃᵀxÃ − A_KᵀxA_K = δᵀxÃ + Ãᵀxδ −
+// δᵀxδ, so |·| ≤ ε(Âᵀ|x||Ã| + |Ã|ᵀ|x|Â) + ε²Âᵀ|x|Â. With |Ã| ≤ ahat,
+// Ψ_R holds ahatᵀ|x|ahat, (ε/γ)(Âᵀ|x|ahat + ahatᵀ|x|Â) and (ε²/γ)Âᵀ|x|Â;
+// ε/γ = (m + 1)/(2(n + m + 8)) and ε²/γ ≤ 2(m + 1)v are exact factors of
+// gam's γ = 8(n + m + 8)v. Likewise Ψ_g holds |B|ᵀ|x|ahat and
+// (ε/γ)|B|ᵀ|x|Â. Without ahat both carry Â on both sides, the bound
+// gam was first derived for, which double counted A_K's error against
+// the far larger Âᵀ|x|Â under cheap control.
+func (d *encData) psi(ax, ak, ahat *mat.Dense, v float64) (pr, pg, pw *mat.Dense) {
 	ah := mat.DenseCopyOf(d.aA)
 	var bk mat.Dense
 	bk.Mul(d.aB, ak)
 	ah.Add(ah, &bk)
-	pr = mul3T(ah, ax, ah)
+	if ahat == nil {
+		pr = mul3T(ah, ax, ah)
+		pg = mul3T(d.aB, ax, ah)
+	} else {
+		c1 := float64(d.m+1) / float64(2*(d.n+d.m+8))
+		c2 := 2 * float64(d.m+1) * v
+		pr = mul3T(ahat, ax, ahat)
+		x1 := mul3T(ah, ax, ahat)
+		x1.Scale(c1, x1)
+		pr.Add(pr, x1)
+		pr.Add(pr, x1.T())
+		x2 := mul3T(ah, ax, ah)
+		x2.Scale(c2, x2)
+		pr.Add(pr, x2)
+		pg = mul3T(d.aB, ax, ahat)
+		g1 := mul3T(d.aB, ax, ah)
+		g1.Scale(c1, g1)
+		pg.Add(pg, g1)
+	}
 	pr.Add(pr, mul3T(d.aE, ax, d.aE))
 	pr.Add(pr, d.aQ)
 	pr.Add(pr, mul3T(ak, d.aR, ak))
@@ -446,7 +478,6 @@ func (d *encData) psi(ax, ak *mat.Dense) (pr, pg, pw *mat.Dense) {
 		pr.Add(pr, sk.T())
 		rk.Add(rk, d.aS.T())
 	}
-	pg = mul3T(d.aB, ax, ah)
 	pg.Add(pg, rk)
 	pw = mul3T(d.aB, ax, d.aB)
 	pw.Add(pw, d.aR)
@@ -693,7 +724,15 @@ type encBounds struct {
 func (d *encData) bounds(c, k encDD, p encPieces[encDD]) encBounds {
 	var b encBounds
 	ak := k.abs()
-	b.pr, b.pg, b.pw = d.psi(c.abs(), ak)
+	u2 := math.Ldexp(1, -106)
+	ahat := p.ak.abs()
+	var bk0 mat.Dense
+	bk0.Mul(d.aB, ak)
+	bk0.Add(&bk0, d.aA)
+	bk0.Scale(8*float64(d.m+1)*u2, &bk0)
+	ahat.Add(ahat, &bk0)
+	ahat.Scale(1+1e-10, ahat)
+	b.pr, b.pg, b.pw = d.psi(c.abs(), ak, ahat, u2)
 	b.pq = mat.DenseCopyOf(d.aQ)
 	b.pq.Add(b.pq, mul3T(ak, d.aR, ak))
 	b.prks = mat.NewDense(d.m, d.n, nil)
