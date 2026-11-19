@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -113,6 +114,58 @@ func TestZPKModel_DescriptorWithOverflowingEinvB(t *testing.T) {
 		}
 		if d := cmplx.Abs(g[0][0]-w[0][0]) / cmplx.Abs(w[0][0]); !(d <= 1e-12) {
 			t.Fatalf("s=%v: Z=%v, want %v", s, g[0][0], w[0][0])
+		}
+	}
+}
+
+// 5CFETF: with C raised to 2⁻¹⁰⁰ the XBVOCH response itself overflows
+// (G ≈ 2¹⁰⁶²): no scaling evaluates it, so no point is ok.
+func TestPencilBoundedResponseOverflowingResponseNotOK(t *testing.T) {
+	sys := explicitOverflowDescriptor(t, 0)
+	c := math.Ldexp(1, -100)
+	sys.C = mat.NewDense(1, 2, []float64{c, c})
+	pts := []complex128{1e-3i, 1i, 1e4i}
+	full := newPencilBoundedResponse(sys, pts)
+	for k, s := range pts {
+		if full.ok[k] {
+			t.Errorf("s %v: ok with g %v comp %g terms %g", s, full.g[k], full.comp[k], full.terms[k])
+		}
+	}
+}
+
+// 5CFETF: E and A near 2⁻⁶⁷⁷, B near 2⁴¹⁹ and C near 2⁻⁸⁹⁶ (A = E·M,
+// non-symmetric M). GEPP on sE − A gave NaN below ~1e60j, flagged ok
+// with η < 1, so only the high band was judged and a ZPK with a zero at
+// −1.47e60 instead of the stored response (≈ −4.7e61 at s = 0) verified.
+func TestZPKModel_DescriptorOverflowingSolveNotVerifiedWrong(t *testing.T) {
+	sys, err := NewDescriptor(
+		mat.NewDense(3, 3, []float64{-2.406778576576046e-204, -2.0386439418247506e-204, -3.8705757921820436e-204,
+			-1.297283944103912e-204, -2.017219779670027e-204, -1.4962877978536035e-204,
+			-1.5054053306422805e-204, -2.137409448301117e-204, -2.5352075714330445e-204}),
+		mat.NewDense(3, 1, []float64{-2.3781269517608835e+126, -2.2646106411394616e+125, 3.885259238431645e+126}),
+		mat.NewDense(1, 3, []float64{2.9715400540113267e-270, -1.8730043667115604e-271, 2.5650412465376597e-271}),
+		mat.NewDense(1, 1, []float64{-0.8536619411158632}),
+		mat.NewDense(3, 3, []float64{4.671877514131595e-204, -1.7561249072122202e-205, -1.2839898695507485e-206,
+			2.2094128189347175e-205, 3.284567646985096e-204, 1.1056984210698517e-205,
+			3.7533090962241964e-205, 2.1129124653890444e-205, 4.341030006087057e-204}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := sys.ZPKModel(nil)
+	if err != nil {
+		if !errors.Is(err, ErrAccuracyUnverified) {
+			t.Fatal(err)
+		}
+		return
+	}
+	for _, s := range []complex128{0, 1e-3i, 0.1i, 1i, 10i} {
+		v, err := z.ZPK.Eval(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := storedResponse320(sys, s)[0][0]
+		if d := cmplx.Abs(v[0][0]-w) / cmplx.Abs(w); !(d <= 1e-6) {
+			t.Fatalf("nil error but s=%v: Z=%v, stored response %v", s, v[0][0], w)
 		}
 	}
 }
