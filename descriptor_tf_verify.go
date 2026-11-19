@@ -29,7 +29,9 @@ import (
 // point's determinacy η (pencilDeterminacy); where η < 1 comp, data and
 // dTer are scaled by 1/(1 − η), and where η ≥ 1 the point is undetermined
 // and its bounds are not valid. ok is false at a point where GEPP meets an
-// exactly zero pivot. g excludes D.
+// exactly zero pivot or an output is NaN or ±Inf both on the stored data
+// and on their power-of-two scaling (pencilPow2Scaled): such a point is
+// undetermined. g excludes D.
 type pencilBoundedResp struct {
 	p, m                    int
 	g                       []complex128
@@ -66,12 +68,15 @@ func newPencilBoundedResponse(sys *System, pts []complex128) pencilBoundedResp {
 		gam[i] = float64(24*k+8) * ddOpErr
 	}
 	safety, gn := 1+2*float64(n+4)*eps(), gammaN(n+1)
-	for k, s := range pts {
+	// point evaluates point k at s from the data a, e, b, c, whose response
+	// is 2^−shift times the stored model's (D apart), and reports whether
+	// every output is finite and the scaling back exact.
+	point := func(k int, s complex128, a, e, b, c []float64, shift int) bool {
 		for i := range n * n {
 			x[i] = s*complex(e[i], 0) - complex(a[i], 0)
 		}
 		if !cgeppFactor(x, n, piv) {
-			continue
+			return false
 		}
 		for i, bv := range b {
 			u[i] = complex(bv, 0)
@@ -147,6 +152,16 @@ func newPencilBoundedResponse(sys *System, pts []complex128) pencilBoundedResp {
 				cr[i*n+l] = w
 			}
 		}
+		exact := true
+		back := func(x float64) float64 {
+			if shift == 0 {
+				return x
+			}
+			y := math.Ldexp(x, shift)
+			exact = exact && math.Ldexp(y, -shift) == x
+			return y
+		}
+		finite := isFinite(eta)
 		o := k * pm
 		for i := range p {
 			for j := range m {
@@ -161,17 +176,84 @@ func newPencilBoundedResponse(sys *System, pts []complex128) pencilBoundedResp {
 					t += al * (au[l*m+j] + as*eu[l*m+j] + math.Abs(b[l*m+j]))
 					ct += math.Abs(cl) * (rw[l*m+j] + rbm[l*m+j])
 				}
+				g = complex(back(real(g)), back(imag(g)))
+				tc, cu, t, ct = back(tc), back(cu), back(t), back(ct)
 				d := math.Abs(sys.D.At(i, j))
-				out.g[o+i*m+j] = g
-				out.comp[o+i*m+j] = grow * safety * (tc + gn*cu)
-				out.data[o+i*m+j] = grow * eps() * (t + cu + d)
-				out.terms[o+i*m+j] = cu + d
-				out.dTer[o+i*m+j] = grow*eps()*(ct+cu+d) + out.comp[o+i*m+j]
+				q := o + i*m + j
+				out.g[q] = g
+				out.comp[q] = grow * safety * (tc + gn*cu)
+				out.data[q] = grow * eps() * (t + cu + d)
+				out.terms[q] = cu + d
+				out.dTer[q] = grow*eps()*(ct+cu+d) + out.comp[q]
+				finite = finite && isFinite(real(g)) && isFinite(imag(g)) && isFinite(out.comp[q]) &&
+					isFinite(out.data[q]) && isFinite(out.dTer[q])
 			}
 		}
-		out.ok[k] = true
+		return finite && exact
+	}
+	for k, s := range pts {
+		if point(k, s, a, e, b, c, 0) {
+			out.ok[k] = true
+			continue
+		}
+		if sa, se, sb, sc, shift, ok := pencilPow2Scaled(a, e, b, c, s); ok {
+			out.ok[k] = point(k, s, sa, se, sb, sc, shift)
+		}
 	}
 	return out
+}
+
+// pencilPow2Scaled returns the data of a pencil scaled by powers of two for
+// a point s where the stored data over- or underflow: 2^−eM·A, 2^−eM·E,
+// 2^−eB·B and 2^−eC·C with eM, eB and eC the binary exponents of max(|s|·
+// max|E|, max|A|), max|B| and max|C|, whose response is 2^−shift times the
+// stored one, shift = eC + eB − eM; false when no scaling applies or one
+// is inexact.
+func pencilPow2Scaled(a, e, b, c []float64, s complex128) (sa, se, sb, sc []float64, shift int, ok bool) {
+	exp := func(vs ...[]float64) (int, bool) {
+		mx := 0.0
+		for _, v := range vs {
+			for _, x := range v {
+				mx = math.Max(mx, math.Abs(x))
+			}
+		}
+		if mx == 0 || !isFinite(mx) {
+			return 0, false
+		}
+		return frexpExp(mx), true
+	}
+	ea, okA := exp(a)
+	ee, okE := exp(e)
+	eB, okB := exp(b)
+	eC, okC := exp(c)
+	if !okB || !okC || !okA && !okE {
+		return nil, nil, nil, nil, 0, false
+	}
+	eM := ea
+	if as := cmplx.Abs(s); okE && as != 0 && isFinite(as) {
+		if es := frexpExp(as) + ee; !okA || es > ea {
+			eM = es
+		}
+	}
+	scale := func(v []float64, by int) ([]float64, bool) {
+		out := make([]float64, len(v))
+		for i, x := range v {
+			out[i] = math.Ldexp(x, -by)
+			if math.Ldexp(out[i], by) != x {
+				return nil, false
+			}
+		}
+		return out, true
+	}
+	var okS [4]bool
+	sa, okS[0] = scale(a, eM)
+	se, okS[1] = scale(e, eM)
+	sb, okS[2] = scale(b, eB)
+	sc, okS[3] = scale(c, eC)
+	if !okS[0] || !okS[1] || !okS[2] || !okS[3] || eM == 0 && eB == 0 && eC == 0 {
+		return nil, nil, nil, nil, 0, false
+	}
+	return sa, se, sb, sc, eC + eB - eM, true
 }
 
 // exactCertPrec is the precision at which descriptorTFVerified evaluates
@@ -312,6 +394,16 @@ func pencilDeterminacy(x []complex128, piv []int, absR []float64, n int, perm []
 		worst = max(worst, v)
 	}
 	return gammaN(n) * worst
+}
+
+// finiteAll reports whether no v is NaN or ±Inf.
+func finiteAll(v ...float64) bool {
+	for _, x := range v {
+		if !isFinite(x) {
+			return false
+		}
+	}
+	return true
 }
 
 func denseData(a *mat.Dense) []float64 {
@@ -628,17 +720,26 @@ type descriptorRows interface {
 
 // tfRows evaluates a transfer function from its float64 coefficients as
 // returned, numerator, denominator and quotient at exactCertPrec bits,
-// then rounded (bigDen.quo): mag = |r| covers the roundings.
+// then rounded (bigDen.quo): mag = |r| covers the roundings. A row with a
+// non-finite coefficient or value is not finite.
 type tfRows struct{ tf *TransferFunc }
 
 func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
+	if !finiteAll(t.tf.Den[i]...) {
+		return false
+	}
+	for _, num := range t.tf.Num[i] {
+		if !finiteAll(num...) {
+			return false
+		}
+	}
 	d := newBigDen(t.tf.Den[i], s)
 	if d.d2.Sign() == 0 {
 		return false
 	}
 	for j := range r {
 		v, ok := d.quo(t.tf.Num[i][j], s)
-		if !ok {
+		if !ok || !isFinite(real(v)) || !isFinite(imag(v)) {
 			return false
 		}
 		r[j], mag[j] = v, cmplx.Abs(v)
@@ -662,7 +763,11 @@ func (zr zpkRows) at(i int, s complex128, r []complex128, mag []float64) bool {
 }
 
 // judgeDescriptorCached is judgeDescriptorTFCached for any model rows
-// evaluate, with the bound 4ε·|tf| replaced by 4ε·mag.
+// evaluate, with the bound 4ε·|tf| replaced by 4ε·mag. A row rows cannot
+// evaluate finitely, a row whose scale is not finite, or an entry with a
+// NaN or ±Inf quantity of the test keeps the point from verifying and
+// refutes nothing itself; the finite entries are judged as ever, so their
+// refutations stand whatever the order of the rows.
 func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
 	_, m, p := sys.Dims()
 	tol := math.Sqrt(eps())
@@ -680,12 +785,16 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 		for i := range p {
 			if !rows.at(i, s, r, mag) {
 				jp.verified = false
-				break
+				continue
 			}
 			scale := 0.0
 			for j := range m {
 				g := full.g[k*pm+i*m+j] + complex(sys.D.At(i, j), 0)
 				scale = math.Max(scale, math.Max(cmplx.Abs(r[j]), cmplx.Abs(g)))
+			}
+			if !isFinite(scale) {
+				jp.verified = false
+				continue
 			}
 			for j := range m {
 				e := k*pm + i*m + j
@@ -701,6 +810,10 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 				lo, hi := math.Max(0, diff-delta), diff+delta
 				canRef := hi > tol*math.Max(scale, math.Max(0, T-dT))+full.data[e]
 				canVer := lo <= tol*math.Max(scale, T+dT)
+				if !finiteAll(diff, delta, T, dT, thr) {
+					jp.verified = false
+					continue
+				}
 				if !ver && !ref && !in && (canRef || canVer || !tfPruneExact) {
 					if !exact {
 						exact = true
@@ -712,6 +825,10 @@ func judgeDescriptorCached(sys *System, rows descriptorRows, pts []complex128, f
 						g, T = exactEntry(sys, ur, ui, i, j)
 						diff = cmplx.Abs(g - r[j])
 						delta = 4 * eps() * (cmplx.Abs(g) + mag[j] + T)
+						if !finiteAll(diff, delta, T) {
+							jp.verified = false
+							continue
+						}
 						ver = diff+delta <= tol*math.Max(scale, T)
 						thr = tol*math.Max(scale, T) + full.data[e]
 						ref = diff-delta > thr
