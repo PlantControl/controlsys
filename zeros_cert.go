@@ -331,18 +331,19 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 }
 
 // zerosBudget is the deterministic work budget of one Zeros certification
-// (Tier 1 and Tier 2 together), in units of about 3 ns on arm64: a point
+// (Tier 1 and Tier 2 together), in units of about 4 ns on arm64: a point
 // in double costs n³ + 1000, in double-double 5n³ + 3000, exactly
 // zerosExactPointCost plus ratSubCost for every rational update of its
-// eliminations (exactSolveAtSpend) and response; Tier 2 charges its pencil
+// eliminations (exactSolveAtSpend) and response and zerosRatDetCost for
+// its determinant and cofactors; Tier 2 charges its pencil
 // determinant N⁴·(N·w)², w the 64-bit words zerosExactWords gives the
 // stored entries, root iterations 7200d² and the exact zero count
 // 4n⁵w² + 50000 per compression. Work stops where a charge would exceed
 // the cap, and the certification is then not verified.
 type zerosBudget struct{ used, cap int64 }
 
-// zerosWorkCap is the budget of one certification, about 0.4 s.
-const zerosWorkCap = 100_000_000
+// zerosWorkCap is the budget of one certification, about 0.6 s.
+const zerosWorkCap = 140_000_000
 
 // zerosExactPointCost is the fixed charge of one exact point.
 const zerosExactPointCost = 100_000
@@ -788,6 +789,13 @@ func zerosCertExact(sys *System, s complex128, det bool, spend func(int64) bool)
 	if !det {
 		return pt
 	}
+	var wg int64
+	for _, g := range G {
+		wg = max(wg, ratCWords(g))
+	}
+	if cost := zerosRatDetCost(k, wg); k > 1 && !spend(cost+int64(k*k)*zerosRatDetCost(k-1, wg)) {
+		return zerosCertPoint{s: s, level: zerosLevelExact}
+	}
 	dt := zerosCertRatDet(G, k)
 	pt.d = dt.complex128()
 	pt.dd = 2*eps()*cmplx.Abs(pt.d) + 2*math.SmallestNonzeroFloat64
@@ -823,6 +831,17 @@ func zerosCertExact(sys *System, s complex128, det bool, spend func(int64) bool)
 	pt.chiM, pt.chiE, pt.relChi = complex(re, im), e, 2*eps()
 	pt.valid = pt.tLo > 0 && !cmplx.IsNaN(pt.d) && !cmplx.IsInf(pt.d)
 	return pt
+}
+
+// zerosRatDetCost is the work charged for zerosCertRatDet of a k×k
+// matrix of entries up to w words: k! products of growing size.
+func zerosRatDetCost(k int, w int64) int64 {
+	f := int64(1)
+	for i := 2; i <= k; i++ {
+		f *= int64(i)
+	}
+	kk := int64(k)
+	return f * (kk*kk*kk*w*w/6 + 40*kk)
 }
 
 func zerosCertRatDet(a []ratC, k int) ratC {

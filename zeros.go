@@ -52,8 +52,8 @@ type ZerosResult struct {
 // √ε|ẑ| of a nonzero zero is not judged. Where the computed zeros do not
 // verify, those of the exact determinant of the system pencil of the
 // stored data are tried (zerosTier2); where neither certifies within a
-// fixed work budget (about 0.4 s), the computed zeros and Rank are returned with an
-// error wrapping ErrAccuracyUnverified.
+// fixed work budget (about 0.6 s), the computed zeros and Rank are
+// returned with an error wrapping ErrAccuracyUnverified.
 //
 // Departures from that certificate: at Rank 0 the zeros (decoupling zeros
 // of the pencil) are returned unjudged, except where G ≡ 0 exactly, whose
