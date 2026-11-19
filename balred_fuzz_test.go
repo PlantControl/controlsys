@@ -162,7 +162,13 @@ func FuzzBalred(f *testing.F) {
 		if errors.Is(err, ErrUnstable) {
 			t.Fatalf("Balreal: ErrUnstable on a decidably stable model\n%s", s)
 		}
-		fzErr(t, s, "Balreal", err, ErrNotMinimal)
+		if s.N > 0 && s.M > 0 && s.P > 0 {
+			minimal := ratKalmanRank(sys.A, sys.B) == s.N && ratKalmanRank(mat.DenseCopyOf(sys.A.T()), mat.DenseCopyOf(sys.C.T())) == s.N
+			if minimal && errors.Is(err, ErrNotMinimal) || !minimal && err == nil {
+				t.Fatalf("Balreal: exactly minimal %v, err %v\n%s", minimal, err, s)
+			}
+		}
+		fzErr(t, s, "Balreal", err, ErrNotMinimal, ErrSingularEquation, ErrSingularTransform, ErrMinimalityUndetermined)
 		n := s.N
 		hsv, tol2, ok := fzHSVOracle(s)
 		if !ok || tol2 > 1e-6*hsv[0]*hsv[0] {
@@ -172,8 +178,8 @@ func FuzzBalred(f *testing.F) {
 			t.Fatalf("Balreal: %d HSV for n=%d\n%s", len(br.HSV), n, s)
 		}
 		for i, v := range br.HSV {
-			if !(v > 0) || i > 0 && v > br.HSV[i-1] {
-				t.Fatalf("Balreal HSV %v not positive and descending\n%s", br.HSV, s)
+			if !(v >= 0) || i > 0 && v > br.HSV[i-1] {
+				t.Fatalf("Balreal HSV %v not nonnegative and descending\n%s", br.HSV, s)
 			}
 			if d := math.Abs(v*v - hsv[i]*hsv[i]); d > 10*tol2 {
 				t.Fatalf("Balreal HSV[%d] = %v, gramian oracle %v (|Δσ²| %.3g > %.3g)\n%s", i, v, hsv[i], d, 10*tol2, s)

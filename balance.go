@@ -54,10 +54,17 @@ type BalrealResult struct {
 // both equal to diag(σ₁, σ₂, …, σₙ) where σᵢ are the Hankel singular values.
 //
 // Unlike MATLAB, which balances the stable part and reports Inf for unstable
-// modes, an unstable model returns ErrUnstable; a non-minimal one returns
-// ErrNotMinimal. A model with no states returns ErrDimensionMismatch, since
-// TL and TR cannot be formed. A result entry beyond float64 range returns
-// ErrOverflow.
+// modes, an unstable model returns ErrUnstable. Minimality is decided
+// exactly on the stored data: a model whose controllability or
+// observability matrix is rank deficient over the rationals returns
+// ErrNotMinimal, and ErrMinimalityUndetermined when the exact test exceeds
+// its work bound. A minimal model can still have Hankel singular values
+// below the float64 rounding of σ₁, even 0; they are accurate relative to
+// σ₁ and the balancing scales their directions at 2⁻¹⁰⁶·σ₁. Gramians are
+// refined against the stored data; when the Lyapunov equations are too
+// ill-conditioned for that, Balreal returns ErrSingularEquation. A model
+// with no states returns ErrDimensionMismatch, since TL and TR cannot be
+// formed. A result entry beyond float64 range returns ErrOverflow.
 func Balreal(sys *System) (*BalrealResult, error) {
 	if err := requireFiniteSystem("Balreal", sys); err != nil {
 		return nil, err
@@ -85,6 +92,13 @@ func Balreal(sys *System) (*BalrealResult, error) {
 		return nil, fmt.Errorf("Balreal: model has no inputs or no outputs, so all Hankel singular values are zero: %w", ErrNotMinimal)
 	}
 
+	switch exactMinimality(sys.A, sys.B, sys.C) {
+	case notMinimalExact:
+		return nil, fmt.Errorf("Balreal: %w", ErrNotMinimal)
+	case minimalityUndetermined:
+		return nil, fmt.Errorf("Balreal: %w", ErrMinimalityUndetermined)
+	}
+
 	aRaw := sys.A.RawMatrix()
 	bRaw := sys.B.RawMatrix()
 	cRaw := sys.C.RawMatrix()
@@ -93,7 +107,7 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	bsRaw := bScaled.RawMatrix()
 	csRaw := cScaled.RawMatrix()
 
-	bufSize := 14*n*n + n*m + p*n + n
+	bufSize := 10*n*n + 2*n*m + 2*p*n + n
 	ws := make([]float64, bufSize)
 	wi := 0
 
@@ -111,92 +125,93 @@ func Balreal(sys *System) (*BalrealResult, error) {
 			at[i*n+j] = aRaw.Data[j*aRaw.Stride+i]
 		}
 	}
-
-	bbt := alloc(n * n)
-	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
-		blas64.General{Rows: n, Cols: m, Stride: bsRaw.Stride, Data: bsRaw.Data},
-		blas64.General{Rows: n, Cols: m, Stride: bsRaw.Stride, Data: bsRaw.Data},
-		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: bbt})
-	symmetrize(bbt, n, n)
-
-	ctc := alloc(n * n)
-	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
-		blas64.General{Rows: p, Cols: n, Stride: csRaw.Stride, Data: csRaw.Data},
-		blas64.General{Rows: p, Cols: n, Stride: csRaw.Stride, Data: csRaw.Data},
-		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: ctc})
-	symmetrize(ctc, n, n)
+	fb := alloc(n * m)
+	copyStrided(fb, m, bsRaw.Data, bsRaw.Stride, n, m)
+	fc := alloc(n * p)
+	for i := range n {
+		for j := range p {
+			fc[i*p+j] = csRaw.Data[j*csRaw.Stride+i]
+		}
+	}
 
 	A := mat.NewDense(n, n, aData)
 	At := mat.NewDense(n, n, at)
-
-	var Wc, Wo *mat.Dense
-	if sys.IsContinuous() {
-		Wc, err = Lyap(A, mat.NewDense(n, n, bbt), nil)
-		if err != nil {
-			return nil, err
-		}
-		Wo, err = Lyap(At, mat.NewDense(n, n, ctc), nil)
-	} else {
-		Wc, err = DLyap(A, mat.NewDense(n, n, bbt), nil)
-		if err != nil {
-			return nil, err
-		}
-		Wo, err = DLyap(At, mat.NewDense(n, n, ctc), nil)
-	}
+	discrete := !sys.IsContinuous()
+	gc, err := balrealGramian(A, fb, m, discrete, "controllability", nil)
 	if err != nil {
 		return nil, err
 	}
-
-	wcRaw := Wc.RawMatrix()
-	lc := alloc(n * n)
-	copyStrided(lc, n, wcRaw.Data, wcRaw.Stride, n, n)
-	if !impl.Dpotrf(blas.Lower, n, lc, n) {
-		return nil, fmt.Errorf("Balreal: controllability gramian: %w", ErrNotMinimal)
+	gob, err := balrealGramian(At, fc, p, discrete, "observability", &gc.schur)
+	if err != nil {
+		return nil, err
 	}
-	for i := range n {
-		for j := i + 1; j < n; j++ {
-			lc[i*n+j] = 0
-		}
+	lc, err := semidefiniteFactor(gc.x, n)
+	if err != nil {
+		return nil, fmt.Errorf("Balreal: controllability gramian factor: %w", err)
 	}
-
-	woRaw := Wo.RawMatrix()
-	lo := alloc(n * n)
-	copyStrided(lo, n, woRaw.Data, woRaw.Stride, n, n)
-	if !impl.Dpotrf(blas.Lower, n, lo, n) {
-		return nil, fmt.Errorf("Balreal: observability gramian: %w", ErrNotMinimal)
-	}
-	for i := range n {
-		for j := i + 1; j < n; j++ {
-			lo[i*n+j] = 0
-		}
+	lo, err := semidefiniteFactor(gob.x, n)
+	if err != nil {
+		return nil, fmt.Errorf("Balreal: observability gramian factor: %w", err)
 	}
 
 	mData := alloc(n * n)
-	lcGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lc}
-	loGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lo}
-	blas64.Gemm(blas.Trans, blas.NoTrans, 1, loGen, lcGen,
-		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: mData})
-
 	s := alloc(n)
 	uData := alloc(n * n)
 	vtData := alloc(n * n)
-	wq := make([]float64, 1)
-	impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
-		uData, n, vtData, n, wq, -1)
-	svdWork := make([]float64, int(wq[0]))
-	if !impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
-		uData, n, vtData, n, svdWork, len(svdWork)) {
-		return nil, fmt.Errorf("Balreal: SVD of gramian factors did not converge: %w", ErrSchurFailed)
+	gemmTN(lo, lc, mData, n)
+	svd := func() error {
+		wq := make([]float64, 1)
+		impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
+			uData, n, vtData, n, wq, -1)
+		svdWork := make([]float64, int(wq[0]))
+		if !impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
+			uData, n, vtData, n, svdWork, len(svdWork)) {
+			return fmt.Errorf("Balreal: SVD of gramian factors did not converge: %w", ErrSchurFailed)
+		}
+		return nil
 	}
+	if err := svd(); err != nil {
+		return nil, err
+	}
+	if s[0] > 0 && eps()*scaledNorm2(gc.x)*scaledNorm2(gob.x)/(s[0]*s[0]) > hsvDDGate {
+		ddc, ok, err := gc.ddCholesky()
+		if err != nil {
+			return nil, fmt.Errorf("Balreal: controllability gramian: %w", err)
+		}
+		ddo, ok2, err := gob.ddCholesky()
+		if err != nil {
+			return nil, fmt.Errorf("Balreal: observability gramian: %w", err)
+		}
+		if !ok || !ok2 {
+			return nil, fmt.Errorf("Balreal: gramians too unbalanced for accurate Hankel singular values: %w", ErrSingularEquation)
+		}
+		ddProductTN(ddo, ddc, mData, n)
+		for i := range lc {
+			lc[i] = ddc[i].hi + ddc[i].lo
+			lo[i] = ddo[i].hi + ddo[i].lo
+		}
+		if err := svd(); err != nil {
+			return nil, err
+		}
+	}
+	lcGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lc}
+	loGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lo}
 	if !ldexpFinite(lc, eB) || !ldexpFinite(lo, eC) || !ldexpFinite(s, eB+eC) {
 		return nil, fmt.Errorf("Balreal: gramian factors exceed float64 range: %w", ErrOverflow)
 	}
+	if !(s[0] > 0) {
+		return nil, fmt.Errorf("Balreal: Hankel singular values of the minimal model underflow to zero: %w", ErrSingularTransform)
+	}
+	// A minimal model can have Hankel singular values below the float64
+	// rounding of σ₁, even 0; the balancing scales those directions by the
+	// floor instead, as they are only defined to that rounding.
+	sFloor := math.Ldexp(s[0], -106)
 
 	// V = Vt' — scale columns of Vt' by 1/sqrt(σ) → vScaled
 	// T = Lc * vScaled
 	vScaled := alloc(n * n)
 	for i := range n {
-		invSqrt := 1.0 / math.Sqrt(s[i])
+		invSqrt := 1.0 / math.Sqrt(max(s[i], sFloor))
 		for j := range n {
 			vScaled[j*n+i] = vtData[i*n+j] * invSqrt
 		}
@@ -211,7 +226,7 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	// Tinv = Σ^{-1/2} * U' * Lo'
 	// Scale columns of U by 1/sqrt(σ) → uScaled, then Tinv = uScaled' * Lo'
 	for j := range n {
-		invSqrt := 1.0 / math.Sqrt(s[j])
+		invSqrt := 1.0 / math.Sqrt(max(s[j], sFloor))
 		for i := range n {
 			uData[i*n+j] *= invSqrt
 		}
@@ -267,6 +282,51 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	}
 
 	return &BalrealResult{Sys: balSys, HSV: s, TL: Tinv, TR: T}, nil
+}
+
+// hsvDDGate is the bound on ε·‖Wc‖·‖Wo‖/σ₁², the size of the float64
+// rounding of the gramians relative to σ₁², above which the Hankel singular
+// values are recomputed from double-double gramian factors.
+const hsvDDGate = 1e-12
+
+// balrealGramian returns the refined gramian of A and the n×k right-hand
+// factor f, or ErrSingularEquation when refinement cannot make it accurate;
+// transposeOf is as for newRefinedGramian.
+func balrealGramian(A *mat.Dense, f []float64, k int, discrete bool, name string, transposeOf *schurLyapunov) (*refinedGramian, error) {
+	n, _ := A.Dims()
+	g, ok, err := newRefinedGramian(A, f, k, discrete, transposeOf)
+	if err != nil {
+		return nil, fmt.Errorf("Balreal: %s gramian: %w", name, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("Balreal: %s gramian not accurate in float64, the Lyapunov equation is too ill-conditioned: %w", name, ErrSingularEquation)
+	}
+	if err := finiteDense("Balreal", name+" gramian", mat.NewDense(n, n, g.x), ErrOverflow); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// gemmTN writes Loᵀ·Lc into dst, all n×n of stride n.
+func gemmTN(lo, lc, dst []float64, n int) {
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
+		blas64.General{Rows: n, Cols: n, Stride: n, Data: lo},
+		blas64.General{Rows: n, Cols: n, Stride: n, Data: lc},
+		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: dst})
+}
+
+// ddProductTN writes Loᵀ·Lc, accumulated in double-double and rounded once,
+// into dst.
+func ddProductTN(lo, lc []dd, dst []float64, n int) {
+	for i := range n {
+		for j := range n {
+			var s dd
+			for k := range n {
+				s = s.add(lo[k*n+i].mul(lc[k*n+j]))
+			}
+			dst[i*n+j] = s.hi + s.lo
+		}
+	}
 }
 
 // Balred reduces sys to order states by balanced truncation, as MATLAB
