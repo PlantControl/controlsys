@@ -854,7 +854,7 @@ type rlswCertified struct {
 // refuted.
 var rlswCertifiedCounts = map[string]map[int]rlswCertified{
 	"testdata/rlocus_sweep_base.json": {
-		347:  {[]string{"Asymptotes", "ArrivalAngles count"}, "base Rank 0 refuted; 2 certified zeros, exact TF degree 3 (D = 0, data degree 0)"},
+		347: {[]string{"Asymptotes", "ArrivalAngles count"}, "base Rank 0 refuted; 2 certified zeros, exact TF degree 3 (D = 0, data degree 0)"},
 	},
 }
 
