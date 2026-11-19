@@ -210,3 +210,118 @@ func TestDescriptorExactEntryTermsBeyondFloatRange(t *testing.T) {
 	res, err := sys.TransferFunction(nil)
 	requireTFWithinTermsOrUnverified(t, sys, res, err)
 }
+
+// TestFoldBoundVerifiedPointsWithinTerms: for E⁻¹ folds whose residual is
+// not one ε-rounding of A and B (the gate fails), every point the fast
+// tier verifies through foldBound has the transfer function within
+// √ε·max(scale, T) of the stored pencil's exact response.
+func TestFoldBoundVerifiedPointsWithinTerms(t *testing.T) {
+	tol := math.Sqrt(eps())
+	rows, verified := 0, 0
+	for seed := uint64(0); rows < 12 && seed < 200; seed++ {
+		rng := rand.New(rand.NewPCG(seed, 0xf01d))
+		n, m, p := 2+rng.IntN(5), 1+rng.IntN(2), 1+rng.IntN(2)
+		a, e := make([]float64, n*n), make([]float64, n*n)
+		for i := range a {
+			a[i] = rng.NormFloat64()
+			e[i] = rng.NormFloat64() / 10
+		}
+		for i := range n {
+			a[i*n+i] -= 0.5
+			e[i*n+i] += 1 + rng.Float64()
+		}
+		b, c, d := make([]float64, n*m), make([]float64, p*n), make([]float64, p*m)
+		for i := range b {
+			b[i] = rng.NormFloat64()
+		}
+		for i := range c {
+			c[i] = rng.NormFloat64()
+		}
+		sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(p, n, c), mat.NewDense(p, m, d), mat.NewDense(n, n, e), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, route, err := sys.transferRationalRoute(nil)
+		if err != nil || route != tfRouteFold {
+			continue
+		}
+		ex, k, err := sys.explicitForm("TransferFunction")
+		if err != nil {
+			continue
+		}
+		fb, gate := newFoldBound(sys, ex, k)
+		if gate || fb == nil {
+			continue
+		}
+		rows++
+		roots, _, _, _, ok := tfShape(res.TF)
+		if !ok {
+			continue
+		}
+		ft := newExplicitFastTier(ex, newTFRows(res.TF))
+		ft.fold = fb
+		for _, s := range descriptorTFPoints(sys, roots) {
+			if !ft.verify(s) {
+				continue
+			}
+			verified++
+			ur, ui := exactPencilAt(sys, s)
+			if ur == nil {
+				t.Fatalf("seed %d: verified a pole at %v", seed, s)
+			}
+			for i := range p {
+				r, g, T := make([]complex128, m), make([]complex128, m), make([]float64, m)
+				scale := 0.0
+				for j := range m {
+					r[j], _ = tfEntryAt(res.TF.Num[i][j], res.TF.Den[i], s)
+					g[j], T[j] = exactEntry(sys, ur, ui, i, j)
+					scale = math.Max(scale, math.Max(cmplx.Abs(r[j]), cmplx.Abs(g[j])))
+				}
+				for j := range m {
+					if q := (cmplx.Abs(r[j]-g[j]) - 4*eps()*(cmplx.Abs(r[j])+cmplx.Abs(g[j]))) / (tol * math.Max(scale, T[j])); q > 1 {
+						t.Fatalf("seed %d: verified %v at %v, %.3g× √ε·max(scale, T) off", seed, r[j], s, q)
+					}
+				}
+			}
+		}
+	}
+	if rows == 0 || verified == 0 {
+		t.Fatalf("rows %d, verified points %d", rows, verified)
+	}
+}
+
+// TestTransferFunctionLargeExplicitFastTier: a dense non-symmetric
+// explicit model at n = 40 is certified by the fast tier at every point,
+// none sent to the O(n³) pencil judge: the pair refinement (refinePair)
+// and the reduction's error measured a posteriori (sweepPost) carry the
+// points where the plain solve or the a-priori bound fell short.
+func TestTransferFunctionLargeExplicitFastTier(t *testing.T) {
+	n := 40
+	rng := rand.New(rand.NewPCG(1, 0xe5))
+	a := make([]float64, n*n)
+	for i := range a {
+		a[i] = rng.NormFloat64() / math.Sqrt(float64(n))
+	}
+	for i := range n {
+		a[i*n+i] -= 0.5
+	}
+	b, c := make([]float64, n*2), make([]float64, 2*n)
+	for i := range b {
+		b[i] = rng.NormFloat64()
+	}
+	for i := range c {
+		c[i] = rng.NormFloat64()
+	}
+	sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, 2, b), mat.NewDense(2, n, c), mat.NewDense(2, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.transferFunction(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _, why, np := explicitRouteJudge(sys, tfRouteExplicit, res.TF, nil)
+	if !v || np != 0 {
+		t.Fatalf("verified %v (%s), %d points to the pencil judge", v, why, np)
+	}
+}
