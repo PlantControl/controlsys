@@ -475,7 +475,7 @@ func foldResidualFull(sys, ex *System, k int) (ra, rb, raV, rbV, raE, rbE []floa
 // (storedResidual). With R_A = EĀ − A, R_E = I − EÊ⁻¹, r_d = Ê⁻¹r̂ −
 // (sI − Ā)d and δ₁ the rounding of Ê⁻¹r̂, F = E(sI − Ā) + R_A gives the
 // residual of x̂ + d as r₂ = (r − r̂) + R_E·r̂ − E·δ₁ + E·r_d − R_A·d, so
-// |r₂| ≤ e_s + |R_E||r̂| + γ|E||Ê⁻¹||r̂| + |E||r_d| + |R_A||d|, every term but
+// |r₂| ≤ e_s + (|R_E| + γ|E||Ê⁻¹|)|r̂| + |E||r_d| + |R_A||d|, every term but
 // e_s second order. Then |x − x̂ − d| ≤ |F⁻¹||r₂|, F⁻¹ = M·E⁻¹·(I + R_A·M·
 // E⁻¹)⁻¹, M = (sI − Ā)⁻¹: with K ≥ |E⁻¹| and v = |M|·K·|r₂|, it is at most
 // v/(1 − q) where P = |M|·K·|R_A| passes Pv ≤ q·v, q < 1, |M| bounded as in
@@ -500,6 +500,7 @@ type foldBound struct {
 	ax, ar           []float64
 	einv, absEinv    []float64
 	absE, absRE      []float64
+	re2              []float64
 	sRow             []float64
 	rhoE             float64
 	r                []complex128
@@ -560,6 +561,13 @@ func foldBoundOf(sys, ex *System, k int, force bool) (*foldBound, bool) {
 	if !(rhoE < 0.5) {
 		return nil, gate
 	}
+	gE := gammaN(n+2) * (1 + gammaN(n+2)) * (1 + 4*eps())
+	re2 := make([]float64, n*n)
+	for i := range n {
+		for c := range n {
+			re2[i*n+c] = (absRE[i*n+c] + gE*absProd.At(i, c)) * (1 + 2*eps())
+		}
+	}
 	abs := func(v []float64) ([]float64, bool) {
 		out := make([]float64, len(v))
 		for i, x := range v {
@@ -574,7 +582,7 @@ func foldBoundOf(sys, ex *System, k int, force bool) (*foldBound, bool) {
 	if !ok1 || !ok2 {
 		return nil, gate
 	}
-	return &foldBound{n: n, m: m, e: e, ra: ra, rbd: rbd, raV: raV, rbV: rbV, raE: raE, rbE: rbE, einv: einv, absEinv: absEinv, absE: absE, absRE: absRE,
+	return &foldBound{n: n, m: m, e: e, ra: ra, rbd: rbd, raV: raV, rbV: rbV, raE: raE, rbE: rbE, einv: einv, absEinv: absEinv, absE: absE, absRE: absRE, re2: re2,
 		sRow: sRow, rhoE: rhoE, r: make([]complex128, n*m), rb: make([]float64, n*m), r2: make([]float64, n),
 		ky: make([]float64, n), v: make([]float64, n), w: make([]float64, n), y1: make([]complex128, n*m),
 		rr: make([]complex128, n), y1v: make([]float64, n), ax: make([]float64, n), ar: make([]float64, n)}, gate
@@ -742,7 +750,6 @@ func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128
 	f.pair = true
 	sa := cabs1(s)
 	clear(fb.r2)
-	gn := gammaN(n + 2)
 	for j := range m {
 		d := f.xl[j*n : (j+1)*n]
 		for i := range n {
@@ -759,21 +766,16 @@ func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128
 			fb.w[i] = (termsAbs(rd)+bound)*(1+2*termsEps) + uf
 		}
 		for l := range n {
-			var ei float64
-			for q, a := range fb.absEinv[l*n : (l+1)*n] {
-				ei += a * cabs1(fb.r[q*m+j])
-			}
-			fb.ky[l] = ei
+			fb.ky[l] = cabs1(fb.r[l*m+j])
 		}
 		for i := range n {
-			var re, ee, ed, ra float64
+			var re, ed, ra float64
 			for l := range n {
-				re += fb.absRE[i*n+l] * cabs1(fb.r[l*m+j])
-				ee += fb.absE[i*n+l] * fb.ky[l]
+				re += fb.re2[i*n+l] * fb.ky[l]
 				ed += fb.absED[i*n+l] * fb.w[l]
 				ra += fb.radB[i*n+l] * cabs1(d[l])
 			}
-			fb.r2[i] += (fb.rb[i*m+j]+re+gn*ee+ed+ra)*(1+float64(2*n+8)*eps()) + uf
+			fb.r2[i] += (fb.rb[i*m+j]+re+ed+ra)*(1+float64(2*n+8)*eps()) + uf
 		}
 	}
 	if !fb.applyK(fb.r2) {
