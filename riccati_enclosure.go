@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/big"
+	"sync"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -160,19 +161,51 @@ func (a encDD) abs() *mat.Dense {
 type encBig struct {
 	r, c int
 	d    []*big.Float
+	ar   *encArena
 }
 
-func newEncBig(r, c int) encBig {
-	d := make([]*big.Float, r*c)
-	for i := range d {
-		d[i] = new(big.Float).SetPrec(encPrec)
+// encArena hands out zeroed encPrec-bit values whose mantissas outlive
+// one gate call (encArenas), so the encPrec tier does not allocate once
+// warm; reset recycles every value at once.
+type encArena struct {
+	chunks [][]big.Float
+	ptrs   []*big.Float
+	next   int
+}
+
+var encArenas = sync.Pool{New: func() any { return new(encArena) }}
+
+func (a *encArena) get() *big.Float {
+	const chunk = 256
+	if a.next == len(a.chunks)*chunk {
+		a.chunks = append(a.chunks, make([]big.Float, chunk))
 	}
-	return encBig{r, c, d}
+	z := &a.chunks[a.next/chunk][a.next%chunk]
+	a.next++
+	return z.SetPrec(encPrec).SetInt64(0)
 }
 
-func encBigOf(a *mat.Dense) encBig {
+func (a *encArena) slice(n int) []*big.Float {
+	if cap(a.ptrs)-len(a.ptrs) < n {
+		a.ptrs = make([]*big.Float, 0, max(2*cap(a.ptrs), n, 1024))
+	}
+	d := a.ptrs[len(a.ptrs) : len(a.ptrs)+n]
+	a.ptrs = a.ptrs[:len(a.ptrs)+n]
+	for i := range d {
+		d[i] = a.get()
+	}
+	return d
+}
+
+func (a *encArena) reset() { a.next, a.ptrs = 0, a.ptrs[:0] }
+
+func newEncBig(ar *encArena, r, c int) encBig {
+	return encBig{r, c, ar.slice(r * c), ar}
+}
+
+func encBigOf(ar *encArena, a *mat.Dense) encBig {
 	r, c := a.Dims()
-	o := newEncBig(r, c)
+	o := newEncBig(ar, r, c)
 	for i := range r {
 		for j := range c {
 			o.d[i*c+j].SetFloat64(a.At(i, j))
@@ -181,9 +214,9 @@ func encBigOf(a *mat.Dense) encBig {
 	return o
 }
 
-func encBigDD(a encDD) encBig {
-	o := newEncBig(a.r, a.c)
-	t := new(big.Float).SetPrec(encPrec)
+func encBigDD(ar *encArena, a encDD) encBig {
+	o := newEncBig(ar, a.r, a.c)
+	t := ar.get()
 	for i := range o.d {
 		o.d[i].SetFloat64(a.h[i])
 		o.d[i].Add(o.d[i], t.SetFloat64(a.l[i]))
@@ -193,10 +226,10 @@ func encBigDD(a encDD) encBig {
 
 func (a encBig) dd() encDD {
 	o := newEncDD(a.r, a.c)
-	t := new(big.Float).SetPrec(encPrec)
+	t, hf := a.ar.get(), a.ar.get()
 	for i, v := range a.d {
 		h, _ := v.Float64()
-		t.Sub(v, new(big.Float).SetFloat64(h))
+		t.Sub(v, hf.SetFloat64(h))
 		l, _ := t.Float64()
 		o.h[i], o.l[i] = fastTwoSum(h, l)
 	}
@@ -208,8 +241,8 @@ func (a encBig) mul(b encBig, ta bool) encBig {
 	if ta {
 		ar, ac = ac, ar
 	}
-	o := newEncBig(ar, b.c)
-	t := new(big.Float).SetPrec(encPrec)
+	o := newEncBig(a.ar, ar, b.c)
+	t := a.ar.get()
 	for i := range ar {
 		for j := range b.c {
 			for k := range ac {
@@ -226,9 +259,9 @@ func (a encBig) mul(b encBig, ta bool) encBig {
 }
 
 func (a encBig) add(b encBig, s float64) encBig {
-	o := newEncBig(a.r, a.c)
-	f := new(big.Float).SetPrec(encPrec).SetFloat64(s)
-	t := new(big.Float).SetPrec(encPrec)
+	o := newEncBig(a.ar, a.r, a.c)
+	f := a.ar.get().SetFloat64(s)
+	t := a.ar.get()
 	for i := range a.d {
 		t.Mul(b.d[i], f)
 		o.d[i].Add(a.d[i], t)
@@ -237,8 +270,8 @@ func (a encBig) add(b encBig, s float64) encBig {
 }
 
 func (a encBig) scale(s float64) encBig {
-	o := newEncBig(a.r, a.c)
-	f := new(big.Float).SetPrec(encPrec).SetFloat64(s)
+	o := newEncBig(a.ar, a.r, a.c)
+	f := a.ar.get().SetFloat64(s)
 	for i := range a.d {
 		o.d[i].Mul(a.d[i], f)
 	}
@@ -246,7 +279,7 @@ func (a encBig) scale(s float64) encBig {
 }
 
 func (a encBig) t() encBig {
-	o := newEncBig(a.c, a.r)
+	o := newEncBig(a.ar, a.c, a.r)
 	for i := range a.r {
 		for j := range a.c {
 			o.d[j*a.r+i].Set(a.d[i*a.c+j])
@@ -280,13 +313,13 @@ func (a encBig) solve(b encBig) (encBig, bool) {
 	for i := range n {
 		w[i] = make([]*big.Float, n+nc)
 		for j := range n {
-			w[i][j] = new(big.Float).SetPrec(encPrec).Set(a.d[i*n+j])
+			w[i][j] = a.ar.get().Set(a.d[i*n+j])
 		}
 		for j := range nc {
-			w[i][n+j] = new(big.Float).SetPrec(encPrec).Set(b.d[i*nc+j])
+			w[i][n+j] = a.ar.get().Set(b.d[i*nc+j])
 		}
 	}
-	t, f := new(big.Float).SetPrec(encPrec), new(big.Float).SetPrec(encPrec)
+	t, f := a.ar.get(), a.ar.get()
 	for k := range n {
 		p := k
 		for i := k + 1; i < n; i++ {
@@ -309,7 +342,7 @@ func (a encBig) solve(b encBig) (encBig, bool) {
 			}
 		}
 	}
-	x := newEncBig(n, nc)
+	x := newEncBig(a.ar, n, nc)
 	for c := range nc {
 		for i := n - 1; i >= 0; i-- {
 			f.Set(w[i][n+c])
@@ -343,6 +376,16 @@ type encData struct {
 	aA, aB, aQ, aR, aS, aE *mat.Dense
 	dd                     encOps[encDD]
 	bg                     *encOps[encBig]
+	ar                     *encArena
+}
+
+// release returns the encPrec arena; no encBig of d is used after.
+func (d *encData) release() {
+	if d.ar != nil {
+		d.ar.reset()
+		encArenas.Put(d.ar)
+		d.ar, d.bg = nil, nil
+	}
 }
 
 func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
@@ -362,9 +405,13 @@ func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
 
 func (d *encData) big() *encOps[encBig] {
 	if d.bg == nil {
-		o := &encOps[encBig]{a: encBigOf(d.A), b: encBigOf(d.B), q: encBigOf(d.Q), r: encBigOf(d.R), e: encBigOf(d.E), hasS: d.S != nil}
+		if d.ar == nil {
+			d.ar = encArenas.Get().(*encArena)
+		}
+		ar := d.ar
+		o := &encOps[encBig]{a: encBigOf(ar, d.A), b: encBigOf(ar, d.B), q: encBigOf(ar, d.Q), r: encBigOf(ar, d.R), e: encBigOf(ar, d.E), hasS: d.S != nil}
 		if d.S != nil {
-			o.s = encBigOf(d.S)
+			o.s = encBigOf(ar, d.S)
 		}
 		d.bg = o
 	}
@@ -474,7 +521,7 @@ func encPDBig(z encBig, h *mat.Dense) bool {
 		if v.Sign() <= 0 {
 			return false
 		}
-		sq[i] = new(big.Float).SetPrec(encPrec).Sqrt(v)
+		sq[i] = z.ar.get().Sqrt(v)
 		sf[i], _ = sq[i].Float64()
 		if !(sf[i] > 0) || math.IsInf(sf[i], 0) {
 			return false
@@ -493,14 +540,14 @@ func encPDBig(z encBig, h *mat.Dense) bool {
 		return false
 	}
 	w := make([][]*big.Float, n)
-	t, f := new(big.Float).SetPrec(encPrec), new(big.Float).SetPrec(encPrec)
+	t, f := z.ar.get(), z.ar.get()
 	for i := range n {
 		w[i] = make([]*big.Float, n)
 		for j := range n {
 			t.Mul(sq[i], sq[j])
-			w[i][j] = new(big.Float).SetPrec(encPrec).Quo(z.d[i*n+j], t)
+			w[i][j] = z.ar.get().Quo(z.d[i*n+j], t)
 		}
-		w[i][i].Sub(w[i][i], new(big.Float).SetPrec(encPrec).SetFloat64(c))
+		w[i][i].Sub(w[i][i], f.SetFloat64(c))
 	}
 	for k := range n {
 		if w[k][k].Sign() <= 0 {
@@ -543,7 +590,7 @@ func catDD(r, g, w encDD) encDD {
 
 func catBig(r, g, w encBig) encBig {
 	n, m := r.r, w.r
-	o := newEncBig(n+m, n+m)
+	o := newEncBig(r.ar, n+m, n+m)
 	for i := range n {
 		for j := range n {
 			o.d[i*(n+m)+j].Set(r.d[i*n+j])
@@ -744,21 +791,29 @@ func (d *encData) centre(c, k encDD) *encCentre {
 
 func (e *encCentre) big() *encPieces[encBig] {
 	if e.pb == nil {
-		e.cb, e.kb = encBigDD(e.c), encBigDD(e.k)
-		p := encPiecesOf(e.d.big(), e.cb, e.kb)
+		bg := e.d.big()
+		e.cb, e.kb = encBigDD(e.d.ar, e.c), encBigDD(e.d.ar, e.k)
+		p := encPiecesOf(bg, e.cb, e.kb)
 		e.pb = &p
 	}
 	return e.pb
 }
 
 // testX proves −Ric_K(c(1 + s)) ⪰ 0 and N_K(c(1 − s)) ≻ 0 in the tiers
-// allowed, double-double first.
+// allowed, double-double first; in encPrec bits only the one double-
+// double did not prove.
 func (e *encCentre) testX(s float64, tiers encTiers) encTier {
+	uOK, lOK := false, false
 	if tiers&encDDOnly != 0 {
 		zu, zl := encXDir(&e.d.dd, e.p, s, catDD)
 		hu, hl := e.d.xdirBounds(e.b, s, math.Ldexp(1, -106))
-		if encPDDD(zu, hu) && encPDDD(zl, hl) {
+		uOK = encPDDD(zu, hu)
+		lOK = uOK && encPDDD(zl, hl)
+		if lOK {
 			return encTierDD
+		}
+		if !uOK {
+			lOK = encPDDD(zl, hl)
 		}
 	}
 	if tiers&encBigOnly == 0 {
@@ -766,7 +821,7 @@ func (e *encCentre) testX(s float64, tiers encTiers) encTier {
 	}
 	bu, bl := encXDir(e.d.big(), *e.big(), s, catBig)
 	hu, hl := e.d.xdirBounds(e.b, s, math.Ldexp(1, -encPrec))
-	if encPDBig(bu, hu) && encPDBig(bl, hl) {
+	if (uOK || encPDBig(bu, hu)) && (lOK || encPDBig(bl, hl)) {
 		return encTierBig
 	}
 	return encNone
@@ -781,7 +836,7 @@ func (e *encCentre) testS(du, dl encDD) encTier {
 	if encPDDD(zu, hu) && encPDDD(zl, hl) {
 		return encTierDD
 	}
-	bu, bl := encSDir(e.d.big(), *e.big(), encBigDD(du), encBigDD(dl), catBig)
+	bu, bl := encSDir(e.d.big(), *e.big(), encBigDD(e.d.ar, du), encBigDD(e.d.ar, dl), catBig)
 	hu, hl = e.d.sdirBounds(e.b, adu, adl, math.Ldexp(1, -encPrec))
 	if encPDBig(bu, hu) && encPDBig(bl, hl) {
 		return encTierBig
@@ -801,11 +856,12 @@ func (e *encCentre) wPD() bool {
 }
 
 // exactPD proves the double-double x positive definite (its value exact).
-func exactPD(x encDD) bool {
+func (d *encData) exactPD(x encDD) bool {
 	if encPDDD(x, mat.NewDense(x.r, x.c, nil)) {
 		return true
 	}
-	return encPDBig(encBigDD(x), mat.NewDense(x.r, x.c, nil))
+	d.big()
+	return encPDBig(encBigDD(d.ar, x), mat.NewDense(x.r, x.c, nil))
 }
 
 // gain returns the gain (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) of the centre x in
@@ -844,7 +900,7 @@ func (d *encData) gain(x encDD) (encDD, bool) {
 		}
 	}
 	bg := d.big()
-	bx := encBigDD(x)
+	bx := encBigDD(d.ar, x)
 	bgg := bg.b.mul(bx.mul(bg.a, false), true)
 	if bg.hasS {
 		bgg = bgg.add(bg.s.t(), 1)
@@ -880,7 +936,7 @@ func (d *encData) stein(k encDD, nrm *mat.Dense) (encDD, bool) {
 	} else {
 		bg := d.big()
 		eb = bg.e
-		f, ok := eb.solve(bg.acl(encBigDD(k)))
+		f, ok := eb.solve(bg.acl(encBigDD(d.ar, k)))
 		if !ok {
 			return encDD{}, false
 		}
@@ -898,7 +954,7 @@ func (d *encData) stein(k encDD, nrm *mat.Dense) (encDD, bool) {
 		return encDDOf(Y), true
 	}
 	et := eb.t()
-	t1, ok := et.solve(encBigOf(Y))
+	t1, ok := et.solve(encBigOf(d.ar, Y))
 	if !ok {
 		return encDD{}, false
 	}
@@ -1065,7 +1121,7 @@ func (e *encCentre) enclose(x *mat.Dense) (encVerdict, bool) {
 		}
 		b := encRadius(du.add(dl, 1).round(), cf)
 		in, inR := m+b <= newtonTol, mr+b <= newtonTol
-		if !in && !inR || !exactPD(du) || !exactPD(dl) {
+		if !in && !inR || !d.exactPD(du) || !d.exactPD(dl) {
 			continue
 		}
 		if t := e.testS(du, dl); t != encNone {
@@ -1093,7 +1149,7 @@ func (e *encCentre) encloseX(x *mat.Dense, tiers encTiers) (encVerdict, bool) {
 	m, mr := e.budget(x, cf)
 	if e.k1 == 0 {
 		e.k1 = encRadius(cf, cf)
-		e.cPD = e.k1 > 0 && !math.IsInf(e.k1, 0) && exactPD(e.c)
+		e.cPD = e.k1 > 0 && !math.IsInf(e.k1, 0) && e.d.exactPD(e.c)
 	}
 	if !e.cPD {
 		return encVerdict{}, false
@@ -1131,6 +1187,7 @@ const (
 // corrected is fl(X_c) and its gain where X_c, not X, is within budget.
 func encloseDare(A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
 	d := newEncData(A, B, Q, R, S, E)
+	defer d.release()
 	c := encDDOf(X)
 	symmetrize(c.h, d.n, d.n)
 	kret := encDDOf(K)
