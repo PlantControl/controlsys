@@ -158,7 +158,7 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 	}
 	res.nStruct = nStruct
 	n3 := int64(n) * int64(n) * int64(n)
-	if !b.spend(int64(len(pts)) * n3 / 16) {
+	if !b.spend(int64(len(pts)) * (n3 + 1000)) {
 		res.capped = true
 		return res
 	}
@@ -184,13 +184,13 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 		late := pt.late
 		switch pt.level {
 		case zerosLevelDouble:
-			if !b.spend(n3) {
+			if !b.spend(5*n3 + 3000) {
 				res.capped = true
 				return false
 			}
 			*pt = zerosCertDD(sys, &br, &ddw, pt.s, det)
 		case zerosLevelDD:
-			if b.used >= b.cap {
+			if !b.spend(zerosExactPointCost) {
 				res.capped = true
 				return false
 			}
@@ -331,16 +331,21 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 }
 
 // zerosBudget is the deterministic work budget of one Zeros certification
-// (Tier 1 and Tier 2 together), in units of n³ complex double operations:
-// a point in double costs n³/16, in double-double n³, exactly the word
-// products of its eliminations' multiplications (exactSolveAtSpend); Tier
-// 2 charges its pencil determinant N⁴·(N·w)², w the 64-bit words
-// zerosExactWords gives the stored entries, and root iterations alike. A
-// certification that runs out is not verified.
+// (Tier 1 and Tier 2 together), in units of about 3 ns on arm64: a point
+// in double costs n³ + 1000, in double-double 5n³ + 3000, exactly
+// zerosExactPointCost plus ratSubCost for every rational update of its
+// eliminations (exactSolveAtSpend) and response; Tier 2 charges its pencil
+// determinant N⁴·(N·w)², w the 64-bit words zerosExactWords gives the
+// stored entries, root iterations 7200d² and the exact zero count
+// 4n⁵w² + 50000 per compression. Work stops where a charge would exceed
+// the cap, and the certification is then not verified.
 type zerosBudget struct{ used, cap int64 }
 
-// zerosWorkCap is the budget of one certification.
-const zerosWorkCap = 4_000_000
+// zerosWorkCap is the budget of one certification, about 0.4 s.
+const zerosWorkCap = 100_000_000
+
+// zerosExactPointCost is the fixed charge of one exact point.
+const zerosExactPointCost = 100_000
 
 func newZerosBudget() *zerosBudget { return &zerosBudget{cap: zerosWorkCap} }
 
@@ -390,9 +395,31 @@ func zerosCertProbes(sys *System, zeros []complex128, discrete bool) ([]complex1
 	}
 	ns := len(out)
 	n, _, _ := sys.Dims()
-	evals, _ := sys.Poles()
-	add(zpkFillProbes(evals, zeros, discrete, 2*(n+1))...)
+	add(zpkFillProbes(zerosCertBandAnchors(sys, discrete), zeros, discrete, 2*(n+1))...)
 	return out, ns
+}
+
+// zerosCertBandAnchors returns the eigenvalues that anchor the fill band:
+// one not resolved from the origin (discrete: from 1) by its rounding bound
+// β is taken as the origin, so a nilpotent A's rounding-level eigenvalues
+// do not shrink the band to where no point is determined (GVD7AS ruling 6).
+func zerosCertBandAnchors(sys *System, discrete bool) []complex128 {
+	ev, beta, ok := eigenRoundingBounds(sys.A)
+	if !ok {
+		evals, _ := sys.Poles()
+		return evals
+	}
+	ref := complex(0, 0)
+	if discrete {
+		ref = 1
+	}
+	out := slices.Clone(ev)
+	for i, l := range out {
+		if !(beta[i] < cmplx.Abs(l-ref)) {
+			out[i] = ref
+		}
+	}
+	return out
 }
 
 // zerosCertPerm expands det a of the k×k a by permutations, with the
@@ -705,12 +732,16 @@ func zerosCertExact(sys *System, s complex128, det bool, spend func(int64) bool)
 	G := make([]ratC, k*k)
 	T := make([]float64, k*k)
 	aRaw, bRaw, cRaw, dRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix(), sys.D.RawMatrix()
+	xf, cyf := make([]float64, n*k), make([]float64, n*k)
+	for i := range xf {
+		xf[i], cyf[i] = cabs(x[i].complex128()), cabs(cyT[i].complex128())
+	}
 	xa := make([]float64, n*k)
 	for l := range n {
 		for j := range k {
 			v := math.Abs(bRaw.Data[l*bRaw.Stride+j])
 			for r := range n {
-				v += math.Abs(aRaw.Data[l*aRaw.Stride+r]) * cabs(x[r*k+j].complex128())
+				v += math.Abs(aRaw.Data[l*aRaw.Stride+r]) * xf[r*k+j]
 			}
 			xa[l*k+j] = v
 		}
@@ -722,15 +753,18 @@ func zerosCertExact(sys *System, s complex128, det bool, spend func(int64) bool)
 			g := newRatC(dv, 0)
 			t := math.Abs(dv)
 			for l := range n {
-				t += cabs(cyT[l*k+i].complex128()) * xa[l*k+j]
+				t += cyf[l*k+i] * xa[l*k+j]
 				c := cRaw.Data[i*cRaw.Stride+l]
-				if c == 0 {
+				if c == 0 || x[l*k+j].isZero() {
 					continue
+				}
+				if !spend(ratSubCost(1, ratCWords(x[l*k+j]), ratCWords(g))) {
+					return zerosCertPoint{s: s, level: zerosLevelExact}
 				}
 				v := x[l*k+j].mulReal(c)
 				g.re.Add(g.re, v.re)
 				g.im.Add(g.im, v.im)
-				t += math.Abs(c) * cabs(x[l*k+j].complex128())
+				t += math.Abs(c) * xf[l*k+j]
 			}
 			G[i*k+j], T[i*k+j] = g, t
 			allZero = allZero && g.isZero() && t == 0
@@ -1333,7 +1367,7 @@ func zerosExactZeroCount(sys *System, b *zerosBudget) (int, bool) {
 	}
 	var g []*big.Rat
 	for range 3 {
-		if !b.spend(int64(n) * int64(n) * int64(n) * int64(n) * int64(n) * w * w) {
+		if !b.spend(4*int64(n)*int64(n)*int64(n)*int64(n)*int64(n)*w*w + 50_000) {
 			return 0, false
 		}
 		q1, q2 := make([]int64, n*R), make([]int64, Cc*n)
@@ -1533,7 +1567,7 @@ func zerosTier2B(sys *System, rank int, rankRefuted bool, b *zerosBudget) ([]com
 		if bp.coef[d].Sign() == 0 {
 			continue
 		}
-		if !b.spend(int64(d) * int64(d) * 2400) {
+		if !b.spend(int64(d) * int64(d) * 7200) {
 			return nil, 0, false
 		}
 		zeros, ok := zerosPolyRoots(bp.coef[:d+1])

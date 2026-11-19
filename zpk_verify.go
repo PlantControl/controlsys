@@ -939,9 +939,17 @@ func ratCWords(x ratC) int64 {
 	return int64(x.re.Num().BitLen()+x.re.Denom().BitLen()+x.im.Num().BitLen()+x.im.Denom().BitLen())/64 + 1
 }
 
-// exactSolveAtSpend is exactSolveAt charging spend, when non-nil, the
-// product of the operands' word sizes for every multiplication of the
-// elimination and stopping (ok false) once spend refuses.
+// ratSubCost is the work charged for v − f·a with operands of wf, wa and
+// wv words: the product, the quadratic gcd that normalizes the result and
+// a fixed cost per rational operation.
+func ratSubCost(wf, wa, wv int64) int64 {
+	w := wf + wa + wv
+	return wf*wa + w*w + 40
+}
+
+// exactSolveAtSpend is exactSolveAt charging spend, when non-nil,
+// ratSubCost for every update of the elimination and the back
+// substitution, and stopping (ok false) once spend refuses.
 func exactSolveAtSpend(A, B *mat.Dense, s complex128, spend func(int64) bool) (x []ratC, chi ratC, zero, ok bool) {
 	n, m := B.Dims()
 	big1 := func(x *big.Rat) bool {
@@ -982,23 +990,37 @@ func exactSolveAtSpend(A, B *mat.Dense, s complex128, spend func(int64) bool) (x
 			}
 			chi = ratC{new(big.Rat).Neg(chi.re), new(big.Rat).Neg(chi.im)}
 		}
+		if spend != nil {
+			wp := ratCWords(a[k*w+k])
+			if !spend(ratSubCost(ratCWords(chi), wp, 0) + ratSubCost(wp, wp, 0)) {
+				return nil, ratC{}, false, false
+			}
+		}
 		chi = chi.mul(a[k*w+k])
 		ip := a[k*w+k].inv()
 		for i := k + 1; i < n; i++ {
 			if a[i*w+k].isZero() {
 				continue
 			}
+			if spend != nil && !spend(ratSubCost(ratCWords(a[i*w+k]), ratCWords(ip), 0)) {
+				return nil, ratC{}, false, false
+			}
 			f := a[i*w+k].mul(ip)
 			if spend != nil {
 				fw, u := ratCWords(f), int64(0)
 				for j := k + 1; j < w; j++ {
-					u += fw * ratCWords(a[k*w+j])
+					if !a[k*w+j].isZero() {
+						u += ratSubCost(fw, ratCWords(a[k*w+j]), ratCWords(a[i*w+j]))
+					}
 				}
 				if !spend(u) {
 					return nil, ratC{}, false, false
 				}
 			}
 			for j := k + 1; j < w; j++ {
+				if a[k*w+j].isZero() {
+					continue
+				}
 				d := f.mul(a[k*w+j])
 				a[i*w+j].re.Sub(a[i*w+j].re, d.re)
 				a[i*w+j].im.Sub(a[i*w+j].im, d.im)
@@ -1013,9 +1035,21 @@ func exactSolveAtSpend(A, B *mat.Dense, s complex128, spend func(int64) bool) (x
 		for i := n - 1; i >= 0; i-- {
 			v := ratC{new(big.Rat).Set(a[i*w+n+j].re), new(big.Rat).Set(a[i*w+n+j].im)}
 			for l := i + 1; l < n; l++ {
+				if a[i*w+l].isZero() || x[l*m+j].isZero() {
+					continue
+				}
+				if spend != nil && !spend(ratSubCost(ratCWords(a[i*w+l]), ratCWords(x[l*m+j]), ratCWords(v))) {
+					return nil, ratC{}, false, false
+				}
 				d := a[i*w+l].mul(x[l*m+j])
 				v.re.Sub(v.re, d.re)
 				v.im.Sub(v.im, d.im)
+			}
+			if spend != nil {
+				wp := ratCWords(a[i*w+i])
+				if !spend(ratSubCost(wp, wp, 0) + ratSubCost(ratCWords(v), wp, 0)) {
+					return nil, ratC{}, false, false
+				}
 			}
 			x[i*m+j] = v.mul(a[i*w+i].inv())
 			if big1(x[i*m+j].re) || big1(x[i*m+j].im) {

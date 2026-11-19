@@ -58,9 +58,10 @@ func (r *RootLocusResult) AsymptoteCentroid() (centroid float64, ok bool) {
 // are absorbed as extra states; continuous delays return ErrDelayUnsupported,
 // as MATLAB requires a Pade approximation first. A model with no states
 // returns ErrDimensionMismatch, and a gain with 1+K·D = 0 returns
-// ErrAlgebraicLoop. Where Zeros does not certify the loop's zeros within
-// the data's rounding terms, the locus is computed from them and returned
-// with an error wrapping ErrAccuracyUnverified.
+// ErrAlgebraicLoop. A pure input/output delay adds no finite zeros, so the
+// zeros are those of the undelayed model. Where Zeros does not certify the
+// loop's zeros within the data's rounding terms, the locus is computed
+// from them and returned with an error wrapping ErrAccuracyUnverified.
 //
 // A loop whose high-frequency gain (D, or the first Markov parameter
 // C·A^(r−1)·B resolved by the coefficients) is negative follows the 0°
@@ -147,7 +148,11 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	zeros, zerr := sys.Zeros()
+	zsys := sys
+	if undelayed != nil {
+		zsys = undelayed
+	}
+	zeros, zerr := zsys.Zeros()
 	if zerr != nil && !errors.Is(zerr, ErrAccuracyUnverified) {
 		return nil, fmt.Errorf("%s: %w", op, zerr)
 	}

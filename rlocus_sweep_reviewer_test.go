@@ -61,6 +61,7 @@ func rvRun(c rvCase) rvOut {
 		o.Err = "new: " + err.Error()
 		return o
 	}
+	undelayed := sys.Copy()
 	if c.InDelay > 0 {
 		if err := sys.SetInputDelay([]float64{float64(c.InDelay)}); err != nil {
 			o.Err = "delay: " + err.Error()
@@ -80,7 +81,7 @@ func rvRun(c rvCase) rvOut {
 	if p, err := abs.Poles(); err == nil {
 		o.Poles = rvPairs(p)
 	}
-	if z, err := abs.Zeros(); err == nil || errors.Is(err, ErrAccuracyUnverified) {
+	if z, err := undelayed.Zeros(); err == nil || errors.Is(err, ErrAccuracyUnverified) {
 		o.Zeros = rvPairs(z)
 	}
 	res, err := RootLocus(sys, c.Gains)

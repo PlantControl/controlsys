@@ -42,7 +42,9 @@ func zpkClusteredDiscreteMatched(t *testing.T) *System {
 // response and terms vanish (oracle |G| 7e-70, terms 1e-52) while the
 // pencil roots give |Z| = 1.1e-29, 6.7e7·√ε beyond them (the five-fold zero
 // is placed only to ε^{1/5}), so ZPKModel returns the pencil roots with
-// ErrAccuracyUnverified.
+// ErrAccuracyUnverified. Zeros, scored wrong within terms by the oracle
+// (GVD7AS), may return them unverified too; the value checks hold either
+// way.
 func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 	sys := zpkClusteredDiscreteMatched(t)
 	res, err := sys.ZPKModel(nil)
@@ -79,7 +81,7 @@ func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 	}
 
 	pencil, err := sys.Zeros()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatal(err)
 	}
 	var simple []complex128

@@ -396,3 +396,99 @@ func TestZerosCertifyWorkBudgetCaps(t *testing.T) {
 		t.Fatalf("capped %v verdict %v, want capped and not verified", r.capped, r.verdict)
 	}
 }
+
+// zerosLongDelayAbsorbed is the 40-step output delay of
+// TestRootLocus_LongDelayTriplePole absorbed into states (n = 43), a row
+// whose certification needs about 3× zerosWorkCap.
+func zerosLongDelayAbsorbed(tb testing.TB) *System {
+	tb.Helper()
+	sys, err := NewFromSlices(3, 1, 1,
+		[]float64{1, 7.965459555662261e-59, 0, -1.5930919111324523e-58, 1, -3.982729777831131e-59, 0, -3.982729777831131e-59, 1},
+		[]float64{-0.30733286997841935, 0.8347127848391598, 0.7539022543433046},
+		[]float64{896758.4163341472, -708669.77429126, -438547.32757439115}, []float64{0}, 100)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	if err := sys.SetOutputDelay([]float64{40}); err != nil {
+		tb.Fatal(err)
+	}
+	abs, err := sys.absorbDelay()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return abs
+}
+
+// TestZerosWorkBudgetStopsAtCap: the budget stops the work where it runs
+// out, not after it (GVD7AS ruling 6, 3): the capped row spends at most
+// zerosWorkCap and Zeros returns its value unverified.
+func TestZerosWorkBudgetStopsAtCap(t *testing.T) {
+	sys := zerosLongDelayAbsorbed(t)
+	res, err := mimoZeros(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newZerosBudget()
+	zerosVerdictB(sys, res.Zeros, res.Rank, b)
+	if b.used <= b.cap {
+		t.Fatalf("budget used %d within cap %d; the row no longer exercises the cap", b.used, b.cap)
+	}
+	out, err := sys.ZerosDetail()
+	if !errors.Is(err, ErrAccuracyUnverified) || len(out.Zeros) != len(res.Zeros) {
+		t.Fatalf("ZerosDetail = %v, %v; want the base value with ErrAccuracyUnverified", out.Zeros, err)
+	}
+}
+
+// BenchmarkZerosCappedLongDelay: the capped row stays within 1 s on arm64.
+func BenchmarkZerosCappedLongDelay(b *testing.B) {
+	sys := zerosLongDelayAbsorbed(b)
+	for b.Loop() {
+		if _, err := sys.Zeros(); !errors.Is(err, ErrAccuracyUnverified) {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestZerosRotatedDoubleIntegratorCertified: a rotated double integrator's
+// eigenvalues come out at rounding level (≈1e-17, or 1 ± 1e-8 discrete)
+// rather than exactly 0 (1); eigenvalues not resolved from the origin (1)
+// do not anchor the fill band (GVD7AS ruling 6), so the probes reach where
+// det G is determined and 1/s² (1/(z−1)²) certifies with no zeros, and
+// (s+3)/s² ((z+3)/(z−1)²) with its one.
+func TestZerosRotatedDoubleIntegratorCertified(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, th := range []float64{0.8, 1.27, 1.87, 3.27} {
+			for _, z := range [][]float64{nil, {-3}} {
+				Q := mat.NewDense(2, 2, []float64{math.Cos(th), -math.Sin(th), math.Sin(th), math.Cos(th)})
+				a := []float64{0, 1, 0, 0}
+				if dt != 0 {
+					a = []float64{1, 1, 0, 1}
+				}
+				c := []float64{1, 0}
+				if z != nil {
+					c = []float64{-z[0], 1}
+					if dt != 0 {
+						c[0] = 1 - z[0]
+					}
+				}
+				var qa, qaq, qb, cq mat.Dense
+				qa.Mul(Q, mat.NewDense(2, 2, a))
+				qaq.Mul(&qa, Q.T())
+				qb.Mul(Q, mat.NewDense(2, 1, []float64{0, 1}))
+				cq.Mul(mat.NewDense(1, 2, c), Q.T())
+				sys, err := New(&qaq, &qb, &cq, mat.NewDense(1, 1, nil), dt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := sys.Zeros()
+				if err != nil {
+					t.Errorf("dt %g θ %g zeros %v: Zeros = %v, %v; want certified", dt, th, z, got, err)
+					continue
+				}
+				if len(got) != len(z) || len(z) == 1 && cmplx.Abs(got[0]-complex(z[0], 0)) > 1e-12 {
+					t.Errorf("dt %g θ %g: Zeros = %v, want %v", dt, th, got, z)
+				}
+			}
+		}
+	}
+}
