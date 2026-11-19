@@ -55,6 +55,7 @@ type dyadicImage struct {
 	neg        []bool
 	shift      []int
 	bits       float64
+	maxShift   int
 }
 
 func newDyadicImage(M *mat.Dense, transpose bool) dyadicImage {
@@ -64,7 +65,6 @@ func newDyadicImage(M *mat.Dense, transpose bool) dyadicImage {
 	}
 	raw := M.RawMatrix()
 	d := dyadicImage{rows: r, cols: c, mant: make([]uint64, r*c), neg: make([]bool, r*c), shift: make([]int, r*c)}
-	exps := make([]int, r*c)
 	e0 := math.MaxInt
 	for i := range r {
 		for j := range c {
@@ -82,26 +82,29 @@ func newDyadicImage(M *mat.Dense, transpose bool) dyadicImage {
 			tz := bits.TrailingZeros64(mant)
 			d.mant[k] = mant >> tz
 			d.neg[k] = x < 0
-			exps[k] = e - 53 + tz
-			e0 = min(e0, exps[k])
+			d.shift[k] = e - 53 + tz
+			e0 = min(e0, d.shift[k])
 		}
 	}
 	for k, m := range d.mant {
 		if m != 0 {
-			d.shift[k] = exps[k] - e0
+			d.shift[k] -= e0
+			d.maxShift = max(d.maxShift, d.shift[k])
 			d.bits = math.Max(d.bits, float64(d.shift[k]+bits.Len64(m)))
 		}
 	}
 	return d
 }
 
-func (d dyadicImage) modP(p uint64, dst []uint64) {
+// modP writes the entries modulo p into dst; pow2[s] is 2ˢ mod p for every
+// shift s of d.
+func (d dyadicImage) modP(p uint64, pow2, dst []uint64) {
 	for k, m := range d.mant {
 		if m == 0 {
 			dst[k] = 0
 			continue
 		}
-		v := m % p * powModP(2, uint64(d.shift[k]), p) % p
+		v := m % p * pow2[d.shift[k]] % p
 		if d.neg[k] && v != 0 {
 			v = p - v
 		}
@@ -156,6 +159,7 @@ func exactKrylovFullRank(a, b dyadicImage, budget minimalityBudget) minimality {
 }
 
 type krylovModP struct {
+	pow2    []uint64
 	n, m    int
 	a, cur  []uint64
 	next, v []uint64
@@ -164,10 +168,12 @@ type krylovModP struct {
 }
 
 func newKrylovModP(n, m int) *krylovModP {
+	slab := make([]uint64, 2*n*n+2*n*m+n)
+	take := func(k int) []uint64 { t := slab[:k:k]; slab = slab[k:]; return t }
 	return &krylovModP{
 		n: n, m: m,
-		a: make([]uint64, n*n), cur: make([]uint64, n*m), next: make([]uint64, n*m),
-		v: make([]uint64, n), basis: make([]uint64, n*n), pivots: make([]int, 0, n),
+		a: take(n * n), cur: take(n * m), next: take(n * m),
+		v: take(n), basis: take(n * n), pivots: make([]int, 0, n),
 	}
 }
 
@@ -176,8 +182,17 @@ func newKrylovModP(n, m int) *krylovModP {
 // A-invariant).
 func (w *krylovModP) rank(a, b dyadicImage, p uint64) int {
 	n, m := w.n, w.m
-	a.modP(p, w.a)
-	b.modP(p, w.cur)
+	top := max(a.maxShift, b.maxShift)
+	if cap(w.pow2) <= top {
+		w.pow2 = make([]uint64, top+1)
+	}
+	w.pow2 = w.pow2[:top+1]
+	w.pow2[0] = 1 % p
+	for i := 1; i <= top; i++ {
+		w.pow2[i] = w.pow2[i-1] * 2 % p
+	}
+	a.modP(p, w.pow2, w.a)
+	b.modP(p, w.pow2, w.cur)
 	w.pivots = w.pivots[:0]
 	for range n {
 		grew := false

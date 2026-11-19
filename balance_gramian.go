@@ -42,12 +42,16 @@ type refinedGramian struct {
 // equation is then too ill-conditioned for X to be accurate in float64.
 func newRefinedGramian(A *mat.Dense, f []float64, k int, discrete bool) (g *refinedGramian, ok bool, err error) {
 	n, _ := A.Dims()
-	s, err := newSchurLyapunov(A, n, discrete, nil)
+	nn := n * n
+	slab := make([]float64, 6*nn+2*n)
+	take := func(k int) []float64 { t := slab[:k:k]; slab = slab[k:]; return t }
+	ws := &LyapunovWorkspace{aData: take(nn), wr: take(n), wi: take(n), vs: take(nn), tmp: take(nn)}
+	s, err := newSchurLyapunov(A, n, discrete, ws)
 	if err != nil {
 		return nil, false, err
 	}
 	g = &refinedGramian{a: A, f: f, n: n, k: k, discrete: discrete, schur: s,
-		x: make([]float64, n*n), r: make([]float64, n*n), d: make([]float64, n*n)}
+		x: take(nn), r: take(nn), d: take(nn)}
 	if discrete {
 		g.ax = make([]dd, n*n)
 	}
