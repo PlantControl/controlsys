@@ -312,12 +312,15 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 // bound. The test is tried first on the model's solve stage alone
 // (ddEntrySolve), with comp = 0 and T_G,hi = T̂, either of which only
 // raises its left side or lowers its right: where that passes the full
-// bounds pass too, and their inverse and |L||U| are not formed.
+// bounds pass too, and their inverse and |L||U| are not formed. A cut's
+// response at points of its own (cb ≠ cut) is sharpened for that test
+// before the model's bounds are formed: beside a pole its plain bound is
+// too loose to dismiss the point.
 func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
 	if !ddEntrySolve(&full.ev.br, s, &d.w, d.g) {
 		return false
 	}
-	if d.cutCannotRefute(cb, k, false) {
+	if d.cutCannotRefute(cb, k, false) || cb != cut && d.cutCannotRefute(cb, k, true) {
 		return false
 	}
 	if !ddEntryBoundStage(&full.ev.br, &d.w, d.g) {
