@@ -296,6 +296,11 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 // response as well as the polynomial roots, else the polynomial roots,
 // and an error wrapping ErrAccuracyUnverified.
 //
+// The transfer function is taken from TransferFunction without its
+// explicit and E⁻¹-fold certificate, which this form's own replaces: an
+// unverified explicit or fold TransferFunction does not by itself make
+// the form unverified.
+//
 // A delay-free descriptor model (no LFT) keeps the transfer-function
 // roots, verified against the pencil sE − A by TransferFunction's
 // descriptor certificate with Z in place of the coefficients

@@ -30,7 +30,7 @@ func TestTFRowsQuotientOverflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tf := &TransferFunc{Num: [][][]float64{{tc.num}}, Den: [][]float64{tc.den}}
 			r, mag := make([]complex128, 1), make([]float64, 1)
-			if !(tfRows{tf}).at(0, s, r, mag) {
+			if !(tfRows{tf: tf}).at(0, s, r, mag) {
 				t.Fatal("row not finite")
 			}
 			if d := cmplx.Abs(r[0]-tc.want) / cmplx.Abs(tc.want); !(d <= 4*eps()) {
@@ -42,7 +42,7 @@ func TestTFRowsQuotientOverflow(t *testing.T) {
 		})
 	}
 	tf := &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{0, 0}}}
-	if (tfRows{tf}).at(0, s, make([]complex128, 1), make([]float64, 1)) {
+	if (tfRows{tf: tf}).at(0, s, make([]complex128, 1), make([]float64, 1)) {
 		t.Error("zero denominator evaluated")
 	}
 }

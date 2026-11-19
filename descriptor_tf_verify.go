@@ -264,6 +264,20 @@ const exactCertPrec = 320
 // Horner's rule at exactCertPrec bits, unrounded: its exponent range does
 // not overflow where s^deg does in float64.
 func bigPolyAt(c []float64, s complex128) (re, im *big.Float) {
+	return bigPolyAtOf(bigCoeffs(c), s)
+}
+
+// bigCoeffs converts c to exactCertPrec bits, exactly.
+func bigCoeffs(c []float64) []*big.Float {
+	out := make([]*big.Float, len(c))
+	for i, v := range c {
+		out[i] = new(big.Float).SetPrec(exactCertPrec).SetFloat64(v)
+	}
+	return out
+}
+
+// bigPolyAtOf is bigPolyAt of coefficients already at exactCertPrec bits.
+func bigPolyAtOf(c []*big.Float, s complex128) (re, im *big.Float) {
 	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
 	sr, si := nw().SetFloat64(real(s)), nw().SetFloat64(imag(s))
 	re, im = nw(), nw()
@@ -273,7 +287,7 @@ func bigPolyAt(c []float64, s complex128) (re, im *big.Float) {
 	for _, v := range c {
 		nr := nw().Sub(t1.Mul(re, sr), t2.Mul(im, si))
 		ni := nw().Add(t1.Mul(re, si), t2.Mul(im, sr))
-		re, im = nr.Add(nr, nw().SetFloat64(v)), ni
+		re, im = nr.Add(nr, v), ni
 	}
 	return re, im
 }
@@ -283,7 +297,12 @@ func bigPolyAt(c []float64, s complex128) (re, im *big.Float) {
 type bigDen struct{ dr, di, d2 *big.Float }
 
 func newBigDen(den []float64, s complex128) bigDen {
-	dr, di := bigPolyAt(den, s)
+	return newBigDenOf(bigCoeffs(den), s)
+}
+
+// newBigDenOf is newBigDen of coefficients already at exactCertPrec bits.
+func newBigDenOf(den []*big.Float, s complex128) bigDen {
+	dr, di := bigPolyAtOf(den, s)
 	d2 := new(big.Float).SetPrec(exactCertPrec).Mul(dr, dr)
 	d2.Add(d2, new(big.Float).SetPrec(exactCertPrec).Mul(di, di))
 	return bigDen{dr, di, d2}
@@ -293,11 +312,16 @@ func newBigDen(den []float64, s complex128) bigDen {
 // rounding numerator and denominator first would overflow when only
 // s^deg of one does (a false 0 or NaN). ok is false when d is zero.
 func (d bigDen) quo(num []float64, s complex128) (complex128, bool) {
+	return d.quoOf(bigCoeffs(num), s)
+}
+
+// quoOf is quo of a numerator already at exactCertPrec bits.
+func (d bigDen) quoOf(num []*big.Float, s complex128) (complex128, bool) {
 	if d.d2.Sign() == 0 {
 		return 0, false
 	}
 	nw := func() *big.Float { return new(big.Float).SetPrec(exactCertPrec) }
-	nr, ni := bigPolyAt(num, s)
+	nr, ni := bigPolyAtOf(num, s)
 	re := nw().Add(nw().Mul(nr, d.dr), nw().Mul(ni, d.di))
 	im := nw().Sub(nw().Mul(ni, d.dr), nw().Mul(nr, d.di))
 	a, _ := re.Quo(re, d.d2).Float64()
@@ -707,7 +731,7 @@ func judgeDescriptorTF(sys *System, tf *TransferFunc, pts []complex128, full pen
 // judgeDescriptorTFCached is judgeDescriptorTF taking exact evaluations of
 // open points from c (nil: none cached).
 func judgeDescriptorTFCached(sys *System, tf *TransferFunc, pts []complex128, full pencilBoundedResp, win tfWindows, c *pencilCache) []descriptorTFPoint {
-	return judgeDescriptorCached(sys, tfRows{tf}, pts, full, win, c)
+	return judgeDescriptorCached(sys, newTFRows(tf), pts, full, win, c)
 }
 
 // descriptorRows evaluates a model judged against a descriptor's pencil
@@ -719,12 +743,104 @@ type descriptorRows interface {
 }
 
 // tfRows evaluates a transfer function from its float64 coefficients as
-// returned, numerator, denominator and quotient at exactCertPrec bits,
-// then rounded (bigDen.quo): mag = |r| covers the roundings. A row with a
-// non-finite coefficient or value is not finite.
-type tfRows struct{ tf *TransferFunc }
+// returned: numerator and denominator in double-double by Horner's rule
+// with a running error bound, the quotient in double-double, and the
+// bound carried through (tfRows.bounded); where that bound exceeds 2ε of
+// the value, or a quantity leaves the range in which the double-double
+// operations are exact, numerator, denominator and quotient at
+// exactCertPrec bits, then rounded (bigDen.quo), the coefficients
+// converted once per row (big, when set). mag = |r| covers either
+// rounding. A row with a non-finite coefficient or value is not finite.
+type tfRows struct {
+	tf  *TransferFunc
+	big *tfBigCoeffs
+}
+
+// tfBigCoeffs holds per row the denominator and numerators of a transfer
+// function at exactCertPrec bits, converted on first use.
+type tfBigCoeffs struct {
+	den  [][]*big.Float
+	nums [][][]*big.Float
+}
+
+// newTFRows is tfRows of tf with the conversion to exactCertPrec bits
+// kept across points.
+func newTFRows(tf *TransferFunc) tfRows {
+	return tfRows{tf: tf, big: &tfBigCoeffs{den: make([][]*big.Float, len(tf.Den)), nums: make([][][]*big.Float, len(tf.Den))}}
+}
 
 func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
+	if !t.finiteRow(i) {
+		return false
+	}
+	if dv, de, ok := ddPolyAt(t.tf.Den[i], s); ok {
+		for j := range r {
+			v, b, fast := tfQuotientDD(t.tf.Num[i][j], dv, de, s)
+			if !fast || !(b <= 2*eps()*cmplx.Abs(v)) {
+				ok = false
+				break
+			}
+			r[j], mag[j] = v, cmplx.Abs(v)
+		}
+		if ok {
+			return true
+		}
+	}
+	return t.at320(i, s, r, mag)
+}
+
+// bounded sets r to row i of the transfer function at s with β bounding
+// |r̂_j − r_j|, by tfEntryDD, or at exactCertPrec bits with β = 4ε|r̂_j|
+// where that bound exceeds 2ε of the value; false where the row is not
+// finite at s.
+func (t tfRows) bounded(i int, s complex128, r []complex128, beta []float64) bool {
+	if !t.finiteRow(i) {
+		return false
+	}
+	if dv, de, ok := plainPolyAt(t.tf.Den[i], s); ok && de <= dv.abs()/2 {
+		da := cmplx.Abs(complex(dv.re.hi, dv.im.hi))
+		for j := range r {
+			nv, ne, nok := plainPolyAt(t.tf.Num[i][j], s)
+			if !nok {
+				ok = false
+				break
+			}
+			v := complex(nv.re.hi, nv.im.hi) / complex(dv.re.hi, dv.im.hi)
+			qa := cmplx.Abs(v)
+			b := ((ne+qa*(1+eps())*de)/(da-de)*(1+4*eps()) + 8*eps()*qa) * (1 + 4*eps())
+			if !isFinite(qa) || !(b <= 1e6*eps()*qa) && !(nv.re.hi == 0 && nv.im.hi == 0 && ne == 0) {
+				ok = false
+				break
+			}
+			r[j], beta[j] = v, b
+		}
+		if ok {
+			return true
+		}
+	}
+	if dv, de, ok := ddPolyAt(t.tf.Den[i], s); ok {
+		for j := range r {
+			v, b, fast := tfQuotientDD(t.tf.Num[i][j], dv, de, s)
+			if !fast || !(b <= 2*eps()*cmplx.Abs(v)) {
+				ok = false
+				break
+			}
+			r[j], beta[j] = v, b
+		}
+		if ok {
+			return true
+		}
+	}
+	if !t.at320(i, s, r, beta) {
+		return false
+	}
+	for j := range beta {
+		beta[j] *= 4 * eps()
+	}
+	return true
+}
+
+func (t tfRows) finiteRow(i int) bool {
 	if !finiteAll(t.tf.Den[i]...) {
 		return false
 	}
@@ -733,18 +849,130 @@ func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
 			return false
 		}
 	}
-	d := newBigDen(t.tf.Den[i], s)
+	return true
+}
+
+// at320 is at at exactCertPrec bits.
+func (t tfRows) at320(i int, s complex128, r []complex128, mag []float64) bool {
+	var d bigDen
+	var nums [][]*big.Float
+	if t.big != nil {
+		if t.big.den[i] == nil {
+			t.big.den[i] = bigCoeffs(t.tf.Den[i])
+			t.big.nums[i] = make([][]*big.Float, len(t.tf.Num[i]))
+			for j, num := range t.tf.Num[i] {
+				t.big.nums[i][j] = bigCoeffs(num)
+			}
+		}
+		d, nums = newBigDenOf(t.big.den[i], s), t.big.nums[i]
+	} else {
+		d = newBigDen(t.tf.Den[i], s)
+	}
 	if d.d2.Sign() == 0 {
 		return false
 	}
 	for j := range r {
-		v, ok := d.quo(t.tf.Num[i][j], s)
+		var v complex128
+		var ok bool
+		if nums != nil {
+			v, ok = d.quoOf(nums[j], s)
+		} else {
+			v, ok = d.quo(t.tf.Num[i][j], s)
+		}
 		if !ok || !isFinite(real(v)) || !isFinite(imag(v)) {
 			return false
 		}
 		r[j], mag[j] = v, cmplx.Abs(v)
 	}
 	return true
+}
+
+// tfEntryDD is num(s)/den(s) of descending float64 coefficients in
+// double-double, rounded, with b bounding its distance from the exact
+// quotient: each Horner step y ← y·s + a adds at most 8u_dd(√2|ŷ||s| +
+// |a| + |ŷ'|) to the propagated |s|·e, u_dd = ddOpErr, and the quotient
+// errs by (e_N + |q̂|e_D)/(|D̂| − e_D) + 16u_dd|q̂| + ε|q̂|, the last its
+// rounding to complex128. fast is false where a value leaves [2⁻⁴⁰⁰,
+// 2⁵⁰⁰] (zero aside), where its double-double products could round
+// inexactly or overflow, or where e_D ≥ |D̂|/2.
+func tfEntryDD(num, den []float64, s complex128) (v complex128, b float64, fast bool) {
+	dv, de, ok := ddPolyAt(den, s)
+	if !ok {
+		return 0, 0, false
+	}
+	return tfQuotientDD(num, dv, de, s)
+}
+
+// tfQuotientDD is tfEntryDD with the denominator's value dv and bound de.
+func tfQuotientDD(num []float64, dv ddComplex, de float64, s complex128) (v complex128, b float64, fast bool) {
+	nv, ne, ok := ddPolyAt(num, s)
+	if !ok {
+		return 0, 0, false
+	}
+	da := dv.abs()
+	if !(de <= da/2) || da == 0 {
+		return 0, 0, false
+	}
+	if nv.re.hi == 0 && nv.im.hi == 0 && ne == 0 {
+		return 0, 0, true
+	}
+	q := nv.div(dv)
+	v = q.complex128()
+	qa := cmplx.Abs(v)
+	if !isFinite(qa) || qa > 0x1p500 || qa < 0x1p-400 {
+		return 0, 0, false
+	}
+	b = ((ne+qa*(1+eps())*de)/(da-de)*(1+4*eps()) + 16*ddOpErr*qa + eps()*qa) * (1 + 4*eps())
+	return v, b, true
+}
+
+// plainPolyAt is the value of the descending coefficients c at s by
+// Horner's rule in complex128, in the hi words of v, with e bounding its
+// error, γ_{6(d+1)} times Σ|c_k||s|^k; false where a value or bound leaves
+// [2⁻⁵⁰⁰, 2⁵⁰⁰] (zero aside).
+func plainPolyAt(c []float64, s complex128) (v ddComplex, e float64, ok bool) {
+	const lo, hi = 0x1p-500, 0x1p500
+	as := cmplx.Abs(s)
+	var y complex128
+	mag := 0.0
+	for _, a := range c {
+		y = y*s + complex(a, 0)
+		mag = mag*as + math.Abs(a)
+	}
+	ya := cmplx.Abs(y)
+	if !(mag <= hi) || ya != 0 && ya < lo || mag != 0 && mag < lo {
+		return v, 0, false
+	}
+	return ddComplex{re: dd{real(y), 0}, im: dd{imag(y), 0}}, gammaN(6*len(c)+6) * mag * (1 + 4*eps()), true
+}
+
+// ddPolyAt is ddPolyAt of tfEntryDD: the double-double value of the
+// descending coefficients c at s and its error bound.
+func ddPolyAt(c []float64, s complex128) (v ddComplex, e float64, ok bool) {
+	sr, si := real(s), imag(s)
+	as := math.Abs(sr) + math.Abs(si)
+	const lo, hi = 0x1p-400, 0x1p500
+	inRange := func(x float64) bool { x = math.Abs(x); return x == 0 || x >= lo && x <= hi }
+	if !inRange(sr) || !inRange(si) {
+		return v, 0, false
+	}
+	for _, a := range c {
+		if !inRange(a) {
+			return v, 0, false
+		}
+		ya := v.abs1()
+		re := v.re.mul(dd{sr, 0}).add(v.im.mul(dd{si, 0}).neg()).add(dd{a, 0})
+		im := v.re.mul(dd{si, 0}).add(v.im.mul(dd{sr, 0}))
+		v = ddComplex{re, im}
+		if !inRange(re.hi) || !inRange(im.hi) {
+			return v, 0, false
+		}
+		e = as*e + 8*ddOpErr*(1.5*ya*as+math.Abs(a)+v.abs1())
+		if ya*as != 0 && ya*as < lo {
+			return v, 0, false
+		}
+	}
+	return v, e * (1 + 4*eps()), isFinite(e)
 }
 
 // zpkRows evaluates a zero-pole-gain model by zpkEvalBounded: mag is its
@@ -997,13 +1225,43 @@ func descriptorTFJudgeCached(sys *System, tf *TransferFunc, c *pencilCache) (boo
 // not verified: the refuting point and its worst ratio, the point at ∞,
 // or the verified count short of the need. It is a diagnostic only.
 func descriptorTFJudgeWhy(sys *System, tf *TransferFunc, c *pencilCache) (bool, []int, string) {
-	return descriptorJudgeWhy(sys, tf, tfRows{tf}, c)
+	return descriptorJudgeWhy(sys, tf, newTFRows(tf), c)
 }
 
 // descriptorJudgeWhy is descriptorTFJudgeWhy judging the model rows
 // evaluates, with tf's roots, orders, windows and verdict at ∞: rows is tf
 // itself or a form with tf's roots and orders.
 func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *pencilCache) (bool, []int, string) {
+	return descriptorScheduleWhy(sys, tf, pencilPointJudge(sys, tf, rows, c), func() bool {
+		return descriptorTFInfinityRefutesCached(sys, tf, c)
+	})
+}
+
+// pointJudge judges a model at pts: a point where the stored data do not
+// determine the response (η ≥ 1, a zero pivot) neither verifies nor
+// refutes.
+type pointJudge func(pts []complex128) []descriptorTFPoint
+
+// pencilPointJudge returns, for tf's row poles, the pointJudge of
+// judgeDescriptorCached against the bounded pencil response of sys, the
+// windows of tf (tfPoleWindows) formed on first use.
+func pencilPointJudge(sys *System, tf *TransferFunc, rows descriptorRows, c *pencilCache) func(poles []complex128) pointJudge {
+	return func(poles []complex128) pointJudge {
+		var win *tfWindows
+		return func(pts []complex128) []descriptorTFPoint {
+			if win == nil {
+				w := tfPoleWindows(tf, poles, math.Sqrt(eps()))
+				win = &w
+			}
+			return judgeDescriptorCached(sys, rows, pts, c.response(sys, pts), *win, c)
+		}
+	}
+}
+
+// descriptorScheduleWhy is descriptorJudgeWhy with the points judged by
+// the judge mk returns for tf's row poles and the point at ∞ by
+// infRefutes (continuous models only).
+func descriptorScheduleWhy(sys *System, tf *TransferFunc, mk func(poles []complex128) pointJudge, infRefutes func() bool) (bool, []int, string) {
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
 		return true, nil, ""
@@ -1012,13 +1270,13 @@ func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *p
 	if !ok {
 		return false, nil, "roots failed"
 	}
+	judge := mk(poles)
 	need := n + nf + polyDeg + 1
-	win := tfPoleWindows(tf, poles, math.Sqrt(eps()))
 	var seen []complex128
 	var refuted []int
 	why := ""
 	verified := 0
-	judge := func(cand []complex128) bool {
+	judgeNew := func(cand []complex128) bool {
 		var pts []complex128
 		for _, s := range cand {
 			if !slices.Contains(seen, s) {
@@ -1029,7 +1287,7 @@ func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *p
 		if len(pts) == 0 {
 			return true
 		}
-		for k, jp := range judgeDescriptorCached(sys, rows, pts, c.response(sys, pts), win, c) {
+		for k, jp := range judge(pts) {
 			if jp.refuted {
 				refuted = jp.refutedEntries
 				why = fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", pts[k], jp.worst, jp.refutedEntries)
@@ -1041,7 +1299,7 @@ func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *p
 		}
 		return true
 	}
-	if !judge(descriptorTFProbes(sys, roots)) {
+	if !judgeNew(descriptorTFProbes(sys, roots)) {
 		return false, refuted, why
 	}
 	if sys.Dt == 0 {
@@ -1052,34 +1310,21 @@ func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *p
 			if !(w <= sdom) {
 				break
 			}
-			s := complex(0, w)
-			if slices.Contains(seen, s) {
-				continue
-			}
-			seen = append(seen, s)
-			full := c.response(sys, []complex128{s})
-			if !full.ok[0] || !(full.eta[0] < 1) {
-				continue
-			}
-			jp := judgeDescriptorCached(sys, rows, []complex128{s}, full, win, c)[0]
-			if jp.refuted {
-				return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
-			}
-			if jp.verified {
-				verified += probeWeight(s)
+			if !judgeNew([]complex128{complex(0, w)}) {
+				return false, refuted, why
 			}
 		}
 	}
-	if sys.Dt == 0 && descriptorTFInfinityRefutesCached(sys, tf, c) {
+	if sys.Dt == 0 && infRefutes() {
 		return false, nil, "refuted at ∞"
 	}
 	for r := range 3 {
-		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, 4<<r)) {
+		if !judgeNew(zpkFillProbes(roots, nil, sys.Dt != 0, 4<<r)) {
 			return false, refuted, why
 		}
 	}
 	for r := 0; r < 3 && verified < need; r++ {
-		if !judge(zpkFillProbes(roots, nil, sys.Dt != 0, (need-verified+1)/2<<r)) {
+		if !judgeNew(zpkFillProbes(roots, nil, sys.Dt != 0, (need-verified+1)/2<<r)) {
 			return false, refuted, why
 		}
 	}
@@ -1091,21 +1336,8 @@ func descriptorJudgeWhy(sys *System, tf *TransferFunc, rows descriptorRows, c *p
 		if !(w > floor) {
 			break
 		}
-		s := axisPoint(discrete, w)
-		if slices.Contains(seen, s) {
-			continue
-		}
-		seen = append(seen, s)
-		full := c.response(sys, []complex128{s})
-		if !full.ok[0] || !(full.eta[0] < 1) {
-			continue
-		}
-		jp := judgeDescriptorCached(sys, rows, []complex128{s}, full, win, c)[0]
-		if jp.refuted {
-			return false, jp.refutedEntries, fmt.Sprintf("refuted at %.4g (%.3g× the threshold), entries %v", s, jp.worst, jp.refutedEntries)
-		}
-		if jp.verified {
-			verified += probeWeight(s)
+		if !judgeNew([]complex128{axisPoint(discrete, w)}) {
+			return false, refuted, why
 		}
 	}
 	if verified < need {

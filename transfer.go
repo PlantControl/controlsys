@@ -182,7 +182,12 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // discrete model with poles clustered near z = 1, can evaluate with O(1)
 // relative error. As MATLAB advises ("Using the Right Model
 // Representation"), evaluate such models with EvalFr/FreqResponse on the
-// state-space form instead.
+// state-space form instead. A nil error certifies the transfer function
+// within rounding of the stored data's terms, by descriptorTFVerified's
+// contract and points with the model taken as the descriptor (A, B, C, D,
+// I) (explicitTFVerified); one that does not verify, such as one whose
+// coefficients cancel past the response's resolution, is returned with an
+// error wrapping ErrAccuracyUnverified.
 //
 // A descriptor model is first reduced to explicit form as MATLAB tf(dss)
 // does: nonsingular E is folded in, and singular E is reduced by eliminating
@@ -198,8 +203,12 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // verify falls back to the reduction, kept when it verifies. One that does
 // not verify is returned with an error wrapping ErrAccuracyUnverified, and
 // IsProper and Step share that verdict for singular E. The E⁻¹ fold
-// returns the explicit model's transfer function, with the polynomial-form
-// limit above. When the reduction does not verify and the
+// returns the explicit model's transfer function, verified as an explicit
+// one when the fold is exactly that of one ε-rounding of A and B
+// (foldWithinRounding), else against the pencil (descriptorTFVerified),
+// and returned with ErrAccuracyUnverified where it does not verify; a nil
+// error then certifies it within terms of an ε-rounding of the stored
+// data. When the reduction does not verify and the
 // pencil (E singular, not index 1, within a cost cap) has an index ≥ 2
 // chain, the exact rational num/den of the stored data, trimmed to the
 // least degrees whose model is within terms, is tried instead, and when
@@ -244,7 +253,7 @@ func (sys *System) transferFunction(opts *TransferFuncOpts, certify bool) (*Tran
 		case err != nil:
 			return nil, err
 		case !certified:
-			err = fmt.Errorf("TransferFunction: descriptor reduction: %w", ErrAccuracyUnverified)
+			err = fmt.Errorf("TransferFunction: not verified within the stored data's terms: %w", ErrAccuracyUnverified)
 		}
 	}
 	if total := newDelayTopology(sys).totalExternal(true); total != nil {
@@ -263,7 +272,7 @@ func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult
 // (descriptorTFVerified, c's work shared): a split that does not verify
 // falls back to the reduction, kept when it verifies; otherwise the
 // route's value is returned with certified false. A model that is not a
-// descriptor, and the E⁻¹ fold, are returned certified.
+// descriptor, and the E⁻¹ fold, are certified by explicitTFVerified.
 func (sys *System) transferRationalCertified(opts *TransferFuncOpts, c *pencilCache) (_ *TransferFuncResult, certified bool, _ error) {
 	return sys.transferRationalChecked(opts, c, true)
 }
@@ -275,8 +284,7 @@ func (sys *System) transferRationalChecked(opts *TransferFuncOpts, c *pencilCach
 	if err != nil {
 		return res, false, err
 	}
-	switch {
-	case route == tfRouteExplicit || route == tfRouteFold:
+	if route == tfRouteExplicit || route == tfRouteFold {
 		return res, !certify || explicitTFVerified(sys, route, res.TF, c), nil
 	}
 	if descriptorTFVerifiedCached(sys, res.TF, c) {
