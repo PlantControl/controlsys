@@ -1272,15 +1272,15 @@ func descriptorScheduleWhy(sys *System, tf *TransferFunc, mk func(poles []comple
 	}
 	judge := mk(poles)
 	need := n + nf + polyDeg + 1
-	var seen []complex128
+	seen := make(map[complex128]bool)
 	var refuted []int
 	why := ""
 	verified := 0
 	judgeNew := func(cand []complex128) bool {
 		var pts []complex128
 		for _, s := range cand {
-			if !slices.Contains(seen, s) {
-				seen = append(seen, s)
+			if !seen[s] {
+				seen[s] = true
 				pts = append(pts, s)
 			}
 		}
