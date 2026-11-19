@@ -166,9 +166,14 @@ var (
 	// ErrUnstable reports an operation that requires a stable model.
 	ErrUnstable = errors.New("controlsys: system is unstable")
 
-	// ErrNotMinimal reports a gramian that is not positive definite, so the
-	// model is not minimal.
-	ErrNotMinimal = errors.New("controlsys: gramian not positive definite; system may not be minimal")
+	// ErrNotMinimal reports a model that is not minimal: its stored data has
+	// an exactly rank-deficient controllability or observability matrix, so a
+	// gramian is singular.
+	ErrNotMinimal = errors.New("controlsys: system is not minimal")
+
+	// ErrMinimalityUndetermined reports a model whose minimality the exact
+	// Kalman rank test could not decide within its work bound.
+	ErrMinimalityUndetermined = errors.New("controlsys: minimality of the stored model undetermined")
 
 	// ErrInvalidOrder reports a requested model or approximation order out of
 	// range.

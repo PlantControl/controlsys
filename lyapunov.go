@@ -118,6 +118,29 @@ func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	ws := problem.ws
 
+	s, err := newSchurLyapunov(A, n, false, ws)
+	if err != nil {
+		return nil, err
+	}
+	w := reuseSlice(&ws, n*n, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
+	qRaw := Q.RawMatrix()
+	if err := s.solve(qRaw.Data, qRaw.Stride, w); err != nil {
+		return nil, err
+	}
+	return mat.NewDense(n, n, w), nil
+}
+
+// schurLyapunov holds the real Schur form A = U·T·Uᵀ of a Lyapunov equation,
+// so equations sharing A, such as refinement corrections, reuse it.
+type schurLyapunov struct {
+	n        int
+	discrete bool
+	t, u     []float64
+	tmp      []float64
+	ws       *LyapunovWorkspace
+}
+
+func newSchurLyapunov(A *mat.Dense, n int, discrete bool, ws *LyapunovWorkspace) (schurLyapunov, error) {
 	nn := n * n
 	aData := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.aData })
 	aRaw := A.RawMatrix()
@@ -136,15 +159,18 @@ func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
 		n, aData, n, wr, wi, vs, n, work, lwork, nil)
 	if !ok {
-		return nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
+		return schurLyapunov{}, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
 	}
-
 	tmp := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.tmp })
-	w := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
-	qRaw := Q.RawMatrix()
+	return schurLyapunov{n: n, discrete: discrete, t: aData, u: vs, tmp: tmp, ws: ws}, nil
+}
 
+// solve writes into w (n×n, stride n) the symmetric X of A·X + X·Aᵀ + Q = 0
+// (continuous) or A·X·Aᵀ − X + Q = 0 (discrete), Q of row stride ldq.
+func (s *schurLyapunov) solve(q []float64, ldq int, w []float64) error {
+	n, vs, tmp := s.n, s.u, s.tmp
 	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		-1, blas64.General{Rows: n, Cols: n, Data: qRaw.Data, Stride: qRaw.Stride},
+		-1, blas64.General{Rows: n, Cols: n, Data: q, Stride: ldq},
 		blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
 		0, blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n})
 
@@ -153,20 +179,27 @@ func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 		blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n},
 		0, blas64.General{Rows: n, Cols: n, Data: w, Stride: n})
 
-	// Solve T*Y + Y*T' = scale*W via Dtrsyl
-	scale, sylOk := impl.Dtrsyl(blas.NoTrans, blas.Trans, 1,
-		n, n, aData, n, aData, n, w, n)
-	if !sylOk {
-		return nil, fmt.Errorf("A and -A share an eigenvalue: %w", ErrSingularEquation)
+	var scale float64
+	if s.discrete {
+		var err error
+		if scale, err = solveDiscreteSchurLyap(n, s.t, n, w, n, s.ws); err != nil {
+			return err
+		}
+	} else {
+		var ok bool
+		scale, ok = impl.Dtrsyl(blas.NoTrans, blas.Trans, 1,
+			n, n, s.t, n, s.t, n, w, n)
+		if !ok {
+			return fmt.Errorf("A and -A share an eigenvalue: %w", ErrSingularEquation)
+		}
 	}
 	if scale != 1 {
 		invScale := 1.0 / scale
-		for i := range w {
+		for i := range w[:n*n] {
 			w[i] *= invScale
 		}
 	}
 
-	// X = U * Y * U': tmp = Y * U', then w = U * tmp (reuse w buffer)
 	blas64.Gemm(blas.NoTrans, blas.Trans,
 		1, blas64.General{Rows: n, Cols: n, Data: w, Stride: n},
 		blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
@@ -178,7 +211,7 @@ func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 		0, blas64.General{Rows: n, Cols: n, Data: w, Stride: n})
 
 	symmetrize(w, n, n)
-	return mat.NewDense(n, n, w), nil
+	return nil
 }
 
 // DLyap solves the discrete Lyapunov equation
@@ -224,64 +257,15 @@ func dlyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	ws := problem.ws
 
-	nn := n * n
-	aData := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.aData })
-	aRaw := A.RawMatrix()
-	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
-
-	wr := reuseSlice(&ws, n, func(w *LyapunovWorkspace) *[]float64 { return &w.wr })
-	wi := reuseSlice(&ws, n, func(w *LyapunovWorkspace) *[]float64 { return &w.wi })
-	vs := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.vs })
-
-	var workQuery [1]float64
-	impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
-		n, aData, n, wr, wi, vs, n, workQuery[:], -1, nil)
-	lwork := int(workQuery[0])
-	work := reuseSlice(&ws, lwork, func(w *LyapunovWorkspace) *[]float64 { return &w.work })
-
-	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
-		n, aData, n, wr, wi, vs, n, work, lwork, nil)
-	if !ok {
-		return nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
-	}
-
-	tmp := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.tmp })
-	w := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
-	qRaw := Q.RawMatrix()
-
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		-1, blas64.General{Rows: n, Cols: n, Data: qRaw.Data, Stride: qRaw.Stride},
-		blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n})
-
-	blas64.Gemm(blas.Trans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: w, Stride: n})
-
-	scale, err := solveDiscreteSchurLyap(n, aData, n, w, n, ws)
+	s, err := newSchurLyapunov(A, n, true, ws)
 	if err != nil {
 		return nil, err
 	}
-	if scale != 1 {
-		invScale := 1.0 / scale
-		for i := range w {
-			w[i] *= invScale
-		}
+	w := reuseSlice(&ws, n*n, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
+	qRaw := Q.RawMatrix()
+	if err := s.solve(qRaw.Data, qRaw.Stride, w); err != nil {
+		return nil, err
 	}
-
-	// X = U * Y * U': tmp = Y * U', then w = U * tmp (reuse w buffer)
-	blas64.Gemm(blas.NoTrans, blas.Trans,
-		1, blas64.General{Rows: n, Cols: n, Data: w, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n})
-
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: vs, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: w, Stride: n})
-
-	symmetrize(w, n, n)
 	return mat.NewDense(n, n, w), nil
 }
 
