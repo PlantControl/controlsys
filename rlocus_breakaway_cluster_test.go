@@ -200,10 +200,7 @@ func TestRootLocus_RotatedOriginDoublePole(t *testing.T) {
 // Ext sweep 920: h₂ is 6.7·eps·sens (inside the 10× margin, yet cannot
 // vanish), so the zero −232 stays. Ext 1294: h₁ is resolved in the floats
 // but Zeros() reports none, so 2 asymptotes at the sign of h₂ > 0. Base
-// sweep 1692: the zero count is ambiguous within the data's rounding (the
-// exact det pencil at degrees 2 and 3 both certify; GVD7AS ruling 6), so
-// Zeros certifies the least degree, 2 zeros: 3 asymptotes, 2 arrival
-// angles.
+// sweep 1692: no hₖ is resolved, so no zero is dropped.
 func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 	ext, base := rlsxGenerate(), rlswGenerate()
 	for _, tc := range []struct {
@@ -214,7 +211,7 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 	}{
 		{&ext[920], "ext 920", []float64{math.Pi / 2, 3 * math.Pi / 2}, 4},
 		{&ext[1294], "ext 1294", []float64{math.Pi / 2, 3 * math.Pi / 2}, 0},
-		{&base[1692], "base 1692", []float64{math.Pi / 3, math.Pi, 5 * math.Pi / 3}, 2},
+		{&base[1692], "base 1692", []float64{0, math.Pi}, 3},
 	} {
 		sys, err := tc.c.system()
 		if err != nil {

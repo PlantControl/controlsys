@@ -341,7 +341,7 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", c.ID, c.Fam, c.Xf, outs[i].Cen, oras[i].I.Centroid)
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && sw.limits[c.ID] != "":
 				t.Logf("case %d %s/%s: Breakaway differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, sw.limits[c.ID])
-			case base&m != 0 && bits[i]&m == 0 && rlswCertifiedCountExempt(sw.golden, c.ID, names[k]):
+			case base&m != 0 && bits[i]&m == 0 && rlswCertifiedCountExempt(sw.golden, c.ID, names[k], len(outs[i].Arr), oras[i].DegN):
 				t.Logf("case %d %s/%s: %s differs from the intended TF's zero count: %s", c.ID, c.Fam, c.Xf, names[k], rlswCertifiedCounts[sw.golden][c.ID].reason)
 			case base&m != 0 && bits[i]&m == 0:
 				regressed[k]++

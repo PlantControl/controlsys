@@ -814,7 +814,7 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
-			case base[i]&m != 0 && ok[i]&m == 0 && rlswCertifiedCountExempt(golden, i, names[m]):
+			case base[i]&m != 0 && ok[i]&m == 0 && rlswCertifiedCountExempt(golden, i, names[m], rlswZeroCount(&cases[i]), len(fzTrimRat(cases[i].num))-1):
 				t.Logf("case %d: %s differs from the intended TF's zero count: %s", i, names[m], rlswCertifiedCounts[golden][i].reason)
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
@@ -847,22 +847,34 @@ type rlswCertified struct {
 }
 
 // rlswCertifiedCounts lists, per sweep golden file and case, the
-// certified-count exemptions (GVD7AS ruling 7). Each holds on arm64 and
-// amd64: the 320-bit within-terms oracle scores base's zeros wrong and
-// the returned zeros right, and one zero added in band is refuted.
+// certified-count exemptions (GVD7AS rulings 7, 8), each applied only
+// while the returned zero count differs from the intended TF's. Each holds
+// on arm64 and amd64: the 320-bit within-terms oracle scores base's zeros
+// wrong and the returned zeros right, and one zero added in band is
+// refuted.
 var rlswCertifiedCounts = map[string]map[int]rlswCertified{
 	"testdata/rlocus_sweep_base.json": {
 		347:  {[]string{"Asymptotes", "ArrivalAngles count"}, "base Rank 0 refuted; 2 certified zeros, exact TF degree 3 (D = 0, data degree 0)"},
-		1692: {[]string{"Asymptotes", "ArrivalAngles count"}, "count ambiguous within rounding (exact det at degrees 2 and 3 certify); least degree, 2 zeros (ruling 6)"},
-	},
-	"testdata/rlocus_sweep_rv_base.json": {
-		1691: {[]string{"Asymptotes", "ArrivalAngles"}, "base zeros refuted; certified pair 5e-5 from the intended −30 ± 3.75i"},
 	},
 }
 
-func rlswCertifiedCountExempt(golden string, id int, comp string) bool {
+func rlswCertifiedCountExempt(golden string, id int, comp string, returned, intended int) bool {
 	e, ok := rlswCertifiedCounts[golden][id]
-	return ok && slices.Contains(e.comps, comp)
+	return ok && returned != intended && slices.Contains(e.comps, comp)
+}
+
+// rlswZeroCount is the number of finite zeros RootLocus reports for c (its
+// arrival angles), −1 on error.
+func rlswZeroCount(c *rlswCase) int {
+	sys, err := c.system()
+	if err != nil {
+		return -1
+	}
+	res, err := RootLocus(sys, rlswGains(c.d))
+	if res == nil || err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+		return -1
+	}
+	return len(res.ArrivalAngles)
 }
 
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64

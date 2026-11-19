@@ -397,9 +397,9 @@ func TestZerosCertifyWorkBudgetCaps(t *testing.T) {
 	}
 }
 
-// zerosLongDelayAbsorbed is the 40-step output delay of
-// TestRootLocus_LongDelayTriplePole absorbed into states (n = 43), a row
-// whose certification needs about 3× zerosWorkCap.
+// zerosLongDelayAbsorbed is the plant of TestRootLocus_LongDelayTriplePole
+// with a 50-step output delay absorbed into states (n = 53), a row whose
+// certification needs more than zerosWorkCap.
 func zerosLongDelayAbsorbed(tb testing.TB) *System {
 	tb.Helper()
 	sys, err := NewFromSlices(3, 1, 1,
@@ -409,7 +409,7 @@ func zerosLongDelayAbsorbed(tb testing.TB) *System {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	if err := sys.SetOutputDelay([]float64{40}); err != nil {
+	if err := sys.SetOutputDelay([]float64{50}); err != nil {
 		tb.Fatal(err)
 	}
 	abs, err := sys.absorbDelay()
@@ -439,7 +439,8 @@ func TestZerosWorkBudgetStopsAtCap(t *testing.T) {
 	}
 }
 
-// BenchmarkZerosCappedLongDelay: the capped row stays within 1 s on arm64.
+// BenchmarkZerosCappedLongDelay: the capped row stays within 1.25 s on
+// arm64 (GVD7AS ruling 8).
 func BenchmarkZerosCappedLongDelay(b *testing.B) {
 	sys := zerosLongDelayAbsorbed(b)
 	for b.Loop() {

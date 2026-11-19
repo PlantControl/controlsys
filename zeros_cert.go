@@ -350,8 +350,8 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 // the cap, and the certification is then not verified.
 type zerosBudget struct{ used, cap int64 }
 
-// zerosWorkCap is the budget of one certification, about 0.6 s.
-const zerosWorkCap = 140_000_000
+// zerosWorkCap is the budget of one certification, about 1 s.
+const zerosWorkCap = 250_000_000
 
 // zerosExactPointCost is the fixed charge of one exact point.
 const zerosExactPointCost = 100_000
@@ -1602,14 +1602,16 @@ func zerosCertSub(sys *System, k int) (*System, bool) {
 // sub-data of zerosCertSub. The pencil P(s) = [A − sI B; C D] is taken
 // exactly within exactPencilWithinBudget (pencilDetBounded); the
 // candidates are the roots (aberthRoots) of det P truncated to degree d,
-// d climbing from its degree to the data (dataDegree, the
-// coefficient-rounding convention) to its exact degree. All of it is
-// charged to the certification's work budget.
-func zerosTier2(sys *System, rank int, rankRefuted bool) ([]complex128, int, bool) {
-	return zerosTier2B(sys, rank, rankRefuted, newZerosBudget())
+// d first the base count baseZ where that lies between its degree to the
+// data (dataDegree, the coefficient-rounding convention) and its exact
+// degree and the base rank stands, then climbing from the degree to the
+// data to the exact degree (GVD7AS ruling 8; least degree is the
+// fallback). All of it is charged to the certification's work budget.
+func zerosTier2(sys *System, rank, baseZ int, rankRefuted bool) ([]complex128, int, bool) {
+	return zerosTier2B(sys, rank, baseZ, rankRefuted, newZerosBudget())
 }
 
-func zerosTier2B(sys *System, rank int, rankRefuted bool, b *zerosBudget) ([]complex128, int, bool) {
+func zerosTier2B(sys *System, rank, baseZ int, rankRefuted bool, b *zerosBudget) ([]complex128, int, bool) {
 	n, m, p := sys.Dims()
 	if m != p || n == 0 {
 		return nil, 0, false
@@ -1666,7 +1668,17 @@ func zerosTier2B(sys *System, rank int, rankRefuted bool, b *zerosBudget) ([]com
 	if exact < 0 {
 		return nil, 0, false
 	}
-	for d := max(bp.dataDegree(), 0); d <= exact; d++ {
+	lo := max(bp.dataDegree(), 0)
+	var order []int
+	if baseZ >= lo && baseZ <= exact && !(rank < m && rankRefuted) {
+		order = append(order, baseZ)
+	}
+	for d := lo; d <= exact; d++ {
+		if len(order) == 0 || d != order[0] {
+			order = append(order, d)
+		}
+	}
+	for _, d := range order {
 		if bp.coef[d].Sign() == 0 {
 			continue
 		}
@@ -1745,7 +1757,7 @@ func certifyZerosRun(sys *System, res *ZerosResult) (*ZerosResult, error) {
 	if res.Rank < m && m <= zerosCertMaxRank {
 		rankRefuted = zerosCertifyB(sys, nil, zerosModeDet0, b).verdict == zerosCertRefuted
 	}
-	if z, k, ok := zerosTier2B(sys, res.Rank, rankRefuted, b); ok {
+	if z, k, ok := zerosTier2B(sys, res.Rank, len(res.Zeros), rankRefuted, b); ok {
 		return &ZerosResult{Zeros: z, Rank: k}, nil
 	}
 	return res, fmt.Errorf("zeros not certified within the data's rounding terms: %w", ErrAccuracyUnverified)
