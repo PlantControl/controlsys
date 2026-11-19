@@ -720,10 +720,19 @@ type descriptorRows interface {
 
 // tfRows evaluates a transfer function from its float64 coefficients as
 // returned, numerator, denominator and quotient at exactCertPrec bits,
-// then rounded (bigDen.quo): mag = |r| covers the roundings.
+// then rounded (bigDen.quo): mag = |r| covers the roundings. A row with a
+// non-finite coefficient or value is not finite.
 type tfRows struct{ tf *TransferFunc }
 
 func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
+	if !finiteAll(t.tf.Den[i]...) {
+		return false
+	}
+	for _, num := range t.tf.Num[i] {
+		if !finiteAll(num...) {
+			return false
+		}
+	}
 	d := newBigDen(t.tf.Den[i], s)
 	if d.d2.Sign() == 0 {
 		return false

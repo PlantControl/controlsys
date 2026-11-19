@@ -169,3 +169,47 @@ func TestZPKModel_DescriptorOverflowingSolveNotVerifiedWrong(t *testing.T) {
 		}
 	}
 }
+
+// 5CFETF: the reduction of this badly scaled pencil (C subnormal, B near
+// 2³⁷²) returns a +Inf numerator coefficient; the certificate's 320-bit
+// evaluation panicked on it (0·Inf in big.Float) instead of treating the
+// row as not finite.
+func TestTransferFunction_DescriptorNonFiniteCoefficientNoPanic(t *testing.T) {
+	sys, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{2.2860803651350193e-207, -1.0259374858937401e-207, -8.159771144236081e-208, -6.593255930627217e-207}),
+		mat.NewDense(2, 1, []float64{-1.7964723570647378e+112, 1.7696249782607216e+112}),
+		mat.NewDense(1, 2, []float64{math.Copysign(0, -1), 1.5e-323}),
+		mat.NewDense(1, 1, []float64{-1.023279493509505}),
+		mat.NewDense(2, 2, []float64{1.915707240418936e-207, -1.2457803970606594e-208, -3.15283643138896e-208, 2.0502829130113785e-209}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.TransferFunction(nil)
+	if err != nil {
+		return
+	}
+	for i := range res.TF.Num {
+		if !finiteAll(res.TF.Den[i]...) {
+			t.Fatalf("nil error with denominator %v", res.TF.Den[i])
+		}
+		for _, num := range res.TF.Num[i] {
+			if !finiteAll(num...) {
+				t.Fatalf("nil error with numerator %v", num)
+			}
+		}
+	}
+}
+
+func TestDescriptorTFJudgeNonFiniteCoefficientUndetermined(t *testing.T) {
+	sys := nonFiniteJudgeDescriptor(t)
+	pts := []complex128{1i}
+	full := newPencilBoundedResponse(sys, pts)
+	for _, tf := range []*TransferFunc{
+		{Num: [][][]float64{{{math.Inf(1)}}}, Den: [][]float64{{1}}},
+		{Num: [][][]float64{{{1}}}, Den: [][]float64{{math.NaN(), 1}}},
+	} {
+		if jp := judgeDescriptorCached(sys, tfRows{tf}, pts, full, tfWindows{m: 1}, nil)[0]; jp.verified || jp.refuted {
+			t.Errorf("%v: %+v, want neither verified nor refuted", tf, jp)
+		}
+	}
+}
