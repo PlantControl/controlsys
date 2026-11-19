@@ -83,7 +83,8 @@ func TestRootLocusSweepPair(t *testing.T) {
 	}
 	skipSlowUnderRace(t)
 	cases := rlspGenerate()
-	ok, posed, dups := rlswRun(t, cases)
+	ok, posed, dups, unv := rlswRun(t, cases)
+	rlswCheckUnv(t, "pair", unv)
 	if path := os.Getenv("RLOCUS_SWEEPP_DUMP"); path != "" {
 		if err := os.WriteFile(path, []byte(rlswHex(ok)+"\n"+rlswHex(posed)+"\n"), 0o644); err != nil {
 			t.Fatal(err)

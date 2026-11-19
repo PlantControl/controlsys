@@ -3,6 +3,7 @@ package controlsys
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -79,10 +80,13 @@ func rvRun(c rvCase) rvOut {
 	if p, err := abs.Poles(); err == nil {
 		o.Poles = rvPairs(p)
 	}
-	if z, err := abs.Zeros(); err == nil {
+	if z, err := abs.Zeros(); err == nil || errors.Is(err, ErrAccuracyUnverified) {
 		o.Zeros = rvPairs(z)
 	}
 	res, err := RootLocus(sys, c.Gains)
+	if errors.Is(err, ErrAccuracyUnverified) && res != nil {
+		o.Unv, err = true, nil
+	}
 	if err != nil {
 		o.Err = err.Error()
 		return o
@@ -275,10 +279,15 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 	oras := sw.cachedOracles(t, cs)
 	bits := make([]int, len(cs))
 	outs := make([]rvOut, len(cs))
+	unv := 0
 	for i, c := range cs {
 		outs[i] = rvRun(c)
 		bits[i] = rvBits(rvScoreCase(c, oras[i], outs[i]))
+		if outs[i].Unv {
+			unv++
+		}
 	}
+	rlswCheckUnv(t, sw.golden, unv)
 	enc := func(v []int) string {
 		b := make([]byte, 0, 2*len(v))
 		for _, x := range v {
@@ -1599,6 +1608,7 @@ func rvSamePts(a, b rvOracle, far float64) bool {
 type rvOut struct {
 	ID     int
 	Err    string
+	Unv    bool
 	Bk     [][2]float64
 	Asym   []float64
 	Cen    float64

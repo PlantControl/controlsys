@@ -2,12 +2,14 @@ package controlsys
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -514,12 +516,18 @@ func rlswGains(d float64) []float64 {
 // twice: distinct exact stationary points may round close). Breakaway is
 // judged by the float-realization oracle oFlt alone, the others by the
 // intended TF.
-func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, err error) {
+// rlswVerdict judges RootLocus on c; a result returned with
+// ErrAccuracyUnverified (uncertified zeros) is judged as a value, and unv
+// reports it.
+func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup, unv bool, err error) {
 	sys, err := c.system()
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, false, false, err
 	}
 	res, rerr := RootLocus(sys, rlswGains(c.d))
+	if errors.Is(rerr, ErrAccuracyUnverified) && res != nil {
+		unv, rerr = true, nil
+	}
 	if oFlt.posed {
 		posed |= rlswBreak
 	}
@@ -552,7 +560,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 		posed |= rlswDepart
 	}
 	if rerr != nil {
-		return 0, posed, false, nil
+		return 0, posed, false, false, nil
 	}
 	for i, x := range res.Breakaway {
 		dup = dup || slices.Contains(res.Breakaway[i+1:], x)
@@ -594,12 +602,12 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 		abs := sys
 		if c.L > 0 {
 			if abs, err = sys.AbsorbDelay(); err != nil {
-				return ok, posed, dup, err
+				return ok, posed, dup, unv, err
 			}
 		}
 		got, err := abs.Poles()
 		if err != nil {
-			return ok, posed, dup, err
+			return ok, posed, dup, unv, err
 		}
 		dok := len(got) == len(poles) && len(res.DepartureAngles) == len(poles)
 		for i := 0; dok && i < len(got); i++ {
@@ -625,7 +633,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 			ok |= rlswDepart
 		}
 	}
-	return ok, posed, dup, nil
+	return ok, posed, dup, unv, nil
 }
 
 func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
@@ -653,22 +661,45 @@ type rlswGolden struct {
 	Posed string `json:"posed"`
 }
 
-func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int) {
+func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int, unv int) {
 	ok, posed = make([]int, len(cases)), make([]int, len(cases))
 	for i := range cases {
 		oi, of := cases[i].oracles()
 		var err error
-		var dup bool
-		ok[i], posed[i], dup, err = rlswVerdict(&cases[i], oi, of)
+		var dup, u bool
+		ok[i], posed[i], dup, u, err = rlswVerdict(&cases[i], oi, of)
 		if err != nil {
 			t.Fatalf("case %d: %v\n%s", i, err, &cases[i])
 		}
 		if dup {
 			dups = append(dups, i)
 		}
+		if u {
+			unv++
+		}
 	}
-	return ok, posed, dups
+	return ok, posed, dups, unv
 }
+
+// rlswCheckUnv fails when the number of cases whose RootLocus returned
+// uncertified zeros (ErrAccuracyUnverified, judged as a value) differs
+// from the count pinned for the sweep and architecture.
+func rlswCheckUnv(t *testing.T, sweep string, unv int) {
+	t.Helper()
+	want, ok := rlswUnvPinned[sweep][runtime.GOARCH]
+	if !ok {
+		t.Logf("%s: %d cases with uncertified zeros (no count pinned for %s)", sweep, unv, runtime.GOARCH)
+		return
+	}
+	if unv != want {
+		t.Errorf("%s: %d cases with uncertified zeros, pinned %d", sweep, unv, want)
+	}
+}
+
+// rlswUnvPinned is, per sweep and architecture, the number of cases whose
+// Zeros are not certified within the data's rounding (GVD7AS): RootLocus
+// returns their locus with ErrAccuracyUnverified, judged as a value.
+var rlswUnvPinned = map[string]map[string]int{}
 
 func rlswHex(v []int) string {
 	var sb strings.Builder
@@ -729,7 +760,8 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // when any case's Breakaway lists a point twice.
 func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
 	t.Helper()
-	ok, posed, dups := rlswRun(t, cases)
+	ok, posed, dups, unv := rlswRun(t, cases)
+	rlswCheckUnv(t, golden, unv)
 	if path := os.Getenv(env); path != "" {
 		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {

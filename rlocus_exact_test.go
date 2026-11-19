@@ -178,7 +178,7 @@ func TestRootLocus_BVLIUFVerdicts(t *testing.T) {
 		for _, i := range s.ids {
 			c := &s.cases[i]
 			oi, of := c.oracles()
-			ok, posed, dup, err := rlswVerdict(c, oi, of)
+			ok, posed, dup, _, err := rlswVerdict(c, oi, of)
 			if err != nil {
 				t.Fatal(err)
 			}

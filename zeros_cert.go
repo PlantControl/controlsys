@@ -1582,6 +1582,18 @@ func zerosPolyRoots(p []*big.Rat) ([]complex128, bool) {
 // (zerosTier2) when it certifies, else res with ErrAccuracyUnverified.
 // Non-square models keep res unchecked.
 func certifyZeros(sys *System, res *ZerosResult) (*ZerosResult, error) {
+	out, err := certifyZerosRun(sys, res)
+	if certifyZerosHook != nil {
+		certifyZerosHook(sys, res, out, err)
+	}
+	return out, err
+}
+
+// certifyZerosHook is a test-only seam, nil outside tests: it sees every
+// certification with the computed and the returned result.
+var certifyZerosHook func(sys *System, base, out *ZerosResult, err error)
+
+func certifyZerosRun(sys *System, res *ZerosResult) (*ZerosResult, error) {
 	n, m, p := sys.Dims()
 	if m != p || n == 0 {
 		return res, nil
