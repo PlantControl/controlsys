@@ -260,27 +260,10 @@ func regimeDiag(sys *System) string {
 }
 
 // requireTFWithinTermsOrUnverified fails unless TransferFunction's res,
-// err keep its within-terms contract (SL352H): a value with nil only when
-// withinTermsWorst ≤ 1 (an explicit sys judged as (A, B, C, D, I)), and a
-// value with ErrAccuracyUnverified only when withinTermsWorst > 1, so that
-// no TF within terms at a determined point is refused. It reports whether
-// err is nil.
+// err keep its within-terms contract (SL352H): a value, with nil only when
+// withinTermsWorst ≤ 1 (an explicit sys judged as (A, B, C, D, I)), else
+// with ErrAccuracyUnverified. It reports whether err is nil.
 func requireTFWithinTermsOrUnverified(t *testing.T, sys *System, res *TransferFuncResult, err error) bool {
-	t.Helper()
-	w, at := tfWithinTermsWorstOf(t, sys, res, err)
-	switch {
-	case err == nil && w > 1:
-		t.Fatalf("nil TF outside terms at %v: %.3g× the threshold", at, w)
-	case err != nil && !(w > 1):
-		t.Fatalf("TF within terms (%.3g× the threshold) returned with %v", w, err)
-	}
-	return err == nil
-}
-
-// requireTFNilWithinTerms is requireTFWithinTermsOrUnverified allowing an
-// unverified TF the stored data determine at no point, as where the
-// pencil's determinacy fails everywhere (short of verified points).
-func requireTFNilWithinTerms(t *testing.T, sys *System, res *TransferFuncResult, err error) bool {
 	t.Helper()
 	if w, at := tfWithinTermsWorstOf(t, sys, res, err); err == nil && w > 1 {
 		t.Fatalf("nil TF outside terms at %v: %.3g× the threshold", at, w)

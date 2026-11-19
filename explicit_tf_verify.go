@@ -18,13 +18,13 @@ import (
 // only when foldWithinRounding charges its whole residual to one
 // ε-rounding of A and B; otherwise every point goes to the pencil judge.
 // A model whose B or C is zero has the response D everywhere, and tf is
-// verified when it is D exactly (staticTFExact).
+// verified at once when it is D exactly (staticTFExact).
 func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) bool {
 	if n, m, p := sys.Dims(); n == 0 || m == 0 || p == 0 {
 		return true
 	}
-	if allZeroDense(sys.B) || allZeroDense(sys.C) {
-		return staticTFExact(sys, tf)
+	if (allZeroDense(sys.B) || allZeroDense(sys.C)) && staticTFExact(sys, tf) {
+		return true
 	}
 	if !tfVerdictMemo {
 		v, _, _ := explicitRouteJudgeWhy(sys, route, tf, c)

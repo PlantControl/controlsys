@@ -121,7 +121,7 @@ func TestTransferFunctionIOScaleOverflowFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.TransferFunction(nil)
-	requireTFNilWithinTerms(t, sys, res, err)
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
 	for _, c := range append(slices.Clone(res.TF.Den[0]), res.TF.Num[0][0]...) {
 		if math.IsInf(c, 0) || math.IsNaN(c) {
 			t.Fatalf("non-finite coefficient: %v / %v", res.TF.Num, res.TF.Den)

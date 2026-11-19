@@ -790,7 +790,7 @@ func (t tfRows) at(i int, s complex128, r []complex128, mag []float64) bool {
 }
 
 // bounded sets r to row i of the transfer function at s with β bounding
-// |r̂_j − r_j|, by tfEntryDD, or at exactCertPrec bits with β = 4ε|r̂_j|
+// |r̂_j − r_j|, by tfQuotientDD, or at exactCertPrec bits with β = 4ε|r̂_j|
 // where that bound exceeds 2ε of the value; false where the row is not
 // finite at s.
 func (t tfRows) bounded(i int, s complex128, r []complex128, beta []float64) bool {
@@ -887,7 +887,7 @@ func (t tfRows) at320(i int, s complex128, r []complex128, mag []float64) bool {
 	return true
 }
 
-// tfEntryDD is num(s)/den(s) of descending float64 coefficients in
+// tfQuotientDD is num(s)/den(s) of descending float64 coefficients in
 // double-double, rounded, with b bounding its distance from the exact
 // quotient: each Horner step y ← y·s + a adds at most 8u_dd(√2|ŷ||s| +
 // |a| + |ŷ'|) to the propagated |s|·e, u_dd = ddOpErr, and the quotient
@@ -895,15 +895,7 @@ func (t tfRows) at320(i int, s complex128, r []complex128, mag []float64) bool {
 // rounding to complex128. fast is false where a value leaves [2⁻⁴⁰⁰,
 // 2⁵⁰⁰] (zero aside), where its double-double products could round
 // inexactly or overflow, or where e_D ≥ |D̂|/2.
-func tfEntryDD(num, den []float64, s complex128) (v complex128, b float64, fast bool) {
-	dv, de, ok := ddPolyAt(den, s)
-	if !ok {
-		return 0, 0, false
-	}
-	return tfQuotientDD(num, dv, de, s)
-}
-
-// tfQuotientDD is tfEntryDD with the denominator's value dv and bound de.
+// The denominator comes as its value dv and bound de (ddPolyAt).
 func tfQuotientDD(num []float64, dv ddComplex, de float64, s complex128) (v complex128, b float64, fast bool) {
 	nv, ne, ok := ddPolyAt(num, s)
 	if !ok {
@@ -946,7 +938,7 @@ func plainPolyAt(c []float64, s complex128) (v ddComplex, e float64, ok bool) {
 	return ddComplex{re: dd{real(y), 0}, im: dd{imag(y), 0}}, gammaN(6*len(c)+6) * mag * (1 + 4*eps()), true
 }
 
-// ddPolyAt is ddPolyAt of tfEntryDD: the double-double value of the
+// ddPolyAt is the Horner step of tfQuotientDD: the double-double value of the
 // descending coefficients c at s and its error bound.
 func ddPolyAt(c []float64, s complex128) (v ddComplex, e float64, ok bool) {
 	sr, si := real(s), imag(s)
