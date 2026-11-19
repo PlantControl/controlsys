@@ -80,9 +80,7 @@ func TestTransferFunctionClusteredDiscreteStaysStableAndMatchesAwayFromCluster(t
 		t.Run(tc.name, func(t *testing.T) {
 			d := tc.sys
 			res, err := d.TransferFunction(nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireTFWithinTermsOrUnverified(t, d, res, err)
 			if tc.stable {
 				roots, err := Poly(res.TF.Den[0]).Roots()
 				if err != nil {

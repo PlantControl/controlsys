@@ -1,8 +1,6 @@
 package controlsys
 
 import (
-	"errors"
-	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -32,16 +30,7 @@ func TestTransferFunctionExplicitCancellationWithinTerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.TransferFunction(nil)
-	if res == nil {
-		t.Fatalf("no value: %v", err)
-	}
-	w, at := withinTermsWorst(t, identityPencil(sys), res.TF, math.Inf(1))
-	switch {
-	case err == nil && w > 1:
-		t.Fatalf("nil TF outside terms at %v: %.3g× the threshold", at, w)
-	case err != nil && !errors.Is(err, ErrAccuracyUnverified):
-		t.Fatal(err)
-	}
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
 }
 
 // TestTransferFunctionFoldUnderflowingEinvBUnverified: the E⁻¹ fold of a
@@ -59,14 +48,5 @@ func TestTransferFunctionFoldUnderflowingEinvBUnverified(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.TransferFunction(nil)
-	if res == nil {
-		t.Fatalf("no value: %v", err)
-	}
-	w, at := withinTermsWorst(t, sys, res.TF, math.Inf(1))
-	switch {
-	case err == nil && w > 1:
-		t.Fatalf("nil TF outside terms at %v: %.3g× the threshold", at, w)
-	case err != nil && !errors.Is(err, ErrAccuracyUnverified):
-		t.Fatal(err)
-	}
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
 }

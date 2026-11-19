@@ -13,7 +13,9 @@ import (
 // C(xI−A)⁻¹B + D at points where the polynomial form is well conditioned
 // (bound K·eps·(ν+|x|)ⁿ/|det(xI−A)|, ν = max(‖A‖, ‖B‖, ‖C_i‖) for the
 // normwise backward-stable staircase and Hessenberg reductions, else the
-// row is skipped, as the TransferFunction doc allows O(1) error there); row degrees sum to
+// row is skipped, as the TransferFunction doc allows O(1) error there; a
+// value TransferFunction cannot certify within terms comes with
+// ErrAccuracyUnverified and is checked as any other); row degrees sum to
 // MinimalOrder; external delays fold into TF.Delay as In[j]+Out[i]+IO[i][j]
 // without changing the coefficients, internal delays are rejected. The
 // TF realization (TransferFunc.StateSpace) and ZPKModel are checked against
@@ -29,7 +31,10 @@ func FuzzSSToTF(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		res, err := sys.TransferFunction(nil)
 		fzContract(t, s, "TransferFunction", res != nil, err)
-		fzErr(t, s, "TransferFunction", err, ErrOverflow)
+		unverified := errors.Is(err, ErrAccuracyUnverified)
+		if !unverified {
+			fzErr(t, s, "TransferFunction", err, ErrOverflow)
+		}
 		tf := res.TF
 		if len(tf.Den) != p || len(tf.Num) != p || tf.Dt != s.Dt || len(res.RowDegrees) != p {
 			t.Fatalf("TF shape rows=%d/%d dt=%g, want %d, %g\n%s", len(tf.Den), len(tf.Num), tf.Dt, p, s.Dt, s)
@@ -60,7 +65,12 @@ func FuzzSSToTF(f *testing.F) {
 		dsys := s.System(t, fzSysOpts{Delays: true})
 		dres, err := dsys.TransferFunction(nil)
 		fzContract(t, s, "TransferFunction(delayed)", dres != nil, err)
-		fzErr(t, s, "TransferFunction(delayed)", err, ErrOverflow)
+		if errors.Is(err, ErrAccuracyUnverified) != unverified {
+			t.Fatalf("delays changed the verdict: %v\n%s", err, s)
+		}
+		if !unverified {
+			fzErr(t, s, "TransferFunction(delayed)", err, ErrOverflow)
+		}
 		for i := range p {
 			for j := range m {
 				if !slices.Equal(dres.TF.Num[i][j], tf.Num[i][j]) || !slices.Equal(dres.TF.Den[i], tf.Den[i]) {

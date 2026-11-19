@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -256,4 +257,26 @@ func regimeDiag(sys *System) string {
 		d += fmt.Sprintf(", exact: certified %v, climbs %d, ceiling %v, %s", rg.v.certified, rg.v.climbs, rg.v.ceiling, rg.v.why)
 	}
 	return d
+}
+
+// requireTFWithinTermsOrUnverified fails unless TransferFunction's res,
+// err keep its within-terms contract (SL352H): a value with nil only when
+// withinTermsWorst ≤ 1 (an explicit sys judged as (A, B, C, D, I)), else
+// a value with ErrAccuracyUnverified. It reports whether err is nil.
+func requireTFWithinTermsOrUnverified(t *testing.T, sys *System, res *TransferFuncResult, err error) bool {
+	t.Helper()
+	if res == nil || err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("TransferFunction: %v", err)
+	}
+	pencil := sys
+	if !sys.IsDescriptor() {
+		n, _, _ := sys.Dims()
+		pencil = &System{A: sys.A, B: sys.B, C: sys.C, D: sys.D, E: eyeDense(n), Dt: sys.Dt}
+	}
+	if err == nil {
+		if w, at := withinTermsWorst(t, pencil, res.TF, math.Inf(1)); w > 1 {
+			t.Fatalf("nil TF outside terms at %v: %.3g× the threshold", at, w)
+		}
+	}
+	return err == nil
 }
