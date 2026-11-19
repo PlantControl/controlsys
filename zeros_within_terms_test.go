@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -289,5 +290,109 @@ func TestZerosRankZeroJudgedEntrywise(t *testing.T) {
 				t.Fatalf("Rank 0 with nil error; entries of G refute G ≡ 0")
 			}
 		})
+	}
+}
+
+// s²/((s+1)(s+2)(s+3)) in realization forms whose rounding splits the
+// double origin zero to ±5e-9j: the probe at the split zero is within
+// √ε|ẑ| of it and is not judged, so the zeros certify (GVD7AS ruling 5).
+func TestZerosSplitOriginPairCertified(t *testing.T) {
+	den, num := []float64{1, 6, 11, 6}, []float64{1, 0, 0}
+	for _, form := range []int{1, 7, 10} {
+		a, b, c := rlpForm(den, num, form)
+		sys := rlpSys(t, 3, a, b, c, 0, 0)
+		z, err := sys.Zeros()
+		if err != nil {
+			t.Fatalf("form %d: Zeros: %v", form, err)
+		}
+		if len(z) != 2 || cmplx.Abs(z[0]) > 1e-7 || cmplx.Abs(z[1]) > 1e-7 {
+			t.Fatalf("form %d: zeros %v, want a pair near 0", form, z)
+		}
+	}
+}
+
+// Wrong candidates the certificate must not verify: the split origin pair
+// dropped or reduced to one zero, a lightly damped notch moved onto the
+// axis, and any certified answer with one zero added in band (GVD7AS
+// ruling 5).
+func TestZerosCertifyRejectsWrongCandidates(t *testing.T) {
+	den, num := []float64{1, 6, 11, 6}, []float64{1, 0, 0}
+	a, b, c := rlpForm(den, num, 1)
+	split := rlpSys(t, 3, a, b, c, 0, 0)
+	zs, err := split.Zeros()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cand := range map[string][]complex128{"pair dropped": nil, "one zero": zs[:1]} {
+		if v := zerosCertify(split, cand, zerosModeCand).verdict; v == zerosCertVerified {
+			t.Errorf("%s: verified", name)
+		}
+	}
+	zeta := 1e-7
+	nz, err := NewZPK([]complex128{complex(-zeta, math.Sqrt(1-zeta*zeta)), complex(-zeta, -math.Sqrt(1-zeta*zeta))}, []complex128{-1, -2, -3}, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notch, err := nz.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := zerosCertify(notch.Sys, []complex128{1i, -1i}, zerosModeCand).verdict; v == zerosCertVerified {
+		t.Errorf("notch moved onto the axis: verified")
+	}
+	for _, sys := range []*System{split, notch.Sys} {
+		z, err := sys.Zeros()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := zerosCertify(sys, z, zerosModeCand)
+		if r.verdict != zerosCertVerified {
+			t.Fatalf("zeros %v not verified", z)
+		}
+		lg, k := 0.0, 0
+		for _, pt := range r.pts {
+			if zerosCertDetermined(pt) {
+				lg += math.Log(cmplx.Abs(pt.s))
+				k++
+			}
+		}
+		extra := complex(-math.Exp(lg/float64(k)), 0)
+		if v := zerosCertify(sys, append(slices.Clone(z), extra), zerosModeCand).verdict; v == zerosCertVerified {
+			t.Errorf("zeros %v plus in-band %v: verified", z, extra)
+		}
+	}
+}
+
+// G ≡ 0 exactly with no finite zero (A = diag(1, 2), B = e₁, C = e₂ᵀ):
+// Rank 0 certifies only with the exact zero count, here none.
+func TestZerosRankZeroExactCount(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{1, 0, 0, 2}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{0, 1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := zerosExactZeroCount(sys, newZerosBudget()); !ok || cnt != 0 {
+		t.Fatalf("exact zero count %d, %v; want 0", cnt, ok)
+	}
+	if v := zerosVerdict(sys, nil, 0); v != zerosCertVerified {
+		t.Errorf("Rank 0 without zeros: verdict %v, want verified", v)
+	}
+	if v := zerosVerdict(sys, []complex128{1}, 0); v == zerosCertVerified {
+		t.Errorf("Rank 0 with a spurious zero: verified")
+	}
+}
+
+// A certification that exceeds its work budget is capped and open.
+func TestZerosCertifyWorkBudgetCaps(t *testing.T) {
+	z, err := NewZPK([]complex128{-1}, []complex128{-2, -3}, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, err := z.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := zerosCertifyB(ss.Sys, []complex128{-1}, zerosModeCand, &zerosBudget{cap: 1})
+	if !r.capped || r.verdict == zerosCertVerified {
+		t.Fatalf("capped %v verdict %v, want capped and not verified", r.capped, r.verdict)
 	}
 }

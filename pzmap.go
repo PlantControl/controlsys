@@ -13,7 +13,9 @@ type PzmapResult struct {
 
 // Pzmap returns the poles and transmission zeros of sys, as the
 // [p,z] = pzmap(sys) outputs of MATLAB pzmap
-// (https://www.mathworks.com/help/control/ref/lti.pzmap.html).
+// (https://www.mathworks.com/help/control/ref/lti.pzmap.html). Zeros that
+// Zeros does not certify within the data's rounding terms are returned
+// with the result and an error wrapping ErrAccuracyUnverified.
 func Pzmap(sys *System) (*PzmapResult, error) {
 	if err := requireFiniteSystem("Pzmap", sys); err != nil {
 		return nil, err

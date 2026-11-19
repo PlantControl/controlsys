@@ -58,7 +58,9 @@ func (r *RootLocusResult) AsymptoteCentroid() (centroid float64, ok bool) {
 // are absorbed as extra states; continuous delays return ErrDelayUnsupported,
 // as MATLAB requires a Pade approximation first. A model with no states
 // returns ErrDimensionMismatch, and a gain with 1+K·D = 0 returns
-// ErrAlgebraicLoop.
+// ErrAlgebraicLoop. Where Zeros does not certify the loop's zeros within
+// the data's rounding terms, the locus is computed from them and returned
+// with an error wrapping ErrAccuracyUnverified.
 //
 // A loop whose high-frequency gain (D, or the first Markov parameter
 // C·A^(r−1)·B resolved by the coefficients) is negative follows the 0°

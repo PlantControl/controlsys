@@ -47,9 +47,18 @@ type ZerosResult struct {
 // terms, as MATLAB tzero. Rank is the rank floor; the zero count is
 // certified, individual root locations are not. Where the computed zeros
 // do not verify, those of the exact determinant of the system pencil of
-// the stored data are tried (zerosTier2); where neither certifies, the
-// computed zeros and Rank are returned with an error wrapping
-// ErrAccuracyUnverified. Non-square models are not checked.
+// the stored data are tried (zerosTier2); where neither certifies within
+// a fixed work budget, the computed zeros and Rank are returned with an
+// error wrapping ErrAccuracyUnverified. Only points where det G is
+// determined nonzero count toward the check. A probe within √ε|ẑ| of a
+// nonzero zero is not judged: the zero's floating-point representation
+// alone moves G by its own size there.
+//
+// Departures from that certificate: at Rank 0 the zeros (decoupling zeros
+// of the pencil) are returned unjudged, except where G ≡ 0 exactly, whose
+// zero count is checked exactly (follow-up 6UHLZO); square models with
+// more than four inputs, non-square models and descriptor models are not
+// checked (follow-ups SGROCT, 43EIC7).
 func (sys *System) Zeros() ([]complex128, error) {
 	res, err := sys.zerosDetail("Zeros")
 	if res == nil {
@@ -58,14 +67,15 @@ func (sys *System) Zeros() ([]complex128, error) {
 	return res.Zeros, err
 }
 
-// zerosValue is Zeros for callers that use the zeros as a value: an
-// ErrAccuracyUnverified result is taken as is.
+// zerosValue is Zeros without the within-terms certificate, for callers
+// that use the zeros as a value (seeds, scales, matched-pole fits): the
+// computed zeros as before the certificate, at no added cost.
 func (sys *System) zerosValue() ([]complex128, error) {
-	z, err := sys.Zeros()
-	if errors.Is(err, ErrAccuracyUnverified) {
-		return z, nil
+	res, err := sys.zerosDetailOpt("Zeros", false)
+	if res == nil {
+		return nil, err
 	}
-	return z, err
+	return res.Zeros, err
 }
 
 // ZerosDetail returns the invariant zeros together with the normal rank of
@@ -79,6 +89,10 @@ func (sys *System) ZerosDetail() (*ZerosResult, error) {
 }
 
 func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
+	return sys.zerosDetailOpt(op, true)
+}
+
+func (sys *System) zerosDetailOpt(op string, certify bool) (*ZerosResult, error) {
 	if err := requireFiniteSystem(op, sys); err != nil {
 		return nil, err
 	}
@@ -99,7 +113,7 @@ func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
 		res, err = descriptorZeros(sys)
 	default:
 		res, err = mimoZeros(sys)
-		if err == nil {
+		if err == nil && certify {
 			res, err = certifyZeros(sys, res)
 		}
 	}

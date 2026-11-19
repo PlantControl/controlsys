@@ -39,6 +39,7 @@ const (
 	zerosPtConcededDrop
 	zerosPtConcededUndet
 	zerosPtOpen
+	zerosPtConcededWindow
 )
 
 // zerosCertPoint is det G at one axis point with its bounds: d the
@@ -94,6 +95,7 @@ type zerosCertResult struct {
 	cm      float64
 	ce      int
 	hasC    bool
+	capped  bool
 }
 
 // zerosCertMode selects what zerosCertify judges: the candidate zeros
@@ -133,6 +135,12 @@ const (
 // refuted when no real c satisfies the refutation bounds at the valid
 // points.
 func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCertResult {
+	return zerosCertifyB(sys, zeros, mode, newZerosBudget())
+}
+
+// zerosCertifyB is zerosCertify charging b; when b runs out the result is
+// open with capped set.
+func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zerosBudget) zerosCertResult {
 	n, m, p := sys.Dims()
 	res := zerosCertResult{}
 	det := mode != zerosModeEntry0
@@ -145,10 +153,20 @@ func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCert
 		zeros = nil
 	}
 	res.nStruct = nStruct
+	n3 := int64(n) * int64(n) * int64(n)
+	if !b.spend(int64(len(pts)) * n3) {
+		res.capped = true
+		return res
+	}
 	cp := zerosCertDouble(sys, pts, det)
 	check, checkOK := newZPKRowCheck(&System{A: sys.A, B: mat.NewDense(n, 1, nil), C: mat.NewDense(1, n, nil), D: mat.NewDense(1, 1, nil), Dt: sys.Dt})
+	tol := math.Sqrt(eps())
 	for q, s := range pts {
 		cp[q].state = zerosPtPending
+		if mode == zerosModeCand && slices.ContainsFunc(zeros, func(z complex128) bool { return z != 0 && cmplx.Abs(s-z) <= tol*cmplx.Abs(z) }) {
+			cp[q].state = zerosPtConcededWindow
+			continue
+		}
 		if checkOK {
 			if drop, ok := check.dropped(s); ok && drop {
 				cp[q].drop, cp[q].late = true, true
@@ -157,14 +175,23 @@ func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCert
 	}
 	br := newBalancedRealization(sys, n, m, p)
 	var ddw zpkDDWork
-	escalate := func(q int) bool {
+	exactCost := n3 * zerosExactWords(sys) * zerosExactWords(sys)
+	escalate := func(q int, open bool) bool {
 		pt := &cp[q]
 		late := pt.late
 		switch pt.level {
 		case zerosLevelDouble:
+			if !b.spend(8 * n3) {
+				res.capped = true
+				return false
+			}
 			*pt = zerosCertDD(sys, &br, &ddw, pt.s, det)
 		case zerosLevelDD:
-			if !(q < nStruct || pt.wantExact || late) {
+			if !(q < nStruct || pt.wantExact || late || open) {
+				return false
+			}
+			if !b.spend(exactCost) {
+				res.capped = true
 				return false
 			}
 			*pt = zerosCertExact(sys, pt.s, det)
@@ -188,7 +215,7 @@ func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCert
 			changed := false
 			for q := range cp {
 				if cp[q].state == zerosPtPending && !usable(cp[q]) && !cp[q].pole {
-					changed = escalate(q) || changed
+					changed = escalate(q, false) || changed
 				}
 			}
 			scale = zerosCertScale(cp, zeros, mode)
@@ -205,7 +232,7 @@ func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCert
 					continue
 				}
 				if !cOK || !zerosCertPointVerifies(cp[q], zeros, mode, c, scale) {
-					changed = escalate(q) || changed
+					changed = escalate(q, true) || changed
 				}
 			}
 			if !changed {
@@ -214,100 +241,135 @@ func zerosCertify(sys *System, zeros []complex128, mode zerosCertMode) zerosCert
 		}
 		return true
 	}
-	finish := func() (verified, slow, fast, zeroW int, allOK bool) {
-		allOK = cOK
-		cut, sided := 0.0, false
-		needSlow, needFast, slowScale := 0, 0, 0.0
-		if !discrete && len(zeros) >= 2 {
-			mask := make([]bool, len(zeros))
-			for i, z := range zeros {
-				mask[i] = z != 0
-			}
-			cut, sided = topGap(zeros, mask)
-		}
-		if sided {
-			needSlow, needFast = 1, 1
-			for _, z := range zeros {
-				if cmplx.Abs(z) >= cut {
-					needFast++
-				} else {
-					needSlow++
-					slowScale = math.Max(slowScale, cmplx.Abs(z))
-				}
-			}
-		}
-		for q := range cp {
-			pt := &cp[q]
-			switch {
-			case pt.pole:
-				pt.state = zerosPtConcededPole
-			case !usable(*pt):
-				if q >= nStruct && pt.level >= zerosLevelDD && !pt.late {
-					pt.state = zerosPtConcededUndet
-				} else {
-					pt.state = zerosPtOpen
-					allOK = false
-				}
-			case cOK && zerosCertPointVerifies(*pt, zeros, mode, c, scale):
-				pt.state = zerosPtVerified
-				if pt.zero {
-					zeroW += probeWeight(pts[q])
-				}
-			default:
-				pt.state = zerosPtOpen
-				allOK = false
-			}
-		}
-		for q, pt := range cp {
-			if pt.state != zerosPtVerified {
-				continue
-			}
-			w := probeWeight(pts[q])
-			verified += w
-			if sided {
-				switch a := cmplx.Abs(pts[q]); {
-				case a >= cut:
-					fast += w
-				case a <= slowScale:
-					slow += w
-				}
-			}
-		}
-		if verified < n+1 || slow < needSlow || fast < needFast {
-			allOK = false
-			verified = -1
-		}
-		return
-	}
 	if !run() {
 		res.verdict, res.pts = zerosCertRefuted, cp
 		return res
 	}
-	_, _, _, zeroW, allOK := finish()
+	allOK := cOK && !res.capped
+	cut, sided := 0.0, false
+	needSlow, needFast, slowScale := 0, 0, 0.0
+	if !discrete && len(zeros) >= 2 {
+		mask := make([]bool, len(zeros))
+		for i, z := range zeros {
+			mask[i] = z != 0
+		}
+		cut, sided = topGap(zeros, mask)
+	}
+	if sided {
+		needSlow, needFast = 1, 1
+		for _, z := range zeros {
+			if cmplx.Abs(z) >= cut {
+				needFast++
+			} else {
+				needSlow++
+				slowScale = math.Max(slowScale, cmplx.Abs(z))
+			}
+		}
+	}
+	counted, slow, fast, zeroW := 0, 0, 0, 0
+	for q := range cp {
+		pt := &cp[q]
+		switch {
+		case pt.state == zerosPtConcededWindow:
+			continue
+		case pt.pole:
+			pt.state = zerosPtConcededPole
+			continue
+		case !usable(*pt):
+			if q >= nStruct && pt.level >= zerosLevelDD && !pt.late {
+				pt.state = zerosPtConcededUndet
+			} else {
+				pt.state = zerosPtOpen
+				allOK = false
+			}
+			continue
+		case cOK && zerosCertPointVerifies(*pt, zeros, mode, c, scale):
+			pt.state = zerosPtVerified
+		default:
+			pt.state = zerosPtOpen
+			allOK = false
+			continue
+		}
+		w := probeWeight(pts[q])
+		if pt.zero {
+			zeroW += w
+		}
+		if mode == zerosModeCand && !zerosCertDetermined(*pt) {
+			continue
+		}
+		counted += w
+		if sided {
+			switch a := cmplx.Abs(pts[q]); {
+			case a >= cut:
+				fast += w
+			case a <= slowScale:
+				slow += w
+			}
+		}
+	}
+	if counted < n+1 || slow < needSlow || fast < needFast {
+		allOK = false
+	}
 	res.pts = cp
 	if mode == zerosModeCand && cOK {
 		res.cm, res.ce, res.hasC = c, scale.ec, true
 	}
-	if allOK || mode != zerosModeCand && zeroW >= n+1 {
+	if allOK || mode != zerosModeCand && zeroW >= n+1 && !res.capped {
 		res.verdict = zerosCertVerified
 	}
 	return res
 }
 
-// zerosCertDetWitness reports whether det G refutes ≡ 0 at some point:
-// the normal rank k the candidate claims is the rank floor only where no
-// model within terms has det G ≡ 0.
-func zerosCertDetWitness(cp []zerosCertPoint) bool {
-	tol := math.Sqrt(eps())
-	for _, pt := range cp {
-		if !pt.valid || pt.zero || pt.pole {
-			continue
-		}
-		if ad := cmplx.Abs(pt.d); ad-pt.dd > tol*math.Max(ad+pt.dd, pt.tHi) {
-			return true
+// zerosCertDetermined reports whether the point determines det G as
+// nonzero: |det Ĝ| − δ > √ε·max(|det Ĝ| + δ, T_detG). Only such points
+// count toward a candidate's n + 1 points and sides; elsewhere det G is
+// within terms of zero and any candidate fits.
+func zerosCertDetermined(pt zerosCertPoint) bool {
+	if !pt.valid || pt.zero || pt.pole {
+		return false
+	}
+	ad := cmplx.Abs(pt.d)
+	return ad-pt.dd > math.Sqrt(eps())*math.Max(ad+pt.dd, pt.tHi)
+}
+
+// zerosBudget is the deterministic work budget of one Zeros certification
+// (Tier 1 and Tier 2 together), in units of n³ complex double operations:
+// a point in double costs n³, in double-double 8n³, exactly
+// n³·w², w the 64-bit words zerosExactWords gives the stored entries; Tier
+// 2 charges its pencil determinant and root iterations alike. A
+// certification that runs out is not verified.
+type zerosBudget struct{ used, cap int64 }
+
+// zerosWorkCap is the budget of one certification.
+const zerosWorkCap = 4 << 20
+
+func newZerosBudget() *zerosBudget { return &zerosBudget{cap: zerosWorkCap} }
+
+func (b *zerosBudget) spend(u int64) bool {
+	b.used += u
+	return b.used <= b.cap
+}
+
+// zerosExactWords returns 1 + the binary exponent span of the nonzero
+// entries of A, B, C and D in 64-bit words, the size of the exact
+// rationals an exact point forms to first order.
+func zerosExactWords(sys *System) int64 {
+	lo, hi := math.MaxInt, math.MinInt
+	for _, a := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D} {
+		r, c := a.Dims()
+		for i := range r {
+			for j := range c {
+				if v := a.At(i, j); v != 0 {
+					_, e := math.Frexp(v)
+					lo, hi = min(lo, e), max(hi, e)
+				}
+			}
 		}
 	}
-	return false
+	if lo > hi {
+		return 1
+	}
+	return 1 + int64(hi-lo+53)/64
 }
 
 // zerosCertProbes returns the fixed probe set of zerosCertify, the
@@ -737,19 +799,26 @@ func zerosCertScale(cp []zerosCertPoint, zeros []complex128, mode zerosCertMode)
 	if mode != zerosModeCand {
 		return zerosCertScaleInfo{ok: true}
 	}
-	for _, pt := range cp {
-		if !pt.valid || pt.pole || pt.zero || pt.d == 0 || pt.chiM == 0 {
+	best, bestRel := -1, math.Inf(1)
+	for q, pt := range cp {
+		if pt.state != zerosPtPending || !pt.valid || pt.pole || pt.zero || pt.d == 0 || pt.chiM == 0 {
 			continue
 		}
-		pm, pe := zerosCertProd(zeros, pt.s)
-		if pm == 0 {
+		if pm, _ := zerosCertProd(zeros, pt.s); pm == 0 {
 			continue
 		}
-		_, ed := math.Frexp(cmplx.Abs(pt.d))
-		_, er := math.Frexp(cmplx.Abs(pm / pt.chiM))
-		return zerosCertScaleInfo{ec: ed - (pe - pt.chiE + er), ok: true}
+		if rel := pt.dd / cmplx.Abs(pt.d); rel < bestRel {
+			best, bestRel = q, rel
+		}
 	}
-	return zerosCertScaleInfo{}
+	if best < 0 {
+		return zerosCertScaleInfo{}
+	}
+	pt := cp[best]
+	pm, pe := zerosCertProd(zeros, pt.s)
+	_, ed := math.Frexp(cmplx.Abs(pt.d))
+	_, er := math.Frexp(cmplx.Abs(pm / pt.chiM))
+	return zerosCertScaleInfo{ec: ed - (pe - pt.chiE + er), ok: true}
 }
 
 // zerosCertProd returns Π(s − z) as mantissa·2^exp.
@@ -1121,32 +1190,51 @@ func zerosCertDetTermsDD(pt *zerosCertPoint, G []ddComplex, e, tl, th []float64,
 
 // zerosVerdict judges the zeros and normal rank of the explicit square
 // sys within terms: at full rank m the candidate det form (zerosCertify);
-// rank 0 entrywise (every G_ij ≡ 0 within its terms); otherwise (i) det G
-// ≡ 0 (rank < m, skipped above zerosCertMaxRank, where (ii) and (iii)
-// suffice), (ii) the rows of [C D] and columns of [B; D] of the balanced
-// model dependent on rank of them to rounding (dependentRowBasis, rank ≤
-// k), and (iii) the candidate on the k×k sub-data of those rows and
-// columns (rank ≥ k and the zeros). It is refuted when any part is,
-// verified when every part is, else open, including a dynamic dependence
-// (ii) does not show. Below full rank the sub-data's det must also refute
-// ≡ 0 at some point (zerosCertDetWitness): rank k is the floor only where
-// no model within terms has every k-minor ≡ 0.
+// rank 0 entrywise (every G_ij ≡ 0 within its terms), its zeros not
+// judged (a departure, follow-up 6UHLZO) except where G ≡ 0 exactly,
+// whose zero count must match the exact one (zerosExactZeroCount);
+// otherwise (i) det G ≡ 0 (rank < m, skipped above zerosCertMaxRank,
+// where (ii) and (iii) suffice), (ii) the rows of [C D] and columns of
+// [B; D] of the balanced model dependent on rank of them to rounding
+// (dependentRowBasis, rank ≤ k), and (iii) the candidate on the k×k
+// sub-data of those rows and columns (rank ≥ k and the zeros). It is
+// refuted when any part is, verified when every part is, else open,
+// including a dynamic dependence (ii) does not show.
 func zerosVerdict(sys *System, zeros []complex128, rank int) zerosCertVerdict {
+	return zerosVerdictB(sys, zeros, rank, newZerosBudget())
+}
+
+func zerosVerdictB(sys *System, zeros []complex128, rank int, b *zerosBudget) zerosCertVerdict {
 	n, m, p := sys.Dims()
 	if m != p || n == 0 {
 		return zerosCertOpen
 	}
 	switch {
 	case rank == m:
-		return zerosCertify(sys, zeros, zerosModeCand).verdict
+		return zerosCertifyB(sys, zeros, zerosModeCand, b).verdict
 	case rank == 0:
-		return zerosCertify(sys, zeros, zerosModeEntry0).verdict
+		r := zerosCertifyB(sys, zeros, zerosModeEntry0, b)
+		if r.verdict != zerosCertVerified {
+			return r.verdict
+		}
+		exactZero := true
+		for _, pt := range r.pts {
+			if pt.state == zerosPtVerified && !pt.zero {
+				exactZero = false
+			}
+		}
+		if exactZero {
+			if cnt, ok := zerosExactZeroCount(sys, b); !ok || cnt != len(zeros) {
+				return zerosCertOpen
+			}
+		}
+		return zerosCertVerified
 	case rank > zerosCertMaxRank:
 		return zerosCertOpen
 	}
 	v0 := zerosCertVerified
 	if m <= zerosCertMaxRank {
-		v0 = zerosCertify(sys, zeros, zerosModeDet0).verdict
+		v0 = zerosCertifyB(sys, zeros, zerosModeDet0, b).verdict
 		if v0 == zerosCertRefuted {
 			return v0
 		}
@@ -1155,11 +1243,7 @@ func zerosVerdict(sys *System, zeros []complex128, rank int) zerosCertVerdict {
 	if !ok {
 		return zerosCertOpen
 	}
-	rs := zerosCertify(sub, zeros, zerosModeCand)
-	vs := rs.verdict
-	if vs == zerosCertVerified && !zerosCertDetWitness(rs.pts) {
-		vs = zerosCertOpen
-	}
+	vs := zerosCertifyB(sub, zeros, zerosModeCand, b).verdict
 	switch {
 	case vs == zerosCertRefuted:
 		return zerosCertRefuted
@@ -1167,6 +1251,146 @@ func zerosVerdict(sys *System, zeros []complex128, rank int) zerosCertVerdict {
 		return zerosCertVerified
 	}
 	return zerosCertOpen
+}
+
+// zerosExactZeroCount returns the number of finite zeros, with
+// multiplicity, of the system pencil P(s) = [sI − A, −B; −C, −D] of normal
+// rank n (G ≡ 0): the degree of the gcd of det(Q₁P(s)Q₂) over three fixed
+// integer compressions Q₁ (n×(n+p)), Q₂ ((n+m)×n), exact on the stored
+// data scaled to integers (integerPencil, exactDetPoly); compressions
+// whose det vanishes identically are skipped. false when the pencil is
+// outside exactPencilWithinBudget or b runs out.
+func zerosExactZeroCount(sys *System, b *zerosBudget) (int, bool) {
+	n, m, p := sys.Dims()
+	R, Cc := n+p, n+m
+	L, M := make([]float64, R*Cc), make([]float64, R*Cc)
+	for i := range n {
+		L[i*Cc+i] = 1
+		for j := range n {
+			M[i*Cc+j] = sys.A.At(i, j)
+		}
+		for j := range m {
+			M[i*Cc+n+j] = sys.B.At(i, j)
+		}
+	}
+	for i := range p {
+		for j := range n {
+			M[(n+i)*Cc+j] = sys.C.At(i, j)
+		}
+		for j := range m {
+			M[(n+i)*Cc+n+j] = sys.D.At(i, j)
+		}
+	}
+	li, mi, ok := integerPencil(L, M)
+	if !ok {
+		return 0, false
+	}
+	w := zerosExactWords(sys)
+	seed := int64(12345)
+	next := func() int64 {
+		seed = (seed*1103515245 + 12345) % 2147483648
+		return seed%7 - 3
+	}
+	var g []*big.Rat
+	for range 3 {
+		if !b.spend(int64(n) * int64(n) * int64(n) * int64(n) * w * w) {
+			return 0, false
+		}
+		q1, q2 := make([]int64, n*R), make([]int64, Cc*n)
+		for i := range q1 {
+			q1[i] = next()
+		}
+		for i := range q2 {
+			q2[i] = next()
+		}
+		lc, mc := zerosCompress(li, q1, q2, n, R, Cc), zerosCompress(mi, q1, q2, n, R, Cc)
+		if !exactPencilWithinBudget(lc, mc, n) {
+			return 0, false
+		}
+		d := exactDetPoly(lc, mc, n, n)
+		for len(d) > 0 && d[len(d)-1].Sign() == 0 {
+			d = d[:len(d)-1]
+		}
+		if len(d) == 0 {
+			continue
+		}
+		if g == nil {
+			g = d
+		} else {
+			g = zerosRatPolyGcd(g, d)
+		}
+	}
+	if g == nil {
+		return 0, false
+	}
+	return len(g) - 1, true
+}
+
+// zerosCompress returns Q₁·X·Q₂ for the R×C integer X.
+func zerosCompress(x []*big.Int, q1, q2 []int64, n, R, C int) []*big.Int {
+	t := make([]*big.Int, n*C)
+	var u big.Int
+	for i := range n {
+		for j := range C {
+			v := new(big.Int)
+			for r := range R {
+				if q1[i*R+r] != 0 && x[r*C+j].Sign() != 0 {
+					v.Add(v, u.Mul(big.NewInt(q1[i*R+r]), x[r*C+j]))
+				}
+			}
+			t[i*C+j] = v
+		}
+	}
+	out := make([]*big.Int, n*n)
+	for i := range n {
+		for j := range n {
+			v := new(big.Int)
+			for c := range C {
+				if q2[c*n+j] != 0 && t[i*C+c].Sign() != 0 {
+					v.Add(v, u.Mul(t[i*C+c], big.NewInt(q2[c*n+j])))
+				}
+			}
+			out[i*n+j] = v
+		}
+	}
+	return out
+}
+
+// zerosRatPolyGcd returns the monic gcd of the ascending a and b, both of
+// nonzero leading coefficient.
+func zerosRatPolyGcd(a, b []*big.Rat) []*big.Rat {
+	monic := func(p []*big.Rat) []*big.Rat {
+		lead := new(big.Rat).Set(p[len(p)-1])
+		out := make([]*big.Rat, len(p))
+		for i, c := range p {
+			out[i] = new(big.Rat).Quo(c, lead)
+		}
+		return out
+	}
+	a = monic(a)
+	for {
+		for len(b) > 0 && b[len(b)-1].Sign() == 0 {
+			b = b[:len(b)-1]
+		}
+		if len(b) == 0 {
+			return a
+		}
+		b = monic(b)
+		r := make([]*big.Rat, len(a))
+		for i, c := range a {
+			r[i] = new(big.Rat).Set(c)
+		}
+		var t big.Rat
+		for len(r) >= len(b) {
+			f := new(big.Rat).Set(r[len(r)-1])
+			off := len(r) - len(b)
+			for i, c := range b {
+				r[off+i].Sub(r[off+i], t.Mul(f, c))
+			}
+			r = r[:len(r)-1]
+		}
+		a, b = b, r
+	}
 }
 
 // zerosCertSub returns the k×k sub-data of sys on the rows of [C D] and the
@@ -1202,8 +1426,13 @@ func zerosCertSub(sys *System, k int) (*System, bool) {
 // exactly within exactPencilWithinBudget (pencilDetBounded); the
 // candidates are the roots (aberthRoots) of det P truncated to degree d,
 // d climbing from its degree to the data (dataDegree, the
-// coefficient-rounding convention) to its exact degree.
+// coefficient-rounding convention) to its exact degree. All of it is
+// charged to the certification's work budget.
 func zerosTier2(sys *System, rank int, rankRefuted bool) ([]complex128, int, bool) {
+	return zerosTier2B(sys, rank, rankRefuted, newZerosBudget())
+}
+
+func zerosTier2B(sys *System, rank int, rankRefuted bool, b *zerosBudget) ([]complex128, int, bool) {
 	n, m, p := sys.Dims()
 	if m != p || n == 0 {
 		return nil, 0, false
@@ -1241,6 +1470,11 @@ func zerosTier2(sys *System, rank int, rankRefuted bool) ([]complex128, int, boo
 			M[(n+i)*N+n+j] = model.D.At(i, j)
 		}
 	}
+	w := zerosExactWords(model)
+	N4 := int64(N) * int64(N) * int64(N) * int64(N)
+	if !b.spend(N4 * w * w) {
+		return nil, 0, false
+	}
 	bp, ok := pencilDetBounded(L, M, N)
 	if !ok {
 		return nil, 0, false
@@ -1259,11 +1493,14 @@ func zerosTier2(sys *System, rank int, rankRefuted bool) ([]complex128, int, boo
 		if bp.coef[d].Sign() == 0 {
 			continue
 		}
+		if !b.spend(int64(d) * int64(d) * 2400) {
+			return nil, 0, false
+		}
 		zeros, ok := zerosPolyRoots(bp.coef[:d+1])
 		if !ok {
 			continue
 		}
-		if r := zerosCertify(model, zeros, zerosModeCand); r.verdict == zerosCertVerified && (k == m || zerosCertDetWitness(r.pts)) {
+		if zerosCertifyB(model, zeros, zerosModeCand, b).verdict == zerosCertVerified {
 			sortZeros(zeros)
 			return zeros, k, true
 		}
@@ -1310,15 +1547,16 @@ func certifyZeros(sys *System, res *ZerosResult) (*ZerosResult, error) {
 	if m != p || n == 0 {
 		return res, nil
 	}
-	v := zerosVerdict(sys, res.Zeros, res.Rank)
+	b := newZerosBudget()
+	v := zerosVerdictB(sys, res.Zeros, res.Rank, b)
 	if v == zerosCertVerified {
 		return res, nil
 	}
 	rankRefuted := false
 	if res.Rank < m && m <= zerosCertMaxRank {
-		rankRefuted = zerosCertify(sys, nil, zerosModeDet0).verdict == zerosCertRefuted
+		rankRefuted = zerosCertifyB(sys, nil, zerosModeDet0, b).verdict == zerosCertRefuted
 	}
-	if z, k, ok := zerosTier2(sys, res.Rank, rankRefuted); ok {
+	if z, k, ok := zerosTier2B(sys, res.Rank, rankRefuted, b); ok {
 		return &ZerosResult{Zeros: z, Rank: k}, nil
 	}
 	return res, fmt.Errorf("zeros not certified within the data's rounding terms: %w", ErrAccuracyUnverified)
