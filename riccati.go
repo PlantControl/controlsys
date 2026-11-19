@@ -1063,6 +1063,17 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // A descriptor X certified on its K alone whose EᵀXE step fails
 // (descriptorGainCertified) is returned unchanged with
 // ErrAccuracyUnverified.
+//
+// A nil error certifies X within about 1e-8 of the stabilizing solution
+// of the stored data. A float64 Newton step alone cannot certify it where
+// the Stein operator of A − BK maps rounding beyond that (‖E⁻¹(A − BK)‖
+// ≈ 1e6 left X 1.4e-8 to 5e-8 off with steps of 3e-11): an X of float64
+// provenance is held to a two-sided Loewner enclosure of the stabilizing
+// solution measured on the stored data (dareGate), X itself or the
+// enclosure's centre rounded within the budget, else to the extended-
+// precision Hewer fixed point, else to the extended-precision solve, each
+// at its own certificate, else returned with ErrAccuracyUnverified. How
+// far eps perturbations of the data move X is not reported.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
