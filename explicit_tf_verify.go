@@ -191,7 +191,7 @@ func foldInfinityRefutes(sys, ex *System, fb *foldBound, tf *TransferFunc, c *pe
 					for l := range n {
 						col[l] = fb.rbd[l*m+jj]
 					}
-					if !fb.applyK(col) {
+					if !fb.applyKRaw(col) {
 						return exact()
 					}
 					for l := range n {
@@ -634,6 +634,27 @@ func (fb *foldBound) applyK(y []float64) bool {
 	for i := range n {
 		var acc float64
 		for l, a := range fb.absTEI[i*n : (i+1)*n] {
+			acc += a * (y[l] + c*fb.sRow[l])
+		}
+		fb.ky[i] = acc*(1+float64(2*n+4)*eps()) + float64(2*n+4)*0x1p-1074
+		if !isFinite(fb.ky[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// applyKRaw is applyK without the scaling by t: fb.ky ≥ |E⁻¹|·y.
+func (fb *foldBound) applyKRaw(y []float64) bool {
+	n := fb.n
+	nrm := 0.0
+	for i, v := range y {
+		nrm = math.Max(nrm, v/fb.sRow[i])
+	}
+	c := fb.rhoE / (1 - fb.rhoE) * nrm * (1 + 4*eps())
+	for i := range n {
+		var acc float64
+		for l, a := range fb.absEinv[i*n : (i+1)*n] {
 			acc += a * (y[l] + c*fb.sRow[l])
 		}
 		fb.ky[i] = acc*(1+float64(2*n+4)*eps()) + float64(2*n+4)*0x1p-1074
