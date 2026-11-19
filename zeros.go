@@ -38,10 +38,10 @@ type ZerosResult struct {
 // For a square model (as many inputs as outputs, at most four) a nil error
 // certifies the returned zeros and Rank within the stored data's rounding:
 // there is a real c with |det G(s) − Z(s)| ≤ max(√ε·max(|det G|, |Z|),
-// K·ε·T_data) at the axis points of the check (beside every zero, the
-// static point and a geometric fill over the eigenvalues resolved from the
-// origin, 1 if discrete), Z = c·Π(s − zᵢ)/det(sI − A), G the
-// k×k response of rank k (of rows and columns spanning the others to
+// K·ε·T_data) at the points of the check (the axis points beside every
+// zero, the static point, s = ∞ where G = D, and geometric fills over the
+// eigenvalues and over those resolved from the origin, 1 if discrete),
+// Z = c·Π(s − zᵢ)/det(sI − A), G the k×k response of rank k (of rows and columns spanning the others to
 // rounding when k is below the number of inputs), T_data = Σ|adj G_ji|·
 // T_ij and T_ij = Σ_l|C_il||X_lj| + |D_ij| + Σ_l|CY|_il(|A||X| + |B|)_lj,
 // Y = (sI − A)⁻¹, X = YB, the first-order change of G_ij when every stored

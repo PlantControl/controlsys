@@ -74,6 +74,8 @@ type zerosCertPoint struct {
 	eok         bool
 	wantExact   bool
 	drop, late  bool
+	inf         bool
+	infQ        complex128
 }
 
 // zerosCertEntries stores the k×k response G, its entry bounds e and the
@@ -120,8 +122,9 @@ const (
 // δ ≤ max(√ε·max(|det G|, |Z|), K·ε·T_data), Z = c·Π(s − ẑ)/χ_A and T_data
 // the first-order image of ε-rounding the stored data (zerosRankFloorK),
 // at the fixed probe set: the axis points beside every ẑ
-// (eigenAxisProbes), the static point(s) and zpkFillProbes with 2(n+1)
-// points. c is exhibited: any real c inside the intersection, over the
+// (eigenAxisProbes), the static point(s), s = ∞ (zerosCertInfPoint) and
+// zpkFillProbes with 2(n+1) points over the eigenvalues and again over
+// zerosCertBandAnchors, judged as one set. c is exhibited: any real c inside the intersection, over the
 // points, of the sets each point's verification bounds admit; at a point
 // where G and T_data vanish exactly only c = 0 is admitted, unless a ẑ
 // lies there. A probe within √ε|ẑ| of a nonzero ẑ is not judged. Mode
@@ -163,10 +166,15 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 		return res
 	}
 	cp := zerosCertDouble(sys, pts, det)
+	pts = append(pts, complex(math.Inf(1), 0))
+	cp = append(cp, zerosCertInfPoint(sys, det, len(zeros) == n))
 	check, checkOK := newZPKRowCheck(&System{A: sys.A, B: mat.NewDense(n, 1, nil), C: mat.NewDense(1, n, nil), D: mat.NewDense(1, 1, nil), Dt: sys.Dt})
 	tol := math.Sqrt(eps())
 	for q, s := range pts {
 		cp[q].state = zerosPtPending
+		if cp[q].inf {
+			continue
+		}
 		if mode == zerosModeCand && slices.ContainsFunc(zeros, func(z complex128) bool { return z != 0 && cmplx.Abs(s-z) <= tol*cmplx.Abs(z) }) {
 			cp[q].state = zerosPtConcededWindow
 			continue
@@ -377,8 +385,9 @@ func zerosExactWords(sys *System) int64 {
 	return 1 + int64(hi-lo+53)/64
 }
 
-// zerosCertProbes returns the fixed probe set of zerosCertify, the
-// structured points first, and their count.
+// zerosCertProbes returns the fixed finite probe set of zerosCertify, the
+// structured points first, and their count: the fill over the eigenvalues
+// and the fill over the resolved ones (GVD7AS ruling 7, the union).
 func zerosCertProbes(sys *System, zeros []complex128, discrete bool) ([]complex128, int) {
 	var out []complex128
 	add := func(ps ...complex128) {
@@ -397,6 +406,8 @@ func zerosCertProbes(sys *System, zeros []complex128, discrete bool) ([]complex1
 	ns := len(out)
 	n, _, _ := sys.Dims()
 	add(zpkFillProbes(zerosCertBandAnchors(sys, discrete), zeros, discrete, 2*(n+1))...)
+	evals, _ := sys.Poles()
+	add(zpkFillProbes(evals, zeros, discrete, 2*(n+1))...)
 	return out, ns
 }
 
@@ -896,7 +907,7 @@ func zerosCertScale(cp []zerosCertPoint, zeros []complex128, mode zerosCertMode)
 		if pt.state != zerosPtPending || !pt.valid || pt.pole || pt.zero || pt.d == 0 || pt.chiM == 0 {
 			continue
 		}
-		if pm, _ := zerosCertProd(zeros, pt.s); pm == 0 {
+		if pm, _ := zerosCertPtProd(pt, zeros); pm == 0 {
 			continue
 		}
 		if rel := pt.dd / cmplx.Abs(pt.d); rel < bestRel {
@@ -907,10 +918,74 @@ func zerosCertScale(cp []zerosCertPoint, zeros []complex128, mode zerosCertMode)
 		return zerosCertScaleInfo{}
 	}
 	pt := cp[best]
-	pm, pe := zerosCertProd(zeros, pt.s)
+	pm, pe := zerosCertPtProd(pt, zeros)
 	_, ed := math.Frexp(cmplx.Abs(pt.d))
 	_, er := math.Frexp(cmplx.Abs(pm / pt.chiM))
 	return zerosCertScaleInfo{ec: ed - (pe - pt.chiE + er), ok: true}
+}
+
+// zerosCertPtProd is zerosCertProd at the point; at s = ∞, where
+// Π(s − z)/χ_A tends to 1 with n zeros and to 0 with fewer, it is infQ.
+func zerosCertPtProd(pt zerosCertPoint, zeros []complex128) (complex128, int) {
+	if pt.inf {
+		return pt.infQ, 0
+	}
+	return zerosCertProd(zeros, pt.s)
+}
+
+// zerosCertInfPoint is the structured point s = ∞ (GVD7AS ruling 7):
+// G(∞) = D exactly, with terms |D_ij|, so det G(∞) = det D with T_data =
+// Σ|adj D_ji|·|D_ij|; Z(∞) = c with n zeros (full), else 0. D = 0 makes
+// it an exactly vanishing response (zero).
+func zerosCertInfPoint(sys *System, det, full bool) zerosCertPoint {
+	_, k, _ := sys.Dims()
+	pt := zerosCertPoint{s: complex(math.Inf(1), 0), level: zerosLevelExact, valid: true, inf: true, chiM: 1}
+	if full {
+		pt.infQ = 1
+	}
+	dRaw := sys.D.RawMatrix()
+	G, r := make([]complex128, k*k), make([]ratC, k*k)
+	e, t := make([]float64, k*k), make([]float64, k*k)
+	for i := range k {
+		for j := range k {
+			v := dRaw.Data[i*dRaw.Stride+j]
+			G[i*k+j], r[i*k+j], t[i*k+j] = complex(v, 0), newRatC(v, 0), math.Abs(v)
+		}
+	}
+	zerosCertEntries(&pt, G, e, t, t)
+	pt.eok = true
+	pt.zero = !slices.ContainsFunc(t, func(x float64) bool { return x != 0 })
+	if pt.zero || !det {
+		return pt
+	}
+	pt.d = zerosCertRatDet(r, k).complex128()
+	pt.dd = 2*eps()*cmplx.Abs(pt.d) + 2*math.SmallestNonzeroFloat64
+	if pt.d == 0 {
+		pt.dd = 0
+	}
+	if k == 1 {
+		pt.tLo, pt.tHi = t[0], t[0]
+		return pt
+	}
+	for i := range k {
+		for j := range k {
+			ma := make([]ratC, 0, (k-1)*(k-1))
+			for rr := range k {
+				if rr == i {
+					continue
+				}
+				for c := range k {
+					if c != j {
+						ma = append(ma, r[rr*k+c])
+					}
+				}
+			}
+			a := cmplx.Abs(zerosCertRatDet(ma, k-1).complex128())
+			pt.tLo += a * (1 - 3*eps()) * t[i*k+j]
+			pt.tHi += a * (1 + 3*eps()) * t[i*k+j]
+		}
+	}
+	return pt
 }
 
 // zerosCertProd returns Π(s − z) as mantissa·2^exp.
@@ -931,7 +1006,7 @@ func zerosCertScaled(pt zerosCertPoint, zeros []complex128, sc zerosCertScaleInf
 	_, E := math.Frexp(math.Max(cmplx.Abs(pt.d), pt.tHi))
 	d = ldexpC(pt.d, -E)
 	dd, tLo, tHi = math.Ldexp(pt.dd, -E), math.Ldexp(pt.tLo, -E), math.Ldexp(pt.tHi, -E)
-	pm, pe := zerosCertProd(zeros, pt.s)
+	pm, pe := zerosCertPtProd(pt, zeros)
 	q = ldexpC(pm/pt.chiM, pe-pt.chiE+sc.ec-E)
 	dq = pt.relChi + gammaN(4*len(zeros)+4)
 	return
@@ -963,6 +1038,15 @@ func zerosCertZeroAt(zeros []complex128, s complex128) bool {
 	return slices.Contains(zeros, s)
 }
 
+// zerosCertPtZeroAt is zerosCertZeroAt at the point; at s = ∞ the
+// candidate vanishes when it has fewer than n zeros.
+func zerosCertPtZeroAt(pt zerosCertPoint, zeros []complex128) bool {
+	if pt.inf {
+		return pt.infQ == 0
+	}
+	return zerosCertZeroAt(zeros, pt.s)
+}
+
 // zerosCertPointVerifies reports whether the point verifies the candidate
 // c̃ (mode Det0: det G ≡ 0; Entry0: G ≡ 0) with its bounds. At an exactly
 // vanishing response a nonzero candidate verifies only with a zero there
@@ -970,7 +1054,7 @@ func zerosCertZeroAt(zeros []complex128, s complex128) bool {
 func zerosCertPointVerifies(pt zerosCertPoint, zeros []complex128, mode zerosCertMode, c float64, sc zerosCertScaleInfo) bool {
 	tol := math.Sqrt(eps())
 	if pt.zero {
-		return mode != zerosModeCand || c == 0 || zerosCertZeroAt(zeros, pt.s)
+		return mode != zerosModeCand || c == 0 || zerosCertPtZeroAt(pt, zeros)
 	}
 	switch mode {
 	case zerosModeEntry0:
@@ -1141,7 +1225,7 @@ func zerosCertSets(cp []zerosCertPoint, zeros []complex128, mode zerosCertMode, 
 			continue
 		}
 		if pt.zero {
-			if mode == zerosModeCand && !zerosCertZeroAt(zeros, pt.s) {
+			if mode == zerosModeCand && !zerosCertPtZeroAt(pt, zeros) {
 				ver, ref = ver.intersect(origin), ref.intersect(origin)
 			}
 			continue

@@ -699,7 +699,14 @@ func rlswCheckUnv(t *testing.T, sweep string, unv int) {
 // rlswUnvPinned is, per sweep and architecture, the number of cases whose
 // Zeros are not certified within the data's rounding (GVD7AS): RootLocus
 // returns their locus with ErrAccuracyUnverified, judged as a value.
-var rlswUnvPinned = map[string]map[string]int{}
+var rlswUnvPinned = map[string]map[string]int{
+	"pair":                                {"arm64": 3, "amd64": 1},
+	"testdata/rlocus_sweep_base.json":     {"arm64": 2, "amd64": 3},
+	"testdata/rlocus_sweep_dbl_base.json": {"arm64": 33, "amd64": 31},
+	"testdata/rlocus_sweep_ext_base.json": {"arm64": 17, "amd64": 15},
+	"testdata/rlocus_sweep_rv_base.json":  {"arm64": 0, "amd64": 0},
+	"testdata/rlocus_sweep_rv5_base.json": {"arm64": 21, "amd64": 24},
+}
 
 func rlswHex(v []int) string {
 	var sb strings.Builder
@@ -807,6 +814,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
+			case base[i]&m != 0 && ok[i]&m == 0 && rlswCertifiedCountExempt(golden, i, names[m]):
+				t.Logf("case %d: %s differs from the intended TF's zero count: %s", i, names[m], rlswCertifiedCounts[golden][i].reason)
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
 				if regressed[bit] <= 5 {
@@ -827,6 +836,33 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
 		}
 	}
+}
+
+// rlswCertified is a sweep case whose Zeros certify, within the data's
+// rounding, a zero count other than the intended TF's: the components
+// listed (asymptotes, arrival angles) follow the certified count.
+type rlswCertified struct {
+	comps  []string
+	reason string
+}
+
+// rlswCertifiedCounts lists, per sweep golden file and case, the
+// certified-count exemptions (GVD7AS ruling 7). Each holds on arm64 and
+// amd64: the 320-bit within-terms oracle scores base's zeros wrong and
+// the returned zeros right, and one zero added in band is refuted.
+var rlswCertifiedCounts = map[string]map[int]rlswCertified{
+	"testdata/rlocus_sweep_base.json": {
+		347:  {[]string{"Asymptotes", "ArrivalAngles count"}, "base Rank 0 refuted; 2 certified zeros, exact TF degree 3 (D = 0, data degree 0)"},
+		1692: {[]string{"Asymptotes", "ArrivalAngles count"}, "count ambiguous within rounding (exact det at degrees 2 and 3 certify); least degree, 2 zeros (ruling 6)"},
+	},
+	"testdata/rlocus_sweep_rv_base.json": {
+		1691: {[]string{"Asymptotes", "ArrivalAngles"}, "base zeros refuted; certified pair 5e-5 from the intended −30 ± 3.75i"},
+	},
+}
+
+func rlswCertifiedCountExempt(golden string, id int, comp string) bool {
+	e, ok := rlswCertifiedCounts[golden][id]
+	return ok && slices.Contains(e.comps, comp)
 }
 
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64

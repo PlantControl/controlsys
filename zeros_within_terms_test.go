@@ -351,7 +351,7 @@ func TestZerosCertifyRejectsWrongCandidates(t *testing.T) {
 		}
 		lg, k := 0.0, 0
 		for _, pt := range r.pts {
-			if zerosCertDetermined(pt) {
+			if zerosCertDetermined(pt) && !pt.inf {
 				lg += math.Log(cmplx.Abs(pt.s))
 				k++
 			}
@@ -489,6 +489,30 @@ func TestZerosRotatedDoubleIntegratorCertified(t *testing.T) {
 					t.Errorf("dt %g θ %g: Zeros = %v, want %v", dt, th, got, z)
 				}
 			}
+		}
+	}
+}
+
+// TestZerosPointAtInfinityRefutesLostZeros: G(∞) = D. A biproper
+// (s+1)(s+3)/((s+2)(s+4)) certifies its two zeros, while dropping one or
+// both (Z(∞) = 0 against D = 1) is refuted (GVD7AS ruling 7: s = ∞ is a
+// structured point; ext sweep 169 returned 2 of 6 zeros with D = 1.25).
+func TestZerosPointAtInfinityRefutesLostZeros(t *testing.T) {
+	z, err := NewZPK([]complex128{-1, -3}, []complex128{-2, -4}, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, err := z.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := ss.Sys
+	if v := zerosCertify(sys, []complex128{-1, -3}, zerosModeCand).verdict; v != zerosCertVerified {
+		t.Errorf("zeros -1, -3: verdict %v, want verified", v)
+	}
+	for _, zs := range [][]complex128{{-1}, {-3}, nil} {
+		if v := zerosCertify(sys, zs, zerosModeCand).verdict; v == zerosCertVerified {
+			t.Errorf("zeros %v of a biproper model: verified", zs)
 		}
 	}
 }
