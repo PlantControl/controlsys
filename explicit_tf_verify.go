@@ -775,7 +775,7 @@ func (f *explicitFastTier) pairResidual(pt frequencyPoint) bool {
 			k += 4
 			e := dot2Err(k)*mag*(1+float64(k+16)*termsEps) + float64(8*k+64)*max(sa, 1)*0x1p-1074
 			r := complex(re.value(), im.value())
-			f.rho[i] += (termsAbs(r)*(1+2*termsEps)+e)*(1+4*termsEps)
+			f.rho[i] += (termsAbs(r)*(1+2*termsEps) + e) * (1 + 4*termsEps)
 		}
 	}
 	if !f.upper(f.rho) {
