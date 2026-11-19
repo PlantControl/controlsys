@@ -158,7 +158,7 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 	}
 	res.nStruct = nStruct
 	n3 := int64(n) * int64(n) * int64(n)
-	if !b.spend(int64(len(pts)) * n3) {
+	if !b.spend(int64(len(pts)) * n3 / 16) {
 		res.capped = true
 		return res
 	}
@@ -179,24 +179,25 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 	}
 	br := newBalancedRealization(sys, n, m, p)
 	var ddw zpkDDWork
-	nw := int64(n) * zerosExactWords(sys)
-	exactCost := 2 * n3 * nw * nw
 	escalate := func(q int, open bool) bool {
 		pt := &cp[q]
 		late := pt.late
 		switch pt.level {
 		case zerosLevelDouble:
-			if !b.spend(8 * n3) {
+			if !b.spend(n3) {
 				res.capped = true
 				return false
 			}
 			*pt = zerosCertDD(sys, &br, &ddw, pt.s, det)
 		case zerosLevelDD:
-			if !b.spend(exactCost) {
+			if b.used >= b.cap {
 				res.capped = true
 				return false
 			}
-			*pt = zerosCertExact(sys, pt.s, det)
+			*pt = zerosCertExact(sys, pt.s, det, b.spend)
+			if b.used > b.cap {
+				res.capped = true
+			}
 		default:
 			return false
 		}
@@ -331,15 +332,15 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 
 // zerosBudget is the deterministic work budget of one Zeros certification
 // (Tier 1 and Tier 2 together), in units of n³ complex double operations:
-// a point in double costs n³, in double-double 8n³, exactly
-// n³·(n·w)², w the 64-bit words zerosExactWords gives the stored entries
-// (the rationals of the elimination grow to about n·w words); Tier 2
-// charges its pencil determinant N⁴·(N·w)² and root iterations alike. A
+// a point in double costs n³/16, in double-double n³, exactly the word
+// products of its eliminations' multiplications (exactSolveAtSpend); Tier
+// 2 charges its pencil determinant N⁴·(N·w)², w the 64-bit words
+// zerosExactWords gives the stored entries, and root iterations alike. A
 // certification that runs out is not verified.
 type zerosBudget struct{ used, cap int64 }
 
 // zerosWorkCap is the budget of one certification.
-const zerosWorkCap = 6_000_000
+const zerosWorkCap = 4_000_000
 
 func newZerosBudget() *zerosBudget { return &zerosBudget{cap: zerosWorkCap} }
 
@@ -686,10 +687,10 @@ func zerosCertDD(sys *System, br *balancedRealization, w *zpkDDWork, s complex12
 
 // zerosCertExact evaluates s exactly in complex rationals (exactSolveAt),
 // det G and adj G by permutations of the exact entries, rounded once.
-func zerosCertExact(sys *System, s complex128, det bool) zerosCertPoint {
+func zerosCertExact(sys *System, s complex128, det bool, spend func(int64) bool) zerosCertPoint {
 	n, k, _ := sys.Dims()
 	pt := zerosCertPoint{s: s, level: zerosLevelExact}
-	x, chi, zero, ok := exactSolveAt(sys.A, sys.B, s)
+	x, chi, zero, ok := exactSolveAtSpend(sys.A, sys.B, s, spend)
 	if zero {
 		pt.pole = true
 		return pt
@@ -697,7 +698,7 @@ func zerosCertExact(sys *System, s complex128, det bool) zerosCertPoint {
 	if !ok {
 		return pt
 	}
-	cyT, _, _, ok := exactSolveAt(mat.DenseCopyOf(sys.A.T()), mat.DenseCopyOf(sys.C.T()), s)
+	cyT, _, _, ok := exactSolveAtSpend(mat.DenseCopyOf(sys.A.T()), mat.DenseCopyOf(sys.C.T()), s, spend)
 	if !ok {
 		return pt
 	}

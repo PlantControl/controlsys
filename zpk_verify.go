@@ -931,6 +931,18 @@ func (x ratC) complex128() complex128 {
 // eigenvalue; ok is false then or when a numerator or denominator exceeds
 // zpkExactCapBits bits.
 func exactSolveAt(A, B *mat.Dense, s complex128) (x []ratC, chi ratC, zero, ok bool) {
+	return exactSolveAtSpend(A, B, s, nil)
+}
+
+// ratCWords is the size of x in 64-bit words, numerators and denominators.
+func ratCWords(x ratC) int64 {
+	return int64(x.re.Num().BitLen()+x.re.Denom().BitLen()+x.im.Num().BitLen()+x.im.Denom().BitLen())/64 + 1
+}
+
+// exactSolveAtSpend is exactSolveAt charging spend, when non-nil, the
+// product of the operands' word sizes for every multiplication of the
+// elimination and stopping (ok false) once spend refuses.
+func exactSolveAtSpend(A, B *mat.Dense, s complex128, spend func(int64) bool) (x []ratC, chi ratC, zero, ok bool) {
 	n, m := B.Dims()
 	big1 := func(x *big.Rat) bool {
 		return x.Num().BitLen() > zpkExactCapBits || x.Denom().BitLen() > zpkExactCapBits
@@ -977,6 +989,15 @@ func exactSolveAt(A, B *mat.Dense, s complex128) (x []ratC, chi ratC, zero, ok b
 				continue
 			}
 			f := a[i*w+k].mul(ip)
+			if spend != nil {
+				fw, u := ratCWords(f), int64(0)
+				for j := k + 1; j < w; j++ {
+					u += fw * ratCWords(a[k*w+j])
+				}
+				if !spend(u) {
+					return nil, ratC{}, false, false
+				}
+			}
 			for j := k + 1; j < w; j++ {
 				d := f.mul(a[k*w+j])
 				a[i*w+j].re.Sub(a[i*w+j].re, d.re)
