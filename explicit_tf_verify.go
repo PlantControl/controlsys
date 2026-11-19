@@ -485,22 +485,27 @@ func foldResidualFull(sys, ex *System, k int) (ra, rb, raV, rbV, raE, rbE []floa
 // A point where a check fails is left to the pencil judge; foldBound never
 // refutes.
 type foldBound struct {
-	n, m          int
-	e             []float64
-	ra, rbd       []float64
-	raV, rbV      []float64
-	raE, rbE      []float64
-	xr, rr        []complex128
-	y1v           []float64
-	ax, ar        []float64
-	einv, absEinv []float64
-	absE, absRE   []float64
-	sRow          []float64
-	rhoE          float64
-	r             []complex128
-	rb, r2, ky, v []float64
-	w             []float64
-	y1            []complex128
+	n, m     int
+	e        []float64
+	ra, rbd  []float64
+	raV, rbV []float64
+	raE, rbE []float64
+	rr       []complex128
+	y1v      []float64
+	// prepare's scaled matrices; usable once prepared without loss.
+	ed, absED, radV  []float64
+	radE, radB       []float64
+	tei, absTEI      []float64
+	prepared, usable bool
+	ax, ar           []float64
+	einv, absEinv    []float64
+	absE, absRE      []float64
+	sRow             []float64
+	rhoE             float64
+	r                []complex128
+	rb, r2, ky, v    []float64
+	w                []float64
+	y1               []complex128
 }
 
 // newFoldBound is foldResidual's verdict with, where the gate fails, the
@@ -572,10 +577,53 @@ func foldBoundOf(sys, ex *System, k int, force bool) (*foldBound, bool) {
 	return &foldBound{n: n, m: m, e: e, ra: ra, rbd: rbd, raV: raV, rbV: rbV, raE: raE, rbE: rbE, einv: einv, absEinv: absEinv, absE: absE, absRE: absRE,
 		sRow: sRow, rhoE: rhoE, r: make([]complex128, n*m), rb: make([]float64, n*m), r2: make([]float64, n),
 		ky: make([]float64, n), v: make([]float64, n), w: make([]float64, n), y1: make([]complex128, n*m),
-		xr: make([]complex128, n), rr: make([]complex128, n), y1v: make([]float64, n), ax: make([]float64, n), ar: make([]float64, n)}, gate
+		rr: make([]complex128, n), y1v: make([]float64, n), ax: make([]float64, n), ar: make([]float64, n)}, gate
 }
 
-// applyK sets fb.ky to an upper bound on |E⁻¹|·y for the nonnegative y.
+// prepare scales foldBound's matrices to the sweep's balanced state
+// coordinates x_b = t∘x, so that no state of the stored solution is
+// formed: ED = E·diag(t)⁻¹, the R_A terms likewise, and TEinv =
+// diag(t)·Ê⁻¹. It reports false, leaving the fold to the pencil judge, where
+// an entry is not finite or falls below the normal range.
+func (fb *foldBound) prepare(t []float64) bool {
+	if fb.prepared {
+		return fb.usable
+	}
+	fb.prepared = true
+	n := fb.n
+	nn := n * n
+	buf := make([]float64, 8*nn)
+	take := func() []float64 {
+		out := buf[:nn:nn]
+		buf = buf[nn:]
+		return out
+	}
+	fb.ed, fb.absED, fb.radV, fb.radE, fb.radB, fb.tei, fb.absTEI = take(), take(), take(), take(), take(), take(), take()
+	safe := func(v float64) bool { a := math.Abs(v); return isFinite(a) && (a == 0 || a >= 0x1p-1000) }
+	for i := range n {
+		for l := range n {
+			q := i*n + l
+			it := 1 / t[l]
+			fb.ed[q] = fb.e[q] * it
+			fb.absED[q] = math.Abs(fb.ed[q])
+			fb.radV[q] = fb.raV[q] * it
+			fb.radE[q] = fb.raE[q] * it * (1 + 2*eps())
+			fb.radB[q] = fb.ra[q] * it * (1 + 2*eps())
+			fb.tei[q] = fb.einv[q] * t[i]
+			fb.absTEI[q] = math.Abs(fb.tei[q])
+			for _, v := range [...]float64{fb.ed[q], fb.radV[q], fb.radE[q], fb.radB[q], fb.tei[q]} {
+				if !safe(v) {
+					return false
+				}
+			}
+		}
+	}
+	fb.usable = true
+	return true
+}
+
+// applyK sets fb.ky to an upper bound on t∘(|E⁻¹|·y) for the nonnegative
+// y (raw rows).
 func (fb *foldBound) applyK(y []float64) bool {
 	n := fb.n
 	nrm := 0.0
@@ -585,10 +633,10 @@ func (fb *foldBound) applyK(y []float64) bool {
 	c := fb.rhoE / (1 - fb.rhoE) * nrm * (1 + 4*eps())
 	for i := range n {
 		var acc float64
-		for l, a := range fb.absEinv[i*n : (i+1)*n] {
+		for l, a := range fb.absTEI[i*n : (i+1)*n] {
 			acc += a * (y[l] + c*fb.sRow[l])
 		}
-		fb.ky[i] = acc * (1 + float64(2*n+4)*eps())
+		fb.ky[i] = acc*(1+float64(2*n+4)*eps()) + float64(2*n+4)*0x1p-1074
 		if !isFinite(fb.ky[i]) {
 			return false
 		}
@@ -596,45 +644,45 @@ func (fb *foldBound) applyK(y []float64) bool {
 	return true
 }
 
-// storedResidual sets fb.r to B_s − (sE − A)x for x = f.xf/t and fb.rb to
+// storedResidual sets fb.r to B_s − (sE − A)x for x = t⁻¹∘f.xf and fb.rb to
 // a bound on its error. With r_f = B̄ − (sI − Ā)x the residual of the fold
-// in compensated arithmetic within e_f (pencilResidualRow, in the sweep's
-// coordinates), E·B̄ = B_s + R_B and sE − A = E(sI − Ā) + R_A give
+// in compensated arithmetic within e_f (denseResidualRow, in the sweep's
+// coordinates, t∘r_f), E·B̄ = B_s + R_B and sE − A = E(sI − Ā) + R_A give
 // B_s − (sE − A)x = E·r_f − R_A·x − R_B; it is formed in working precision
-// from the computed R̂_A, R̂_B (foldResidualFull), within |E|e_f +
-// |R_A − R̂_A||x| + |R_B − R̂_B| + γ_{2n+3}(|E||r̂_f| + |R̂_A||x| + |R̂_B|).
+// from the computed R̂_A, R̂_B (foldResidualFull) through prepare's scaled
+// matrices, within |E|e_f + |R_A − R̂_A||x| + |R_B − R̂_B| +
+// γ_{2n+3}(|E||r̂_f| + |R̂_A||x| + |R̂_B|) plus its underflow.
 func (fb *foldBound) storedResidual(f *explicitFastTier, pt frequencyPoint) bool {
 	n, m, hs := fb.n, fb.m, f.hs
 	g := gammaN(2*n + 3)
+	uf := float64(8*n+16) * 0x1p-1074
 	for j := range m {
 		xb := f.xf[j*n : (j+1)*n]
-		xr, rr := fb.xr, fb.rr
+		rr := fb.rr
 		for i := range n {
 			rc, e := denseResidualRow(xb, hs.a[i*n:(i+1)*n], i, hs.b[i*m+j], pt.p)
-			it := 1 / f.t[i]
-			rr[i] = complex(real(rc)*it, imag(rc)*it)
-			fb.w[i] = (e + 2*termsEps*cabs1(rc)) * it
-			xr[i] = complex(real(xb[i])*it, imag(xb[i])*it)
-			fb.ax[i] = cabs1(xr[i])
-			fb.ar[i] = cabs1(rr[i])
+			rr[i] = rc
+			fb.w[i] = e + 2*termsEps*cabs1(rc)
+			fb.ax[i] = cabs1(xb[i])
+			fb.ar[i] = cabs1(rc)
 		}
 		for i := range n {
 			var ar, ai float64
 			var mag, er float64
-			for l, ev := range fb.e[i*n : (i+1)*n] {
-				av := fb.raV[i*n+l]
-				ar += ev*real(rr[l]) - av*real(xr[l])
-				ai += ev*imag(rr[l]) - av*imag(xr[l])
+			for l, ev := range fb.ed[i*n : (i+1)*n] {
+				av := fb.radV[i*n+l]
+				ar += ev*real(rr[l]) - av*real(xb[l])
+				ai += ev*imag(rr[l]) - av*imag(xb[l])
 				aev := math.Abs(ev)
 				mag += aev*fb.ar[l] + math.Abs(av)*fb.ax[l]
-				er += aev*fb.w[l] + fb.raE[i*n+l]*fb.ax[l]
+				er += aev*fb.w[l] + fb.radE[i*n+l]*fb.ax[l]
 			}
 			acc := complex(ar, ai)
 			acc -= complex(fb.rbV[i*m+j], 0)
 			mag += math.Abs(fb.rbV[i*m+j])
 			er += fb.rbE[i*m+j]
 			fb.r[i*m+j] = acc
-			fb.rb[i*m+j] = (er + g*mag) * (1 + 4*eps())
+			fb.rb[i*m+j] = (er+g*mag)*(1+4*eps()) + uf
 			if !isFinite(fb.rb[i*m+j]) || cmplx.IsNaN(acc) || cmplx.IsInf(acc) {
 				return false
 			}
@@ -645,29 +693,31 @@ func (fb *foldBound) storedResidual(f *explicitFastTier, pt frequencyPoint) bool
 
 // verify is the fast tier's verify of the fold against the stored pencil
 // (see foldBound): the plain solution of the fold, corrected from the
-// stored residual, with f.rho bounding its error.
+// stored residual, with f.rho bounding its error, all in the sweep's
+// balanced coordinates.
 func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128) bool {
 	n, m, hs := fb.n, fb.m, f.hs
-	if !fb.storedResidual(f, pt) {
+	if !fb.prepare(f.t) || !fb.storedResidual(f, pt) {
 		return false
 	}
-	for i := range n {
-		for j := range m {
-			var acc complex128
-			for l, a := range fb.einv[i*n : (i+1)*n] {
-				acc += complex(a, 0) * fb.r[l*m+j]
-			}
-			fb.y1[i*m+j] = acc
-		}
-	}
+	uf := float64(8*n+16) * 0x1p-1074
 	for j := range m {
 		for i := range n {
-			f.res[j*n+i] = fb.y1[i*m+j] * complex(f.t[i], 0)
+			var acc complex128
+			for l, a := range fb.tei[i*n : (i+1)*n] {
+				acc += complex(a, 0) * fb.r[l*m+j]
+			}
+			f.res[j*n+i] = acc
 		}
 	}
 	qTMulCols(hs.y, f.res, hs.q, n, m)
 	hs.solve(hs.y)
 	qMulCols(f.xl, hs.y, hs.q, n, m)
+	for _, v := range f.xl {
+		if cmplx.IsNaN(v) || cmplx.IsInf(v) {
+			return false
+		}
+	}
 	f.pair = true
 	sa := cabs1(s)
 	clear(fb.r2)
@@ -677,20 +727,15 @@ func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128
 		for i := range n {
 			row := hs.a[i*n : (i+1)*n]
 			var ar, ai, sum float64
-			nnz := 0
 			for k, a := range row {
-				if a == 0 {
-					continue
-				}
 				ar += a * real(d[k])
 				ai += a * imag(d[k])
 				sum += math.Abs(a) * cabs1(d[k])
-				nnz++
 			}
 			yb := f.res[j*n+i]
 			rd := yb + complex(ar, ai) - s*d[i]
-			bound := float64(nnz+6) * termsEps / 2 * (cabs1(yb) + sa*cabs1(d[i]) + sum)
-			fb.w[i] = ((termsAbs(rd) + bound) * (1 + 2*termsEps)) / f.t[i]
+			bound := float64(n+6) * termsEps / 2 * (cabs1(yb) + sa*cabs1(d[i]) + sum)
+			fb.w[i] = (termsAbs(rd)+bound)*(1+2*termsEps) + uf
 		}
 		for l := range n {
 			var ei float64
@@ -704,38 +749,33 @@ func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128
 			for l := range n {
 				re += fb.absRE[i*n+l] * cabs1(fb.r[l*m+j])
 				ee += fb.absE[i*n+l] * fb.ky[l]
-				ed += fb.absE[i*n+l] * fb.w[l]
-				ra += fb.ra[i*n+l] * cabs1(d[l]) / f.t[l]
+				ed += fb.absED[i*n+l] * fb.w[l]
+				ra += fb.radB[i*n+l] * cabs1(d[l])
 			}
-			fb.r2[i] += (fb.rb[i*m+j] + re + gn*ee + ed + ra) * (1 + float64(2*n+8)*eps())
+			fb.r2[i] += (fb.rb[i*m+j]+re+gn*ee+ed+ra)*(1+float64(2*n+8)*eps()) + uf
 		}
 	}
 	if !fb.applyK(fb.r2) {
 		return false
 	}
-	for i := range n {
-		fb.v[i] = f.t[i] * fb.ky[i]
-	}
+	copy(fb.v, fb.ky)
 	copy(fb.y1v, fb.v)
 	if !f.upper(fb.v) {
 		return false
 	}
-	for l := range n {
-		fb.w[l] = fb.v[l] / f.t[l]
-	}
 	for i := range n {
 		var z float64
 		for l := range n {
-			z += fb.ra[i*n+l] * fb.w[l]
+			z += fb.radB[i*n+l] * fb.v[l]
 		}
-		fb.r2[i] = z * (1 + float64(n+2)*eps())
+		fb.r2[i] = z*(1+float64(n+2)*eps()) + uf
 	}
 	if !fb.applyK(fb.r2) {
 		return false
 	}
 	q := 0.0
 	for i := range n {
-		u := f.t[i] * fb.ky[i]
+		u := fb.ky[i]
 		if u == 0 {
 			continue
 		}
@@ -750,7 +790,7 @@ func (fb *foldBound) verify(f *explicitFastTier, pt frequencyPoint, s complex128
 	}
 	g := 1 / (1 - q) * (1 + 2*termsEps)
 	for i := range n {
-		f.rho[i] = fb.v[i] * g
+		f.rho[i] = fb.v[i]*g + uf
 		if !isFinite(f.rho[i]) {
 			return false
 		}
