@@ -59,11 +59,13 @@ func ddPlus(xh, xl, yh, yl float64) (float64, float64) {
 	return fastTwoSum(sh, sl)
 }
 
-// ddTimes is DWTimesDW3, relative error at most 4u².
+// ddTimes is DWTimesDW3, relative error at most 4u². The conversions
+// round the products: unconverted, the compiler may fuse xh·yh into the
+// final sum (an FMA on arm64), and cl1 no longer is its rounding error.
 func ddTimes(xh, xl, yh, yl float64) (float64, float64) {
-	ch := xh * yh
+	ch := float64(xh * yh)
 	cl1 := math.FMA(xh, yh, -ch)
-	tl0 := xl * yl
+	tl0 := float64(xl * yl)
 	tl1 := math.FMA(xh, yl, tl0)
 	cl2 := math.FMA(xl, yh, tl1)
 	return fastTwoSum(ch, cl1+cl2)
@@ -331,30 +333,10 @@ type encOps[M encNum[M]] struct {
 
 func (o *encOps[M]) acl(k M) M { return o.a.add(o.b.mul(k, false), -1) }
 
-func (o *encOps[M]) ric(x, k M) M {
-	ak := o.acl(k)
-	q := o.q.add(k.mul(o.r.mul(k, false), true), 1)
-	if o.hasS {
-		sk := o.s.mul(k, false)
-		q = q.add(sk, -1).add(sk.t(), -1)
-	}
-	return encSym(ak.mul(x.mul(ak, false), true).add(o.e.mul(x.mul(o.e, false), true), -1).add(q, 1))
-}
 
-func (o *encOps[M]) g(x, k M) M {
-	gk := o.r.mul(k, false)
-	if o.hasS {
-		gk = gk.add(o.s.t(), -1)
-	}
-	return gk.add(o.b.mul(x.mul(o.acl(k), false), true), -1)
-}
 
 func (o *encOps[M]) w(x M) M { return encSym(o.r.add(o.b.mul(x.mul(o.b, false), true), 1)) }
 
-// nmat returns N_K(x).
-func (o *encOps[M]) nmat(x, k M, cat func(a, b, c M) M) M {
-	return cat(o.ric(x, k), o.g(x, k).scale(-1), o.w(x))
-}
 
 // encData is the stored data of a gated Dare with its absolute values,
 // in both evaluation arithmetics (encPrec bits on first use).
@@ -602,61 +584,222 @@ const (
 	encTierBig
 )
 
-// tests proves −Ric_K(xu) ≻ 0 and N_K(xl) ≻ 0, double-double first.
-func (d *encData) tests(xu, xl, k encDD) encTier {
-	u := math.Ldexp(1, -53)
-	ak := k.abs()
-	prU, _, _ := d.psi(xu.abs(), ak)
-	prL, pgL, pwL := d.psi(xl.abs(), ak)
-	bound := func(g float64) (*mat.Dense, *mat.Dense) {
-		var hu mat.Dense
-		hu.Scale(g, prU)
-		hl := catBound(prL, pgL, pwL)
-		hl.Scale(g, hl)
-		return &hu, hl
+// encPieces are the forms at a centre c with gain k that the tests
+// combine: Ric_K(c), Q_K, g_K(c), W(c), RK − Sᵀ and A_K. Every test
+// matrix is affine in them and in the radius, so the test points c ± D are
+// never rounded.
+type encPieces[M encNum[M]] struct {
+	r, qk, g, w, rks, ak M
+}
+
+func encPiecesOf[M encNum[M]](o *encOps[M], c, k M) encPieces[M] {
+	var p encPieces[M]
+	p.ak = o.acl(k)
+	p.qk = o.q.add(k.mul(o.r.mul(k, false), true), 1)
+	p.rks = o.r.mul(k, false)
+	if o.hasS {
+		sk := o.s.mul(k, false)
+		p.qk = p.qk.add(sk, -1).add(sk.t(), -1)
+		p.rks = p.rks.add(o.s.t(), -1)
 	}
-	hu, hl := bound(d.gam(u * u))
-	if encPDDD(d.dd.ric(xu, k).scale(-1), hu) && encPDDD(d.dd.nmat(xl, k, catDD), hl) {
+	p.r = encSym(p.ak.mul(c.mul(p.ak, false), true).add(o.e.mul(c.mul(o.e, false), true), -1).add(p.qk, 1))
+	p.g = p.rks.add(o.b.mul(c.mul(p.ak, false), true), -1)
+	p.w = encSym(o.r.add(o.b.mul(c.mul(o.b, false), true), 1))
+	return p
+}
+
+// xdir returns −Ric_K(c(1 + s)) = sQ_K − (1 + s)Ric_K(c) and
+// N_K(c(1 − s)) = [[(1 − s)r + sQ_K, −((1 − s)g + s(RK − Sᵀ))ᵀ], [·,
+// (1 − s)W(c) + sR]].
+func encXDir[M encNum[M]](o *encOps[M], p encPieces[M], s float64, cat func(a, b, c M) M) (M, M) {
+	zu := encSym(p.qk.scale(s).add(p.r, -(1 + s)))
+	z11 := encSym(p.r.scale(1-s).add(p.qk, s))
+	g := p.g.scale(1-s).add(p.rks, s)
+	w := encSym(p.w.scale(1-s).add(o.r, s))
+	return zu, cat(z11, g.scale(-1), w)
+}
+
+// sdir returns −Ric_K(c + D_U) = −(r + A_KᵀD_UA_K − EᵀD_UE) and
+// N_K(c − D_L) = [[r − A_KᵀD_LA_K + EᵀD_LE, −(g + BᵀD_LA_K)ᵀ], [·,
+// W(c) − BᵀD_LB]].
+func encSDir[M encNum[M]](o *encOps[M], p encPieces[M], du, dl M, cat func(a, b, c M) M) (M, M) {
+	md := func(d M) M { return p.ak.mul(d.mul(p.ak, false), true).add(o.e.mul(d.mul(o.e, false), true), -1) }
+	zu := encSym(p.r.add(md(du), 1).scale(-1))
+	z11 := encSym(p.r.add(md(dl), -1))
+	g := p.g.add(o.b.mul(dl.mul(p.ak, false), true), 1)
+	w := encSym(p.w.add(o.b.mul(dl.mul(o.b, false), true), -1))
+	return zu, cat(z11, g.scale(-1), w)
+}
+
+// encBounds are the entrywise term magnitudes of the pieces at |c|, |k|.
+type encBounds struct {
+	pr, pq, pg, prks, pw, ah *mat.Dense
+	r, qk, g, rks, w         *mat.Dense
+}
+
+func (d *encData) bounds(c, k encDD, p encPieces[encDD]) encBounds {
+	var b encBounds
+	ak := k.abs()
+	b.pr, b.pg, b.pw = d.psi(c.abs(), ak)
+	b.pq = mat.DenseCopyOf(d.aQ)
+	b.pq.Add(b.pq, mul3T(ak, d.aR, ak))
+	b.prks = mat.NewDense(d.m, d.n, nil)
+	b.prks.Mul(d.aR, ak)
+	if d.aS != nil {
+		var sk mat.Dense
+		sk.Mul(d.aS, ak)
+		b.pq.Add(b.pq, &sk)
+		b.pq.Add(b.pq, sk.T())
+		b.prks.Add(b.prks, d.aS.T())
+	}
+	b.pq.Scale(1+1e-10, b.pq)
+	b.prks.Scale(1+1e-10, b.prks)
+	b.ah = mat.DenseCopyOf(d.aA)
+	var bk mat.Dense
+	bk.Mul(d.aB, ak)
+	b.ah.Add(b.ah, &bk)
+	b.ah.Scale(1+1e-10, b.ah)
+	b.r, b.qk, b.g, b.rks, b.w = absDense(p.r.round()), absDense(p.qk.round()), absDense(p.g.round()), absDense(p.rks.round()), absDense(p.w.round())
+	return b
+}
+
+func lin(terms ...any) *mat.Dense {
+	var o *mat.Dense
+	for i := 0; i < len(terms); i += 2 {
+		f, m := terms[i].(float64), terms[i+1].(*mat.Dense)
+		if o == nil {
+			r, c := m.Dims()
+			o = mat.NewDense(r, c, nil)
+		}
+		var t mat.Dense
+		t.Scale(math.Abs(f), m)
+		o.Add(o, &t)
+	}
+	return o
+}
+
+// xdirBounds returns the bounds of encXDir in an arithmetic of unit v:
+// γ times the combined term magnitudes plus 8v of the combined values for
+// the combination's own two operations.
+func (d *encData) xdirBounds(b encBounds, s, v float64) (*mat.Dense, *mat.Dense) {
+	g := d.gam(v)
+	f := 8 * v
+	hu := lin(g*(1+s), b.pr, g*s, b.pq, f*(1+s), b.r, f*s, b.qk)
+	h11 := lin(g*(1-s), b.pr, g*s, b.pq, f*(1-s), b.r, f*s, b.qk)
+	hg := lin(g*(1-s), b.pg, g*s, b.prks, f*(1-s), b.g, f*s, b.rks)
+	hw := lin(g, b.pw, f, b.w, f*s, d.aR)
+	return hu, catBound(h11, hg, hw)
+}
+
+// sdirBounds is xdirBounds for encSDir with radii |D_U|, |D_L|.
+func (d *encData) sdirBounds(b encBounds, du, dl *mat.Dense, v float64) (*mat.Dense, *mat.Dense) {
+	g := d.gam(v)
+	f := 8 * v
+	mpsi := func(x *mat.Dense) *mat.Dense {
+		o := mul3T(b.ah, x, b.ah)
+		o.Add(o, mul3T(d.aE, x, d.aE))
+		return o
+	}
+	pu, pl := mpsi(du), mpsi(dl)
+	var bda mat.Dense
+	bda.Mul(d.aB.T(), dl)
+	bdaA := mat.NewDense(d.m, d.n, nil)
+	bdaA.Mul(&bda, b.ah)
+	bdb := mul3T(d.aB, dl, d.aB)
+	hu := lin(g, b.pr, g, pu, f, b.r, f, pu)
+	h11 := lin(g, b.pr, g, pl, f, b.r, f, pl)
+	hg := lin(g, b.pg, g, bdaA, f, b.g, f, bdaA)
+	hw := lin(g, b.pw, g, bdb, f, b.w, f, bdb)
+	return hu, catBound(h11, hg, hw)
+}
+
+// encCentre is a centre with its gain and pieces in both arithmetics
+// (encPrec bits on first use).
+type encCentre struct {
+	d      *encData
+	c, k   encDD
+	p      encPieces[encDD]
+	b      encBounds
+	pb     *encPieces[encBig]
+	cb, kb encBig
+}
+
+func (d *encData) centre(c, k encDD) *encCentre {
+	e := &encCentre{d: d, c: c, k: k}
+	e.p = encPiecesOf(&d.dd, c, k)
+	e.b = d.bounds(c, k, e.p)
+	return e
+}
+
+func (e *encCentre) big() *encPieces[encBig] {
+	if e.pb == nil {
+		e.cb, e.kb = encBigDD(e.c), encBigDD(e.k)
+		p := encPiecesOf(e.d.big(), e.cb, e.kb)
+		e.pb = &p
+	}
+	return e.pb
+}
+
+// testX proves −Ric_K(c(1 + s)) ⪰ 0 and N_K(c(1 − s)) ≻ 0, double-double
+// first.
+func (e *encCentre) testX(s float64) encTier {
+	u2 := math.Ldexp(1, -106)
+	zu, zl := encXDir(&e.d.dd, e.p, s, catDD)
+	hu, hl := e.d.xdirBounds(e.b, s, u2)
+	if encPDDD(zu, hu) && encPDDD(zl, hl) {
 		return encTierDD
 	}
-	bg := d.big()
-	bu, bl, bkk := encBigDD(xu), encBigDD(xl), encBigDD(k)
-	hu, hl = bound(d.gam(math.Ldexp(1, -encPrec)))
-	if encPDBig(bg.ric(bu, bkk).scale(-1), hu) && encPDBig(bg.nmat(bl, bkk, catBig), hl) {
+	bu, bl := encXDir(e.d.big(), *e.big(), s, catBig)
+	hu, hl = e.d.xdirBounds(e.b, s, math.Ldexp(1, -encPrec))
+	if encPDBig(bu, hu) && encPDBig(bl, hl) {
 		return encTierBig
 	}
 	return encNone
 }
 
-// wPD proves W(x) ≻ 0.
-func (d *encData) wPD(x, k encDD) bool {
-	u := math.Ldexp(1, -53)
-	_, _, pw := d.psi(x.abs(), k.abs())
-	var h mat.Dense
-	h.Scale(d.gam(u*u), pw)
-	if encPDDD(d.dd.w(x), &h) {
-		return true
+// testS proves −Ric_K(c + D_U) ⪰ 0 and N_K(c − D_L) ≻ 0.
+func (e *encCentre) testS(du, dl encDD) encTier {
+	u2 := math.Ldexp(1, -106)
+	zu, zl := encSDir(&e.d.dd, e.p, du, dl, catDD)
+	adu, adl := du.abs(), dl.abs()
+	hu, hl := e.d.sdirBounds(e.b, adu, adl, u2)
+	if encPDDD(zu, hu) && encPDDD(zl, hl) {
+		return encTierDD
 	}
-	h.Scale(d.gam(math.Ldexp(1, -encPrec)), pw)
-	return encPDBig(d.big().w(encBigDD(x)), &h)
+	bu, bl := encSDir(e.d.big(), *e.big(), encBigDD(du), encBigDD(dl), catBig)
+	hu, hl = e.d.sdirBounds(e.b, adu, adl, math.Ldexp(1, -encPrec))
+	if encPDBig(bu, hu) && encPDBig(bl, hl) {
+		return encTierBig
+	}
+	return encNone
 }
 
-// diffPD proves a − b ≻ 0 for double-double a, b: their difference,
-// within 3u² of itself in double-double, else exact in encPrec bits.
-func diffPD(a, b encDD) bool {
-	u := math.Ldexp(1, -53)
-	dd := a.add(b, -1)
+// wPD proves W(c) ≻ 0.
+func (e *encCentre) wPD() bool {
 	var h mat.Dense
-	h.Scale(4*u*u, dd.abs())
-	if encPDDD(dd, &h) {
+	h.Scale(e.d.gam(math.Ldexp(1, -106)), e.b.pw)
+	if encPDDD(e.p.w, &h) {
 		return true
 	}
-	return encPDBig(encBigDD(a).add(encBigDD(b), -1), mat.NewDense(a.r, a.c, nil))
+	h.Scale(e.d.gam(math.Ldexp(1, -encPrec)), e.b.pw)
+	return encPDBig(e.big().w, &h)
+}
+
+// exactPD proves the double-double x positive definite (its value exact).
+func exactPD(x encDD) bool {
+	if encPDDD(x, mat.NewDense(x.r, x.c, nil)) {
+		return true
+	}
+	return encPDBig(encBigDD(x), mat.NewDense(x.r, x.c, nil))
 }
 
 // gain returns the gain (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) of the centre x in
-// double-double: a float64 solve refined twice on its double-double
-// residual. Any K serves the tests; the gain of x makes them tight.
+// double-double: a float64 solve refined on its double-double residual
+// while the refinement converges, else solved in encPrec bits. Any K
+// serves the tests, but a K off the gain of x enters Ric_K(x) as
+// (K − K_x)ᵀW(K − K_x): under cheap control with rank-deficient B, where
+// W is singular to float64, the refined K moved the next centre 6.5e-7
+// from an X 1.4e-13 off.
 func (d *encData) gain(x encDD) (encDD, bool) {
 	o := &d.dd
 	w := o.w(x)
@@ -667,22 +810,46 @@ func (d *encData) gain(x encDD) (encDD, bool) {
 	var lu mat.LU
 	lu.Factorize(w.round())
 	var k0 mat.Dense
-	if lu.SolveTo(&k0, false, gg.round()) != nil {
+	if solvedLU(&k0, lu.SolveTo(&k0, false, gg.round())) {
+		k := encDDOf(&k0)
+		for range 3 {
+			res := gg.add(w.mul(k, false), -1)
+			var dk mat.Dense
+			if !solvedLU(&dk, lu.SolveTo(&dk, false, res.round())) {
+				break
+			}
+			k = k.add(encDDOf(&dk), 1)
+			kn := mat.Norm(k.round(), 1)
+			if !(kn > 0) || math.IsInf(kn, 0) {
+				break
+			}
+			if mat.Norm(&dk, 1) <= 1e-30*kn {
+				return k, true
+			}
+		}
+	}
+	bg := d.big()
+	bx := encBigDD(x)
+	bgg := bg.b.mul(bx.mul(bg.a, false), true)
+	if bg.hasS {
+		bgg = bgg.add(bg.s.t(), 1)
+	}
+	kb, ok := bg.w(bx).solve(bgg)
+	if !ok {
 		return encDD{}, false
 	}
-	k := encDDOf(&k0)
-	for range 2 {
-		res := gg.add(w.mul(k, false), -1)
-		var dk mat.Dense
-		if lu.SolveTo(&dk, false, res.round()) != nil {
-			return encDD{}, false
-		}
-		k = k.add(encDDOf(&dk), 1)
-	}
+	k := kb.dd()
 	if !finiteSlice(k.round().RawMatrix().Data) {
 		return encDD{}, false
 	}
 	return k, true
+}
+
+// solvedLU reports an LU solve completed: an ill-conditioned W still
+// gives a usable gain, which the tests judge, not its condition.
+func solvedLU(dst *mat.Dense, err error) bool {
+	_, cond := err.(mat.Condition)
+	return (err == nil || cond) && !dst.IsEmpty() && finiteSlice(dst.RawMatrix().Data)
 }
 
 // stein returns D with EᵀDE − A_KᵀDA_K = N: a float64 solve of the Stein
@@ -845,42 +1012,37 @@ type encVerdict struct {
 	ret bool
 }
 
-// enclose tries the X-direction radius D = s·X_c, then the Stein
-// direction, around the centre c with its gain k, against the newtonTol
-// budget m(X − X_c) + b(D_U + D_L) for X, else for fl(X_c).
-func (d *encData) enclose(c, k encDD, x *mat.Dense) (encVerdict, bool) {
-	n := d.n
-	cf := c.round()
+// enclose tries the X-direction radius D_U = D_L = s·X_c, s from the
+// newtonTol budget m(X − X_c) + s·κ(X_c) (for X, else for fl(X_c)), then
+// the Stein direction, D_U and D_L Stein solutions of majorants of
+// Ric_K(X_c) and of g_KᵀW⁻¹g_K − Ric_K(X_c) (×1, 8, 64, 512), within
+// m + b(D_U + D_L). −D ⪯ M ⪯ D bounds the measure of M by b(D) =
+// max(‖D‖_F, max_j √D_jj Σ_i √D_ii) relative to X_c.
+func (e *encCentre) enclose(x *mat.Dense) (encVerdict, bool) {
+	d, n := e.d, e.d.n
+	cf := e.c.round()
 	var diff mat.Dense
 	diff.Sub(x, cf)
 	m := encMeasure(&diff, cf)
-	mr := encMeasure(mat.NewDense(n, n, append([]float64(nil), c.l...)), cf)
-	try := func(xu, xl encDD) (encVerdict, bool) {
-		b := encRadius(xu.add(xl, -1).round(), cf)
-		in, inR := m+b <= newtonTol, mr+b <= newtonTol
-		if !in && !inR || !diffPD(xu, c) || !diffPD(c, xl) {
-			return encVerdict{}, false
-		}
-		t := d.tests(xu, xl, k)
-		return encVerdict{tier: t, ret: in}, t != encNone
-	}
+	mr := encMeasure(mat.NewDense(n, n, append([]float64(nil), e.c.l...)), cf)
 	k1 := encRadius(cf, cf)
-	for _, mm := range []float64{m, mr} {
-		if !(mm < newtonTol) || !(k1 > 0) || math.IsInf(k1, 0) {
-			continue
-		}
-		s := 0.999 * (newtonTol - mm) / (2 * k1)
-		if v, ok := try(c.add(c, s), c.add(c, -s)); ok {
-			return v, true
+	if k1 > 0 && !math.IsInf(k1, 0) && exactPD(e.c) {
+		for _, mm := range []float64{m, mr} {
+			if !(mm < newtonTol) {
+				continue
+			}
+			s := 0.999 * (newtonTol - mm) / k1
+			if t := e.testX(s); t != encNone {
+				return encVerdict{tier: t, ret: m+s*k1 <= newtonTol}, true
+			}
 		}
 	}
-	o := &d.dd
-	r := o.ric(c, k).round()
-	gc := o.g(c, k).round()
+	r := e.p.r.round()
+	gc := e.p.g.round()
 	var lu mat.LU
-	lu.Factorize(o.w(c).round())
+	lu.Factorize(e.p.w.round())
 	var wg mat.Dense
-	if lu.SolveTo(&wg, false, gc) != nil {
+	if !solvedLU(&wg, lu.SolveTo(&wg, false, gc)) {
 		return encVerdict{}, false
 	}
 	var rho mat.Dense
@@ -893,13 +1055,18 @@ func (d *encData) enclose(c, k encDD, x *mat.Dense) (encVerdict, bool) {
 		if !ok1 || !ok2 {
 			return encVerdict{}, false
 		}
-		du, ok1 := d.stein(k, nu)
-		dl, ok2 := d.stein(k, nl)
+		du, ok1 := d.stein(e.k, nu)
+		dl, ok2 := d.stein(e.k, nl)
 		if !ok1 || !ok2 {
 			continue
 		}
-		if v, ok := try(c.add(du, 1), c.add(dl, -1)); ok {
-			return v, true
+		b := encRadius(du.add(dl, 1).round(), cf)
+		in, inR := m+b <= newtonTol, mr+b <= newtonTol
+		if !in && !inR || !exactPD(du) || !exactPD(dl) {
+			continue
+		}
+		if t := e.testS(du, dl); t != encNone {
+			return encVerdict{tier: t, ret: in}, true
 		}
 	}
 	return encVerdict{}, false
@@ -929,16 +1096,19 @@ func encloseDare(A, B, Q, R, S, E, X, K *mat.Dense) (out encResult, xc, kc *mat.
 	kret := encDDOf(K)
 	for it := 0; it <= encMaxRefine+1; it++ {
 		k, ok := d.gain(c)
+		var e *encCentre
 		if ok {
-			ok = d.wPD(c, k)
+			e = d.centre(c, k)
+			ok = e.wPD()
 		}
 		if !ok {
 			if it == encMaxRefine+1 {
 				return encFailed, nil, nil, encNone
 			}
 			k = kret
+			e = d.centre(c, k)
 		} else if it > 0 {
-			if v, ok := d.enclose(c, k, X); ok {
+			if v, ok := e.enclose(X); ok {
 				if v.ret {
 					return encCertified, nil, nil, v.tier
 				}
@@ -948,7 +1118,7 @@ func encloseDare(A, B, Q, R, S, E, X, K *mat.Dense) (out encResult, xc, kc *mat.
 		if it == encMaxRefine+1 {
 			break
 		}
-		dx, ok := d.stein(k, d.dd.ric(c, k).round())
+		dx, ok := d.stein(k, e.p.r.round())
 		if !ok {
 			break
 		}
