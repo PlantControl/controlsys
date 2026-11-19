@@ -94,10 +94,14 @@ type ReduceResult struct {
 // cut's pole; there a rounding-level move of either realization's pole
 // changes the response by more than tol, so neither is determined to tol,
 // the location of such a kept pole is not promised and nothing inside its
-// window is certified; the test is evaluated on the computed eigenvalues,
-// whose error can exceed their rounding bounds, and an error either way
-// only leaves a window uncertified or judges it: it never certifies a
-// point where the cut is wrong),
+// window is certified; its radius is δ/tol, δ = β_G + β_R + |λ_R − λ_G|
+// (β the rounding bounds of the two poles, λ their computed values) the
+// distance by which their exact values may differ to first order, which
+// moves the response by δ/d relative at distance d, tol at the edge, where
+// the cut is judged against the stored model; the test is evaluated on the
+// computed eigenvalues, whose error can exceed their rounding bounds, and
+// an error either way only leaves a window uncertified or judges it: it
+// never certifies a point where the cut is wrong),
 //
 //	|G_ij(s) − R_ij(s)| ≤ tol·max(max|G(s)|, max|R(s)|, Σ_l |C_il||X_lj(s)|),
 //
