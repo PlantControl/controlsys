@@ -3,6 +3,8 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // explicitTFVerified reports whether tf, the transfer function of the
@@ -52,35 +54,57 @@ func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilC
 }
 
 // explicitRouteJudgeWhy is explicitTFVerified unmemoized, also saying why
-// tf is not verified (descriptorTFJudgeWhy), prefixed "pencil: " where the
-// fold's gate (foldWithinRounding) sends every point to the pencil judge.
+// tf is not verified (descriptorTFJudgeWhy), prefixed "pencil: " where every
+// point of the fold goes to the pencil judge and "fold residual: " where
+// the fold's residual is carried into the fast tier's bound (foldBound).
 func explicitRouteJudgeWhy(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) (bool, []int, string) {
-	if route == tfRouteExplicit {
-		return explicitTFJudgeWhy(identityPencil(sys), sys, tf, nil, true)
-	}
-	ex, k, err := sys.explicitForm("TransferFunction")
-	if err != nil || !foldWithinRounding(sys, ex, k) {
-		v, ref, why := descriptorTFJudgeWhy(sys, tf, c)
-		return v, ref, "pencil: " + why
-	}
-	return explicitTFJudgeWhy(sys, ex, tf, c, false)
+	v, ref, why, _ := explicitRouteJudge(sys, route, tf, c)
+	return v, ref, why
 }
 
-// explicitTFJudgeWhy is descriptorTFJudgeWhy of tf against the descriptor
+// explicitRouteJudge is explicitRouteJudgeWhy also counting the points the
+// pencil judge took, −1 where it took every point.
+func explicitRouteJudge(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) (bool, []int, string, int) {
+	if route == tfRouteExplicit {
+		return explicitTFJudge(identityPencil(sys), sys, nil, tf, nil, true)
+	}
+	ex, k, err := sys.explicitForm("TransferFunction")
+	if err == nil {
+		fb, gate := newFoldBound(sys, ex, k)
+		switch {
+		case gate:
+			return explicitTFJudge(sys, ex, nil, tf, c, false)
+		case fb != nil:
+			v, ref, why, np := explicitTFJudge(sys, ex, fb, tf, c, false)
+			if why != "" {
+				why = "fold residual: " + why
+			}
+			return v, ref, why, np
+		}
+	}
+	v, ref, why := descriptorTFJudgeWhy(sys, tf, c)
+	return v, ref, "pencil: " + why, -1
+}
+
+// explicitTFJudge is descriptorTFJudgeWhy of tf against the descriptor
 // pencil with each point tried first by the fast tier on the explicit
-// model, whose response is pencil's or that of one ε-rounding of its A and
-// B (foldWithinRounding); identity marks pencil as (A, B, C, D, I) of
-// model, whose point at ∞ identityInfinityRefutes judges.
-func explicitTFJudgeWhy(pencil, model *System, tf *TransferFunc, c *pencilCache, identity bool) (bool, []int, string) {
+// model, whose response is pencil's, that of one ε-rounding of its A and
+// B (foldWithinRounding), or, with fb, the fold whose residual fb carries;
+// identity marks pencil as (A, B, C, D, I) of model, whose point at ∞
+// identityInfinityRefutes judges. It also counts the points the pencil
+// judge took.
+func explicitTFJudge(pencil, model *System, fb *foldBound, tf *TransferFunc, c *pencilCache, identity bool) (bool, []int, string, int) {
 	rows := newTFRows(tf)
 	slow := pencilPointJudge(pencil, tf, rows, c)
 	var fast *explicitFastTier
+	np := 0
 	mk := func(poles []complex128) pointJudge {
 		judge := slow(poles)
 		var buf []descriptorTFPoint
 		return func(pts []complex128) []descriptorTFPoint {
 			if fast == nil {
 				fast = newExplicitFastTier(model, rows)
+				fast.fold = fb
 			}
 			if cap(buf) < len(pts) {
 				buf = make([]descriptorTFPoint, len(pts))
@@ -92,6 +116,7 @@ func explicitTFJudgeWhy(pencil, model *System, tf *TransferFunc, c *pencilCache,
 					out[k] = descriptorTFPoint{determined: true, verified: true}
 					continue
 				}
+				np++
 				if out[k] = judge([]complex128{s})[0]; out[k].refuted {
 					break
 				}
@@ -99,12 +124,13 @@ func explicitTFJudgeWhy(pencil, model *System, tf *TransferFunc, c *pencilCache,
 			return out
 		}
 	}
-	return descriptorScheduleWhy(pencil, tf, mk, func() bool {
+	v, ref, why := descriptorScheduleWhy(pencil, tf, mk, func() bool {
 		if identity {
 			return identityInfinityRefutes(pencil, tf, c)
 		}
 		return descriptorTFInfinityRefutesCached(pencil, tf, c)
 	})
+	return v, ref, why, np
 }
 
 // identityInfinityRefutes is descriptorTFInfinityRefutesCached for the
@@ -223,14 +249,36 @@ func identityPencil(sys *System) *System {
 // foldWithinRounding reports whether ex, the explicit form (E⁻¹A,
 // 2ᵏ·E⁻¹B, 2⁻ᵏ·C, D) of the descriptor sys as explicitForm returns it with
 // its state scaling k, is exactly the fold of A + ΔA and B + ΔB with |ΔA| ≤
-// ε|A| and |ΔB| ≤ ε|B| componentwise: |E·Ā − A| ≤ ε|A| and |E·B̄·2⁻ᵏ − B| ≤
-// ε|B|, the residuals formed in compensated arithmetic with their
-// evaluation bound counted, each row of E and column of the solution
-// scaled by a power of two so that no product over- or underflows; false
-// where a scaling is inexact, or where C·2⁻ᵏ and D are not the stored C
-// and D exactly. A zero entry of A or B allows no residual.
+// ε|A| and |ΔB| ≤ ε|B| componentwise (foldResidual).
 func foldWithinRounding(sys, ex *System, k int) bool {
+	_, _, gate, _ := foldResidual(sys, ex, k)
+	return gate
+}
+
+// foldResidual bounds the residuals R_A = E·Ā − A and R_B = E·B̄ − 2ᵏ·B of
+// ex, the explicit form (Ā, B̄, C̄, D̄) = (E⁻¹A, 2ᵏ·E⁻¹B, 2⁻ᵏ·C, D) of the
+// descriptor sys as explicitForm returns it with its state scaling k: ra
+// (n×n) and rb (n×m) bound |R_A| and |R_B| componentwise, each formed in
+// compensated arithmetic with its evaluation bound counted, each row of E
+// and column of the solution scaled by a power of two so that no product
+// over- or underflows. gate reports |R_A| ≤ ε|A| and |R_B| ≤ ε|2ᵏB| (a zero
+// entry allowing no residual): ex is then exactly the fold of one
+// ε-rounding of A and B. ok is false, and gate with it, where a scaling is
+// inexact, a bound is not finite, or C̄ and D̄ are not 2⁻ᵏ·C and D exactly.
+func foldResidual(sys, ex *System, k int) (ra, rb []float64, gate, ok bool) {
 	n, m, p := sys.Dims()
+	for i := range p {
+		for l := range n {
+			if v := sys.C.At(i, l); ex.C.At(i, l) != math.Ldexp(v, -k) || !exactLdexp(v, -k) {
+				return nil, nil, false, false
+			}
+		}
+		for j := range m {
+			if ex.D.At(i, j) != sys.D.At(i, j) {
+				return nil, nil, false, false
+			}
+		}
+	}
 	e := denseData(sys.E)
 	eExp := make([]int, n)
 	es := make([]float64, n*n)
@@ -239,12 +287,14 @@ func foldWithinRounding(sys, ex *System, k int) bool {
 		for l := range n {
 			v, ok := scaledExact(e[i*n+l], -eExp[i])
 			if !ok {
-				return false
+				return nil, nil, false, false
 			}
 			es[i*n+l] = v
 		}
 	}
-	check := func(x, ref []float64, cols, shift int) bool {
+	gate = true
+	resid := func(x, ref []float64, cols, shift int) ([]float64, bool) {
+		out := make([]float64, n*cols)
 		xs := make([]float64, n)
 		col := make([]float64, n)
 		for j := range cols {
@@ -255,14 +305,14 @@ func foldWithinRounding(sys, ex *System, k int) bool {
 			for l := range n {
 				v, ok := scaledExact(col[l], -xe)
 				if !ok {
-					return false
+					return nil, false
 				}
 				xs[l] = v
 			}
 			for i := range n {
 				a, ok := scaledExact(ref[i*cols+j], shift-eExp[i]-xe)
 				if !ok {
-					return false
+					return nil, false
 				}
 				var r compensatedSum
 				mag := math.Abs(a)
@@ -273,25 +323,207 @@ func foldWithinRounding(sys, ex *System, k int) bool {
 				r.add(-a)
 				bound := math.Abs(r.value())*(1+2*eps()) + dot2Err(n+1)*mag*(1+float64(n+4)*eps()) + float64(4*n+16)*0x1p-1074
 				if !(bound <= eps()*math.Abs(a)*(1-4*eps())) {
-					return false
+					gate = false
 				}
+				v := math.Ldexp(bound*(1+2*eps()), eExp[i]+xe)
+				if v < 0x1p-1000 {
+					v += 0x1p-1074
+				}
+				if !isFinite(v) {
+					return nil, false
+				}
+				out[i*cols+j] = v
 			}
 		}
-		return true
+		return out, true
 	}
-	for i := range p {
-		for l := range n {
-			if v := sys.C.At(i, l); ex.C.At(i, l) != math.Ldexp(v, -k) || !exactLdexp(v, -k) {
-				return false
+	ra, okA := resid(denseData(ex.A), denseData(sys.A), n, 0)
+	if !okA {
+		return nil, nil, false, false
+	}
+	rb, okB := resid(denseData(ex.B), denseData(sys.B), m, k)
+	if !okB {
+		return nil, nil, false, false
+	}
+	return ra, rb, gate, true
+}
+
+// foldBound carries the residual of a fold that is not one ε-rounding of
+// A and B (foldResidual's gate fails) into the fast tier's bound on the
+// stored solution, so that the fold's points still take the fast tier.
+// With F = sE − A, M = (sI − Ā)⁻¹ and z = R_B + R_A·x_f for the fold's
+// solution x_f, F = E(sI − Ā) + R_A and F·x = E·B̄ − R_B give
+// x − x_f = −M·E⁻¹·(I + R_A·M·E⁻¹)⁻¹·z, so with K ≥ |E⁻¹| and
+// v = |M|·K·ζ, ζ ≥ |z|, |x − x_f| ≤ Σₖ Pᵏv ≤ v/(1 − q) where P = |M|·K·|R_A|
+// passes the check Pv ≤ q·v, q < 1; |M| is bounded by the comparison
+// matrices of the sweep (upper) in its balanced coordinates. K applies
+// |Ê⁻¹|(I − |R_E|)⁻¹ for the computed inverse Ê⁻¹ with R_E = I − E·Ê⁻¹
+// bounded in compensated arithmetic: with S the row scales of E and ρ =
+// ‖S⁻¹|R_E|S‖_∞ < 1/2, Σₖ|R_E|ᵏy ≤ y + ρ/(1 − ρ)·‖S⁻¹y‖_∞·S𝟙. A point
+// where a check fails is left to the pencil judge; foldBound never refutes.
+type foldBound struct {
+	n, m     int
+	ra, rb   []float64
+	einv     []float64
+	sRow     []float64
+	rhoE     float64
+	zeta, ky []float64
+	v, w     []float64
+}
+
+// newFoldBound is foldResidual's verdict with, where the gate fails, the
+// foldBound of ex; nil where the fold's residual cannot be carried (ok
+// false, E's computed inverse not finite or ρ ≥ 1/2).
+func newFoldBound(sys, ex *System, k int) (*foldBound, bool) {
+	ra, rb, gate, ok := foldResidual(sys, ex, k)
+	if gate || !ok {
+		return nil, gate
+	}
+	n, m, _ := sys.Dims()
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	var inv mat.Dense
+	if err := lu.SolveTo(&inv, false, eyeDense(n)); err != nil {
+		return nil, false
+	}
+	einv := denseData(&inv)
+	e := denseData(sys.E)
+	sRow := make([]float64, n)
+	for i := range n {
+		sRow[i] = math.Ldexp(1, maxExp(e[i*n:(i+1)*n]))
+	}
+	rhoE := 0.0
+	for i := range n {
+		row := 0.0
+		for c := range n {
+			var r compensatedSum
+			mag := 0.0
+			if i == c {
+				r.add(1)
+				mag = 1
 			}
+			for l := range n {
+				r.addProd(-e[i*n+l], einv[l*n+c])
+				mag += math.Abs(e[i*n+l] * einv[l*n+c])
+			}
+			b := math.Abs(r.value())*(1+2*eps()) + dot2Err(n+1)*mag*(1+float64(n+4)*eps()) + float64(4*n+16)*0x1p-1074
+			row += b * sRow[c] / sRow[i]
 		}
+		rhoE = math.Max(rhoE, row*(1+float64(n+2)*eps()))
+	}
+	if !(rhoE < 0.5) {
+		return nil, false
+	}
+	for i, v := range einv {
+		einv[i] = math.Abs(v)
+		if !isFinite(einv[i]) {
+			return nil, false
+		}
+	}
+	return &foldBound{n: n, m: m, ra: ra, rb: rb, einv: einv, sRow: sRow, rhoE: rhoE,
+		zeta: make([]float64, n), ky: make([]float64, n), v: make([]float64, n), w: make([]float64, n)}, false
+}
+
+// applyK sets fb.ky to an upper bound on |E⁻¹|·y for the nonnegative y.
+func (fb *foldBound) applyK(y []float64) bool {
+	n := fb.n
+	nrm := 0.0
+	for i, v := range y {
+		nrm = math.Max(nrm, v/fb.sRow[i])
+	}
+	c := fb.rhoE / (1 - fb.rhoE) * nrm * (1 + 4*eps())
+	for i := range n {
+		var acc float64
+		for l, a := range fb.einv[i*n : (i+1)*n] {
+			acc += a * (y[l] + c*fb.sRow[l])
+		}
+		fb.ky[i] = acc * (1 + float64(2*n+4)*eps())
+		if !isFinite(fb.ky[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// add adds to f.rho, the fast tier's bound on the error of its solution
+// against the fold's in the sweep's balanced coordinates, the bound on the
+// fold's distance from the stored solution (see foldBound).
+func (fb *foldBound) add(f *explicitFastTier) bool {
+	n, m := fb.n, fb.m
+	t := f.t
+	clear(fb.zeta)
+	for l := range n {
+		xa := 0.0
 		for j := range m {
-			if ex.D.At(i, j) != sys.D.At(i, j) {
-				return false
+			x := f.xf[j*n+l]
+			if f.pair {
+				x += f.xl[j*n+l]
 			}
+			xa += cabs1(x)
+		}
+		fb.w[l] = (xa*(1+2*termsEps) + float64(m)*f.rho[l]) / t[l]
+	}
+	for i := range n {
+		var z float64
+		for j := range m {
+			z += fb.rb[i*m+j]
+		}
+		for l := range n {
+			z += fb.ra[i*n+l] * fb.w[l]
+		}
+		fb.zeta[i] = z * (1 + float64(n+m+2)*eps())
+	}
+	if !fb.applyK(fb.zeta) {
+		return false
+	}
+	for i := range n {
+		fb.v[i] = t[i] * fb.ky[i]
+	}
+	if !f.upper(fb.v) {
+		return false
+	}
+	for l := range n {
+		fb.w[l] = fb.v[l] / t[l]
+	}
+	for i := range n {
+		var z float64
+		for l := range n {
+			z += fb.ra[i*n+l] * fb.w[l]
+		}
+		fb.zeta[i] = z * (1 + float64(n+2)*eps())
+	}
+	if !fb.applyK(fb.zeta) {
+		return false
+	}
+	pv := fb.w
+	for i := range n {
+		pv[i] = t[i] * fb.ky[i]
+	}
+	if !f.upper(pv) {
+		return false
+	}
+	q := 0.0
+	for i, u := range pv {
+		if u == 0 {
+			continue
+		}
+		if !(fb.v[i] > 0) {
+			return false
+		}
+		q = max(q, u/fb.v[i])
+	}
+	q *= 1 + 8*float64(n)*termsEps
+	if !(q < 1) {
+		return false
+	}
+	g := 1 / (1 - q) * (1 + 2*termsEps)
+	for i := range n {
+		f.rho[i] += fb.v[i] * g
+		if !isFinite(f.rho[i]) {
+			return false
 		}
 	}
-	return check(denseData(ex.A), denseData(sys.A), n, 0) && check(denseData(ex.B), denseData(sys.B), m, k)
+	return true
 }
 
 // maxExp is the binary exponent of the largest |v|, 0 when all are zero or
@@ -339,12 +571,37 @@ type explicitFastTier struct {
 	beta    []float64
 	delta   []float64
 	tlo     []float64
+	// t is the balancing: x̂ in the sweep's coordinates is t∘x.
+	t []float64
+	// xl is the refinement correction kept apart from xf where pair is
+	// set, the solution then xf + xl; res is its residual's scratch.
+	xl, res []complex128
+	pair    bool
+	fold    *foldBound
+	// cb bounds the inverse for upper: the sweep, or the dense solver bd
+	// (built on first use) where the sweep's reduction error leaves the
+	// comparison check short.
+	cb comparisonBounds
+	bd *balancedDense
+	rm []complex128
+	// post is the sweep's bound with its reduction error measured
+	// (sweepPost), formed where the a-priori bound first fails.
+	post   *sweepPost
+	noPost bool
+	y0     []float64
 }
 
 func newExplicitFastTier(sys *System, rows tfRows) *explicitFastTier {
 	n, m, p := sys.Dims()
-	hs := newHessenbergSweep(sys, n, m, p)
-	f := &explicitFastTier{hs: hs, n: n, m: m, p: p, rows: rows,
+	br := newRealizationCopy(sys, n, m, p)
+	t := make([]float64, n)
+	for i := range t {
+		t[i] = 1
+	}
+	br.balance(t)
+	hs := newHessenbergSweepOf(sys, br)
+	f := &explicitFastTier{hs: hs, cb: hs, y0: make([]float64, n), n: n, m: m, p: p, rows: rows, t: t,
+		xl: make([]complex128, n*m), res: make([]complex128, n*m),
 		dst: make([]complex128, p*m), xf: make([]complex128, n*m),
 		rho: make([]float64, n), tw: make([]float64, n),
 		r: make([]complex128, m), beta: make([]float64, m),
@@ -385,17 +642,146 @@ func (f *explicitFastTier) verify(s complex128) bool {
 	}
 	hs.solve(y)
 	qMulCols(f.xf, y, hs.q, n, m)
+	f.pair = false
 	if f.check(pt, s) {
 		return true
 	}
-	if err := hs.evalInto(pt, f.dst); err != nil || hs.via != viaSweepSolve {
+	if f.refinePair(pt) && f.pairResidual(pt) && f.entries(s) {
+		return true
+	}
+	f.pair = false
+	if err := hs.evalInto(pt, f.dst); err == nil && hs.via == viaSweepSolve {
+		qMulCols(f.xf, hs.y, hs.q, n, m)
+		for i, v := range hs.x {
+			f.xf[i] += v
+		}
+		if f.check(pt, s) {
+			return true
+		}
+	}
+	return f.dense(pt, s)
+}
+
+// dense is verify on GEPP of sI − Â (balancedDense), whose comparison
+// bound carries no reduction error: the plain solve, then the pair with
+// its correction.
+func (f *explicitFastTier) dense(pt frequencyPoint, s complex128) bool {
+	n, m := f.n, f.m
+	if f.bd == nil {
+		f.bd = newBalancedDense(f.hs.sys, n, m, f.p)
+		f.rm = make([]complex128, n*m)
+	}
+	bd := f.bd
+	if bd.nonFinite || !bd.factorAt(pt) {
 		return false
 	}
-	qMulCols(f.xf, hs.y, hs.q, n, m)
-	for i, v := range hs.x {
-		f.xf[i] += v
+	f.cb = bd
+	defer func() { f.cb = f.hs }()
+	for i, v := range bd.b[:n*m] {
+		f.rm[i] = complex(v, 0)
 	}
-	return f.check(pt, s)
+	cLUSolve(bd.pencil, bd.piv, f.rm, n, m)
+	for i := range n {
+		for j := range m {
+			f.xf[j*n+i] = f.rm[i*m+j]
+		}
+	}
+	f.pair = false
+	if f.check(pt, s) {
+		return true
+	}
+	for j := range m {
+		x := f.xf[j*n : (j+1)*n]
+		for i := range n {
+			rc, _ := pencilResidualRow(x, bd.a[i*n:(i+1)*n], i, bd.b[i*m+j], pt.p, pt.q, 1)
+			f.rm[i*m+j] = rc
+		}
+	}
+	cLUSolve(bd.pencil, bd.piv, f.rm, n, m)
+	for i := range n {
+		for j := range m {
+			v := f.rm[i*m+j]
+			if cmplx.IsNaN(v) || cmplx.IsInf(v) {
+				return false
+			}
+			f.xl[j*n+i] = v
+		}
+	}
+	f.pair = true
+	return f.pairResidual(pt) && f.entries(s)
+}
+
+// refinePair sets f.xl to the correction (sI − Â)⁻¹r̂ of f.xf through the
+// sweep's factors, r̂ the residual of f.xf against the exact point in
+// compensated arithmetic, and sets f.pair: the solution is then the
+// unrounded pair f.xf + f.xl.
+func (f *explicitFastTier) refinePair(pt frequencyPoint) bool {
+	n, m, hs := f.n, f.m, f.hs
+	for j := range m {
+		x := f.xf[j*n : (j+1)*n]
+		for i := range n {
+			rc, _ := pencilResidualRow(x, hs.a[i*n:(i+1)*n], i, hs.b[i*m+j], pt.p, pt.q, 1)
+			f.res[j*n+i] = rc
+		}
+	}
+	qTMulCols(hs.y, f.res, hs.q, n, m)
+	hs.solve(hs.y)
+	qMulCols(f.xl, hs.y, hs.q, n, m)
+	for _, v := range f.xl {
+		if cmplx.IsNaN(v) || cmplx.IsInf(v) {
+			return false
+		}
+	}
+	f.pair = true
+	return true
+}
+
+// pairResidual is residual for the pair f.xf + f.xl: each row of
+// b − (sI − Â)(x_h + x_l) summed in compensated arithmetic over both words,
+// within dot2Err(k) of its terms' magnitudes for its k products and sums.
+func (f *explicitFastTier) pairResidual(pt frequencyPoint) bool {
+	n, m, hs := f.n, f.m, f.hs
+	s := pt.p
+	sr, si := real(s), imag(s)
+	sa := cabs1(s)
+	clear(f.rho)
+	for j := range m {
+		xh, xl := f.xf[j*n:(j+1)*n], f.xl[j*n:(j+1)*n]
+		for i := range n {
+			row := hs.a[i*n : (i+1)*n]
+			var re, im compensatedSum
+			bi := hs.b[i*m+j]
+			re.add(bi)
+			mag := math.Abs(bi)
+			k := 1
+			for l, a := range row {
+				if a == 0 {
+					continue
+				}
+				re.addProd(a, real(xh[l]))
+				re.addProd(a, real(xl[l]))
+				im.addProd(a, imag(xh[l]))
+				im.addProd(a, imag(xl[l]))
+				mag += math.Abs(a) * (cabs1(xh[l]) + cabs1(xl[l]))
+				k += 2
+			}
+			for _, x := range []complex128{xh[i], xl[i]} {
+				re.addProd(-sr, real(x))
+				re.addProd(si, imag(x))
+				im.addProd(-sr, imag(x))
+				im.addProd(-si, real(x))
+				mag += sa * cabs1(x)
+			}
+			k += 4
+			e := dot2Err(k)*mag*(1+float64(k+16)*termsEps) + float64(8*k+64)*max(sa, 1)*0x1p-1074
+			r := complex(re.value(), im.value())
+			f.rho[i] += (termsAbs(r)*(1+2*termsEps)+e)*(1+4*termsEps)
+		}
+	}
+	if !f.upper(f.rho) {
+		return false
+	}
+	return f.fold == nil || f.fold.add(f)
 }
 
 // check reports whether every entry verifies at s with the solution in
@@ -442,7 +828,10 @@ func (f *explicitFastTier) residual(pt frequencyPoint, compensated bool) bool {
 			f.rho[i] += (termsAbs(r) + bound) * (1 + 2*termsEps)
 		}
 	}
-	return f.upper(f.rho)
+	if !f.upper(f.rho) {
+		return false
+	}
+	return f.fold == nil || f.fold.add(f)
 }
 
 // entries reports whether every entry verifies at s with f.rho bounding
@@ -463,13 +852,25 @@ func (f *explicitFastTier) entries(s complex128) bool {
 		scale := 0.0
 		for j := range m {
 			x := f.xf[j*n : (j+1)*n]
+			var xl []complex128
+			if f.pair {
+				xl = f.xl[j*n : (j+1)*n]
+			}
 			var re, im compensatedSum
 			mag, tlo := 0.0, 0.0
 			for k, c := range cr {
 				re.addProd(c, real(x[k]))
 				im.addProd(c, imag(x[k]))
-				mag += math.Abs(c) * cabs1(x[k])
-				tlo += math.Abs(c) * math.Max(termsAbs(x[k])*(1-2*termsEps)-f.rho[k], 0)
+				xk := x[k]
+				ax := cabs1(x[k])
+				if xl != nil {
+					re.addProd(c, real(xl[k]))
+					im.addProd(c, imag(xl[k]))
+					xk += xl[k]
+					ax += cabs1(xl[k])
+				}
+				mag += math.Abs(c) * ax
+				tlo += math.Abs(c) * math.Max(termsAbs(xk)*(1-4*termsEps)-f.rho[k], 0)
 			}
 			d := 0.0
 			if hs.d != nil {
@@ -477,7 +878,7 @@ func (f *explicitFastTier) entries(s complex128) bool {
 				re.add(d)
 			}
 			g := complex(re.value(), im.value())
-			o := dot2Err(n+2)*(mag+math.Abs(d))*(1+float64(n+4)*termsEps) + termsEps*cabs1(g) + float64(4*n+16)*0x1p-1074
+			o := dot2Err(2*n+2)*(mag+math.Abs(d))*(1+float64(2*n+4)*termsEps) + termsEps*cabs1(g) + float64(8*n+16)*0x1p-1074
 			f.g[j], f.delta[j] = g, w+o
 			f.tlo[j] = (tlo + math.Abs(d)) * (1 - 2*float64(n+2)*termsEps)
 			scale = math.Max(scale, math.Max(cmplx.Abs(f.r[j])-f.beta[j], cmplx.Abs(g)-f.delta[j]))
@@ -497,10 +898,29 @@ func (f *explicitFastTier) entries(s complex128) bool {
 // comparison matrices of the sweep's factors at its last point
 // (termsCert.comparisonUpper), false where the q check fails.
 func (f *explicitFastTier) upper(y []float64) bool {
-	hs := f.hs
-	hs.nsolve(y)
-	hs.factorError(f.tw, y)
-	hs.nsolve(f.tw)
+	if f.cb != comparisonBounds(f.hs) {
+		return f.upperBy(f.cb, y)
+	}
+	copy(f.y0, y)
+	if f.upperBy(f.hs, y) {
+		return true
+	}
+	if f.post == nil && !f.noPost {
+		f.post = newSweepPost(f.hs)
+		f.noPost = f.post == nil
+	}
+	if f.post == nil {
+		return false
+	}
+	copy(y, f.y0)
+	return f.upperBy(f.post, y)
+}
+
+// upperBy is upper with the inverse bounded by cb.
+func (f *explicitFastTier) upperBy(cb comparisonBounds, y []float64) bool {
+	cb.nsolve(y)
+	cb.factorError(f.tw, y)
+	cb.nsolve(f.tw)
 	q := 0.0
 	for i, v := range y {
 		if f.tw[i] == 0 {
@@ -523,4 +943,155 @@ func (f *explicitFastTier) upper(y []float64) bool {
 		}
 	}
 	return true
+}
+
+// sweepPost bounds the inverse of sI − Â from the sweep's factors with the
+// reduction's error measured a posteriori instead of hessenbergSweep's
+// a-priori rank-one (n² + 4n)ε‖Â‖_F term, which beside the poles of a large
+// model fails the comparison check. With E₄ = ÂQ − QH and E₃ = I − QᵀQ for
+// the computed Q and H, sI − Â = G⁻¹ − W for G = Q·F_H⁻¹·Q⁻¹, F_H = P⁻¹L̂Û
+// the factored sI − H = F_H − Δ, |Δ| ≤ γP⁻¹|L̂||Û|, and W = (QΔ + E₄)Q⁻¹;
+// so |G|y ≤ |Q|N_H|Q⁻¹|y (nsolve) and |W|y ≤ (|Q|γP⁻¹|L̂||Û| + |E₄|)|Q⁻¹|y
+// (factorError) feed comparisonUpper's check. |Q⁻¹|y ≤ |Qᵀ|y +
+// ρ₃/(1 − ρ₃)·‖|Qᵀ|y‖_∞·𝟙 for ρ₃ ≥ ‖E₃‖_∞ < 1/2. Ē₄ and ρ₃ are formed
+// once in compensated arithmetic with their evaluation bounds.
+type sweepPost struct {
+	hs    *hessenbergSweep
+	absE4 []float64
+	c3    float64
+	z, t  []float64
+}
+
+// newSweepPost is the sweepPost of hs, nil where ρ₃ ≥ 1/2 or a bound is
+// not finite.
+func newSweepPost(hs *hessenbergSweep) *sweepPost {
+	n := hs.n
+	q, h, a := hs.q, hs.h, hs.a
+	bound := func(r *compensatedSum, mag float64, k int) float64 {
+		return math.Abs(r.value())*(1+2*eps()) + dot2Err(k)*mag*(1+float64(k+4)*eps()) + float64(4*k+16)*0x1p-1074
+	}
+	e4 := make([]float64, n*n)
+	for i := range n {
+		for j := range n {
+			var r compensatedSum
+			mag := 0.0
+			for l := range n {
+				r.addProd(a[i*n+l], q[l*n+j])
+				r.addProd(-q[i*n+l], h[l*n+j])
+				mag += math.Abs(a[i*n+l]*q[l*n+j]) + math.Abs(q[i*n+l]*h[l*n+j])
+			}
+			e4[i*n+j] = bound(&r, mag, 2*n)
+			if !isFinite(e4[i*n+j]) {
+				return nil
+			}
+		}
+	}
+	rho3 := 0.0
+	for i := range n {
+		row := 0.0
+		for j := range n {
+			var r compensatedSum
+			mag := 0.0
+			if i == j {
+				r.add(1)
+				mag = 1
+			}
+			for l := range n {
+				r.addProd(-q[l*n+i], q[l*n+j])
+				mag += math.Abs(q[l*n+i] * q[l*n+j])
+			}
+			row += bound(&r, mag, n+1)
+		}
+		rho3 = math.Max(rho3, row*(1+float64(n+2)*eps()))
+	}
+	if !(rho3 < 0.5) {
+		return nil
+	}
+	return &sweepPost{hs: hs, absE4: e4, c3: rho3 / (1 - rho3) * (1 + 4*eps()), z: make([]float64, n), t: make([]float64, n)}
+}
+
+// qinv sets sp.z to the bound on |Q⁻¹|y.
+func (sp *sweepPost) qinv(y []float64) {
+	n, q, z := sp.hs.n, sp.hs.absQT, sp.z
+	clear(z)
+	for k, yk := range y {
+		if yk == 0 {
+			continue
+		}
+		for i, a := range q[k*n : (k+1)*n] {
+			z[i] += a * yk
+		}
+	}
+	mx := 0.0
+	for i := range z {
+		z[i] *= 1 + float64(n+2)*eps()
+		mx = max(mx, z[i])
+	}
+	for i := range z {
+		z[i] += sp.c3 * mx
+	}
+}
+
+// qmul sets dst to |Q|·t, rounded up.
+func (sp *sweepPost) qmul(dst, t []float64) {
+	n, q := sp.hs.n, sp.hs.absQT
+	for i := range n {
+		var v float64
+		for k, a := range q[i*n : (i+1)*n] {
+			v += a * t[k]
+		}
+		dst[i] = v * (1 + float64(n+2)*eps())
+	}
+}
+
+func (sp *sweepPost) nsolve(y []float64) {
+	hs, n, t := sp.hs, sp.hs.n, sp.t
+	sp.qinv(y)
+	copy(t, sp.z)
+	u, mult := hs.absFactors()
+	for k := range n - 1 {
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+		t[k+1] += mult[k] * t[k]
+	}
+	for i := n - 1; i >= 0; i-- {
+		row := u[i*n : (i+1)*n]
+		v := t[i]
+		for k := i + 1; k < n; k++ {
+			v += row[k] * t[k]
+		}
+		t[i] = v * row[i] * (1 + float64(n+2)*eps())
+	}
+	sp.qmul(y, t)
+}
+
+func (sp *sweepPost) factorError(dst, y []float64) {
+	hs, n, t := sp.hs, sp.hs.n, sp.t
+	sp.qinv(y)
+	copy(t, sp.z)
+	u, mult := hs.absFactors()
+	for i := range n {
+		row := u[i*n : (i+1)*n]
+		v := t[i] * sqrt2 / row[i]
+		for k := i + 1; k < n; k++ {
+			v += row[k] * t[k]
+		}
+		t[i] = v
+	}
+	for k := n - 2; k >= 0; k-- {
+		t[k+1] += mult[k] * t[k]
+		if hs.swapped[k] {
+			t[k], t[k+1] = t[k+1], t[k]
+		}
+	}
+	sp.qmul(dst, t)
+	g := float64(2*n+4) * eps() * (1 + float64(2*n+4)*eps())
+	for i := range n {
+		var v float64
+		for k, e := range sp.absE4[i*n : (i+1)*n] {
+			v += e * sp.z[k]
+		}
+		dst[i] = g*dst[i] + v*(1+float64(n+2)*eps())
+	}
 }

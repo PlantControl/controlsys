@@ -1080,6 +1080,13 @@ const (
 )
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
+	return newHessenbergSweepOf(sys, newBalancedRealization(sys, n, m, p))
+}
+
+// newHessenbergSweepOf is newHessenbergSweep of the realization br of sys,
+// balanced by the caller.
+func newHessenbergSweepOf(sys *System, br balancedRealization) *hessenbergSweep {
+	n, m, p := br.n, br.m, br.p
 	nn := n * n
 	f := make([]float64, 2*nn+n*m+2*p*n)
 	c := make([]complex128, nn+3*n+3*n*m)
@@ -1093,7 +1100,7 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 		c = c[k:]
 		return out
 	}
-	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p), sys: sys}
+	hs := &hessenbergSweep{balancedRealization: br, sys: sys}
 	hs.q, hs.h, hs.bt, hs.ct, hs.ctw = take(nn), take(nn), take(n*m), take(p*n), take(p*n)
 	hs.u, hs.inv, hs.mult, hs.shift = ctake(nn), ctake(n), ctake(n), ctake(n)
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
