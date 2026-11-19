@@ -1,6 +1,9 @@
 package controlsys
 
 import (
+	"math"
+	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -49,4 +52,97 @@ func TestTransferFunctionFoldUnderflowingEinvBUnverified(t *testing.T) {
 	}
 	res, err := sys.TransferFunction(nil)
 	requireTFWithinTermsOrUnverified(t, sys, res, err)
+}
+
+// TestExplicitFastTierVerifiedPointsWithinTerms: at every point the
+// explicit fast tier verifies (explicitFastTier.verify) the transfer
+// function, divided at 320 bits, is within √ε·max(scale, T) of the exact
+// response (exactPencilAt), T the entry's exact terms, on random dense
+// non-symmetric models, continuous and discrete, with and without a badly
+// scaled diagonal similarity.
+func TestExplicitFastTierVerifiedPointsWithinTerms(t *testing.T) {
+	tol := math.Sqrt(eps())
+	verified := 0
+	for seed := range uint64(24) {
+		rng := rand.New(rand.NewPCG(seed, 0x5f7))
+		n, m, p := 2+rng.IntN(6), 1+rng.IntN(2), 1+rng.IntN(2)
+		a, b, c, d := make([]float64, n*n), make([]float64, n*m), make([]float64, p*n), make([]float64, p*m)
+		for i := range a {
+			a[i] = rng.NormFloat64() / math.Sqrt(float64(n))
+		}
+		for i := range b {
+			b[i] = rng.NormFloat64()
+		}
+		for i := range c {
+			c[i] = rng.NormFloat64()
+		}
+		for i := range d {
+			d[i] = rng.NormFloat64()
+		}
+		if seed%2 == 1 {
+			sc := make([]float64, n)
+			for i := range sc {
+				sc[i] = math.Pow(10, 6*(2*rng.Float64()-1))
+			}
+			for i := range n {
+				for j := range n {
+					a[i*n+j] *= sc[i] / sc[j]
+				}
+				for j := range m {
+					b[i*m+j] *= sc[i]
+				}
+				for j := range p {
+					c[j*n+i] /= sc[i]
+				}
+			}
+		}
+		dt := 0.0
+		if seed%3 == 2 {
+			dt = 0.1
+			for i := range a {
+				a[i] *= 0.5
+			}
+		}
+		sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(p, n, c), mat.NewDense(p, m, d), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if res == nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		pencil := identityPencil(sys)
+		roots, _, _, _, ok := tfShape(res.TF)
+		if !ok {
+			continue
+		}
+		ft := newExplicitFastTier(sys, newTFRows(res.TF))
+		for _, s := range descriptorTFPoints(pencil, roots) {
+			if !ft.verify(s) {
+				continue
+			}
+			verified++
+			ur, ui := exactPencilAt(pencil, s)
+			if ur == nil {
+				t.Fatalf("seed %d: verified a pole at %v", seed, s)
+			}
+			for i := range p {
+				r, g, T := make([]complex128, m), make([]complex128, m), make([]float64, m)
+				scale := 0.0
+				for j := range m {
+					r[j], _ = tfEntryAt(res.TF.Num[i][j], res.TF.Den[i], s)
+					g[j], T[j] = exactEntry(pencil, ur, ui, i, j)
+					scale = math.Max(scale, math.Max(cmplx.Abs(r[j]), cmplx.Abs(g[j])))
+				}
+				for j := range m {
+					if q := (cmplx.Abs(r[j]-g[j]) - 4*eps()*(cmplx.Abs(r[j])+cmplx.Abs(g[j]))) / (tol * math.Max(scale, T[j])); q > 1 {
+						t.Fatalf("seed %d: verified %v at %v, %.3g× √ε·max(scale, T) off", seed, r[j], s, q)
+					}
+				}
+			}
+		}
+	}
+	if verified == 0 {
+		t.Fatal("no point verified")
+	}
 }

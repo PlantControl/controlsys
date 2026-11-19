@@ -12,7 +12,8 @@ import (
 // descriptor (A, B, C, D, I) when explicit. Each point is first tried by
 // the fast tier (explicitFastTier) on the explicit model, which only
 // verifies; a point it leaves undecided goes to the pencil judge
-// (judgeDescriptorCached), which alone refutes. The fold's model is
+// (judgeDescriptorCached), which alone refutes, the points after a refuted
+// one in a batch left unjudged. The fold's model is
 // (E⁻¹A, E⁻¹B, C, D) as ToExplicit forms it, and the fast tier runs on it
 // only when foldWithinRounding charges its whole residual to one
 // ε-rounding of A and B; otherwise every point goes to the pencil judge.
@@ -20,28 +21,22 @@ func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilC
 	if n, m, p := sys.Dims(); n == 0 || m == 0 || p == 0 {
 		return true
 	}
-	pencil, model := identityPencil(sys), sys
-	if route == tfRouteFold {
-		ex, k, err := sys.explicitForm("TransferFunction")
-		if err != nil || !foldWithinRounding(sys, ex, k) {
-			return descriptorTFVerifiedCached(sys, tf, c)
-		}
-		pencil, model = sys, ex
-	} else {
-		c = nil
-	}
 	if !tfVerdictMemo {
-		v, _, _ := explicitTFJudgeWhy(pencil, model, tf, c, route == tfRouteExplicit)
+		v, _, _ := explicitRouteJudgeWhy(sys, route, tf, c)
 		return v
 	}
-	key := tfVerdictKey(pencil, tf)
+	keySys := sys
+	if route == tfRouteExplicit {
+		keySys = identityPencil(sys)
+	}
+	key := tfVerdictKey(keySys, tf)
 	tfVerdicts.Lock()
 	v, ok := tfVerdicts.m[key]
 	tfVerdicts.Unlock()
 	if ok {
 		return v
 	}
-	v, _, _ = explicitTFJudgeWhy(pencil, model, tf, c, route == tfRouteExplicit)
+	v, _, _ = explicitRouteJudgeWhy(sys, route, tf, c)
 	tfVerdicts.Lock()
 	if tfVerdicts.m == nil || len(tfVerdicts.m) >= tfVerdictMemoSize {
 		tfVerdicts.m = make(map[string]bool)
@@ -49,6 +44,21 @@ func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilC
 	tfVerdicts.m[key] = v
 	tfVerdicts.Unlock()
 	return v
+}
+
+// explicitRouteJudgeWhy is explicitTFVerified unmemoized, also saying why
+// tf is not verified (descriptorTFJudgeWhy), prefixed "pencil: " where the
+// fold's gate (foldWithinRounding) sends every point to the pencil judge.
+func explicitRouteJudgeWhy(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) (bool, []int, string) {
+	if route == tfRouteExplicit {
+		return explicitTFJudgeWhy(identityPencil(sys), sys, tf, nil, true)
+	}
+	ex, k, err := sys.explicitForm("TransferFunction")
+	if err != nil || !foldWithinRounding(sys, ex, k) {
+		v, ref, why := descriptorTFJudgeWhy(sys, tf, c)
+		return v, ref, "pencil: " + why
+	}
+	return explicitTFJudgeWhy(sys, ex, tf, c, false)
 }
 
 // explicitTFJudgeWhy is descriptorTFJudgeWhy of tf against the descriptor
@@ -67,18 +77,13 @@ func explicitTFJudgeWhy(pencil, model *System, tf *TransferFunc, c *pencilCache,
 				fast = newExplicitFastTier(model, rows)
 			}
 			out := make([]descriptorTFPoint, len(pts))
-			var rest []complex128
-			var at []int
 			for k, s := range pts {
 				if fast.verify(s) {
 					out[k] = descriptorTFPoint{determined: true, verified: true}
 					continue
 				}
-				rest, at = append(rest, s), append(at, k)
-			}
-			if len(rest) > 0 {
-				for q, jp := range judge(rest) {
-					out[at[q]] = jp
+				if out[k] = judge([]complex128{s})[0]; out[k].refuted {
+					break
 				}
 			}
 			return out
@@ -121,7 +126,9 @@ func identityInfinityRefutes(sys *System, tf *TransferFunc, c *pencilCache) bool
 			off := len(den) - len(num)
 			t0 := 0.0
 			if off == 0 && len(num) > 0 {
-				t0 = num[0] / den[0]
+				if t0 = num[0] / den[0]; t0 == 0 {
+					return exact()
+				}
 			}
 			d := sys.D.At(i, j)
 			lhs, rhs := math.Abs(t0-d), tol*math.Max(math.Abs(t0), math.Abs(d))+eps()*math.Abs(d)/(1-eta)
@@ -136,7 +143,9 @@ func identityInfinityRefutes(sys *System, tf *TransferFunc, c *pencilCache) bool
 			}
 			t1 := 0.0
 			if off == 1 && len(num) > 0 {
-				t1 = num[0] / den[0]
+				if t1 = num[0] / den[0]; t1 == 0 {
+					return exact()
+				}
 			}
 			var g compensatedSum
 			T := 0.0
@@ -179,9 +188,10 @@ func identityPencil(sys *System) *System {
 // ε|B|, the residuals formed in compensated arithmetic with their
 // evaluation bound counted, each row of E and column of the solution
 // scaled by a power of two so that no product over- or underflows; false
-// where a scaling is inexact. A zero entry of A or B allows no residual.
+// where a scaling is inexact, or where C·2⁻ᵏ and D are not the stored C
+// and D exactly. A zero entry of A or B allows no residual.
 func foldWithinRounding(sys, ex *System, k int) bool {
-	n, m, _ := sys.Dims()
+	n, m, p := sys.Dims()
 	e := denseData(sys.E)
 	eExp := make([]int, n)
 	es := make([]float64, n*n)
@@ -230,6 +240,18 @@ func foldWithinRounding(sys, ex *System, k int) bool {
 		}
 		return true
 	}
+	for i := range p {
+		for l := range n {
+			if v := sys.C.At(i, l); ex.C.At(i, l) != math.Ldexp(v, -k) || !exactLdexp(v, -k) {
+				return false
+			}
+		}
+		for j := range m {
+			if ex.D.At(i, j) != sys.D.At(i, j) {
+				return false
+			}
+		}
+	}
 	return check(denseData(ex.A), denseData(sys.A), n, 0) && check(denseData(ex.B), denseData(sys.B), m, k)
 }
 
@@ -261,9 +283,10 @@ func scaledExact(v float64, k int) (float64, bool) {
 // (sI − Â)⁻¹, by the comparison matrices of the factors (termsCert step 3),
 // so that |G − ĝ| ≤ δ = |ĉᵢ|·|M|Σⱼ|rⱼ| + o for ĝ = ĉᵢx̂ⱼ + d formed in
 // compensated arithmetic, o its rounding bound. An entry verifies when
-// |ĝ − t| + δ + β ≤ √ε·scale, t the transfer function's value with error
-// bound β (tfRows.bounded) and scale the least the row's largest |G| or |t|
-// can be; a point verifies when all its entries do. It never refutes: a
+// |ĝ − t| + δ + β ≤ √ε·max(scale, T), t the transfer function's value with
+// error bound β (tfRows.bounded), scale the least the row's largest |G| or
+// |t| can be and T the least the entry's terms Σ|ĉᵢ||x| + |d| can be
+// (|x| ≥ |x̂| − |M|Σⱼ|rⱼ|); a point verifies when all its entries do. It never refutes: a
 // point the sweep does not solve (a refinement stall, an underflowing
 // state, a singular pivot) or whose bound does not verify is left to the
 // pencil judge.
@@ -276,6 +299,7 @@ type explicitFastTier struct {
 	r, g    []complex128
 	beta    []float64
 	delta   []float64
+	tlo     []float64
 }
 
 func newExplicitFastTier(sys *System, rows tfRows) *explicitFastTier {
@@ -285,7 +309,7 @@ func newExplicitFastTier(sys *System, rows tfRows) *explicitFastTier {
 		dst: make([]complex128, p*m), xf: make([]complex128, n*m),
 		rho: make([]float64, n), tw: make([]float64, n),
 		r: make([]complex128, m), beta: make([]float64, m),
-		g: make([]complex128, m), delta: make([]float64, m)}
+		g: make([]complex128, m), delta: make([]float64, m), tlo: make([]float64, m)}
 	if n == 0 || hs.nonFinite {
 		return f
 	}
@@ -401,11 +425,12 @@ func (f *explicitFastTier) entries(s complex128) bool {
 		for j := range m {
 			x := f.xf[j*n : (j+1)*n]
 			var re, im compensatedSum
-			mag := 0.0
+			mag, tlo := 0.0, 0.0
 			for k, c := range cr {
 				re.addProd(c, real(x[k]))
 				im.addProd(c, imag(x[k]))
 				mag += math.Abs(c) * cabs1(x[k])
+				tlo += math.Abs(c) * math.Max(termsAbs(x[k])*(1-2*termsEps)-f.rho[k], 0)
 			}
 			d := 0.0
 			if hs.d != nil {
@@ -415,10 +440,11 @@ func (f *explicitFastTier) entries(s complex128) bool {
 			g := complex(re.value(), im.value())
 			o := dot2Err(n+2)*(mag+math.Abs(d))*(1+float64(n+4)*termsEps) + termsEps*cabs1(g) + float64(4*n+16)*0x1p-1074
 			f.g[j], f.delta[j] = g, w+o
+			f.tlo[j] = (tlo + math.Abs(d)) * (1 - 2*float64(n+2)*termsEps)
 			scale = math.Max(scale, math.Max(cmplx.Abs(f.r[j])-f.beta[j], cmplx.Abs(g)-f.delta[j]))
 		}
-		thr := tol * scale * (1 - 8*termsEps)
 		for j := range m {
+			thr := tol * math.Max(scale, f.tlo[j]) * (1 - 8*termsEps)
 			lhs := (cmplx.Abs(f.g[j]-f.r[j])*(1+2*termsEps) + f.delta[j] + f.beta[j]) * (1 + 2*termsEps)
 			if !(lhs <= thr) {
 				return false
