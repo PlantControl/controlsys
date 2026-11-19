@@ -72,11 +72,16 @@ func explicitTFJudgeWhy(pencil, model *System, tf *TransferFunc, c *pencilCache,
 	var fast *explicitFastTier
 	mk := func(poles []complex128) pointJudge {
 		judge := slow(poles)
+		var buf []descriptorTFPoint
 		return func(pts []complex128) []descriptorTFPoint {
 			if fast == nil {
 				fast = newExplicitFastTier(model, rows)
 			}
-			out := make([]descriptorTFPoint, len(pts))
+			if cap(buf) < len(pts) {
+				buf = make([]descriptorTFPoint, len(pts))
+			}
+			out := buf[:len(pts)]
+			clear(out)
 			for k, s := range pts {
 				if fast.verify(s) {
 					out[k] = descriptorTFPoint{determined: true, verified: true}

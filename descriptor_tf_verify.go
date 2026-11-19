@@ -1272,7 +1272,7 @@ func descriptorScheduleWhy(sys *System, tf *TransferFunc, mk func(poles []comple
 	}
 	judge := mk(poles)
 	need := n + nf + polyDeg + 1
-	seen := make(map[complex128]bool)
+	seen := make(map[complex128]bool, 128)
 	var refuted []int
 	why := ""
 	verified := 0
