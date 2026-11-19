@@ -37,18 +37,24 @@ type refinedGramian struct {
 	ax       []dd
 }
 
-// newRefinedGramian solves and refines X in float64. ok is false when the
-// corrections do not fall below gramianRefineAccept relative to X: the
-// equation is then too ill-conditioned for X to be accurate in float64.
-func newRefinedGramian(A *mat.Dense, f []float64, k int, discrete bool) (g *refinedGramian, ok bool, err error) {
+// newRefinedGramian solves and refines X in float64. With transposeOf set,
+// A is the transpose of transposeOf's matrix and its Schur form is derived
+// from transposeOf's instead of computed. ok is false when the corrections
+// do not fall below gramianRefineAccept relative to X: the equation is then
+// too ill-conditioned for X to be accurate in float64.
+func newRefinedGramian(A *mat.Dense, f []float64, k int, discrete bool, transposeOf *schurLyapunov) (g *refinedGramian, ok bool, err error) {
 	n, _ := A.Dims()
 	nn := n * n
 	slab := make([]float64, 6*nn+2*n)
 	take := func(k int) []float64 { t := slab[:k:k]; slab = slab[k:]; return t }
-	ws := &LyapunovWorkspace{aData: take(nn), wr: take(n), wi: take(n), vs: take(nn), tmp: take(nn)}
-	s, err := newSchurLyapunov(A, n, discrete, ws)
-	if err != nil {
-		return nil, false, err
+	var s schurLyapunov
+	if transposeOf != nil {
+		s = transposeOf.transposed(take(nn), take(nn), take(nn))
+	} else {
+		ws := &LyapunovWorkspace{aData: take(nn), wr: take(n), wi: take(n), vs: take(nn), tmp: take(nn)}
+		if s, err = newSchurLyapunov(A, n, discrete, ws); err != nil {
+			return nil, false, err
+		}
 	}
 	g = &refinedGramian{a: A, f: f, n: n, k: k, discrete: discrete, schur: s,
 		x: take(nn), r: take(nn), d: take(nn)}
@@ -84,10 +90,28 @@ func newRefinedGramian(A *mat.Dense, f []float64, k int, discrete bool) (g *refi
 	return g, corr <= gramianRefineAccept, nil
 }
 
+// transposed returns the Schur form of Aᵀ from A = U·T·Uᵀ: with J the
+// reversal permutation, Aᵀ = (U·J)·(J·Tᵀ·J)·(U·J)ᵀ, and J·Tᵀ·J is upper
+// quasi-triangular in standard form. t, u and tmp are n×n storage.
+func (s *schurLyapunov) transposed(t, u, tmp []float64) schurLyapunov {
+	n := s.n
+	for i := range n {
+		for j := range n {
+			t[i*n+j] = s.t[(n-1-j)*n+(n-1-i)]
+			u[i*n+j] = s.u[i*n+(n-1-j)]
+		}
+	}
+	return schurLyapunov{n: n, discrete: s.discrete, t: t, u: u, tmp: tmp}
+}
+
 // correction solves for the correction d of X (plus lo when not nil) and
 // returns ‖d‖/‖X‖.
 func (g *refinedGramian) correction(lo []float64) (float64, error) {
-	lyapResidualDD(g.a, g.x, lo, g.f, g.k, g.discrete, g.ax, g.r)
+	if lo == nil {
+		lyapResidualDot2(g.a, g.x, g.f, g.k, g.discrete, g.ax, g.r)
+	} else {
+		lyapResidualDD(g.a, g.x, lo, g.f, g.k, g.discrete, g.ax, g.r)
+	}
 	if err := g.schur.solve(g.r, g.n, g.d); err != nil {
 		return 0, err
 	}
@@ -212,6 +236,111 @@ func lyapResidualDD(A *mat.Dense, x, lo, f []float64, k int, discrete bool, ax [
 				s = s.add(ddProd(f[i*k+l], f[j*k+l]))
 			}
 			v := s.hi + s.lo
+			r[i*n+j] = v
+			r[j*n+i] = v
+		}
+	}
+}
+
+// lyapResidualDot2 is lyapResidualDD of X = x, accumulated as compensated
+// dot products (Ogita–Rump–Oishi Dot2: FMA TwoProduct and TwoSum, errors
+// summed in float64), accurate as if computed in twice the working
+// precision. The float64 conversions keep products from fusing.
+func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []dd, r []float64) {
+	n, _ := A.Dims()
+	aRaw := A.RawMatrix()
+	a, lda := aRaw.Data, aRaw.Stride
+	if discrete {
+		for i := range n {
+			ai := a[i*lda : i*lda+n]
+			for j := range n {
+				var p, e float64
+				for l, av := range ai {
+					xv := x[l*n+j]
+					h := float64(av * xv)
+					lo := math.FMA(av, xv, -h)
+					s := p + h
+					bb := s - p
+					e += ((p - (s - bb)) + (h - bb)) + lo
+					p = s
+				}
+				ax[i*n+j] = dd{p, e}
+			}
+		}
+		for i := range n {
+			axi := ax[i*n : i*n+n]
+			fi := f[i*k : i*k+k]
+			for j := i; j < n; j++ {
+				aj := a[j*lda : j*lda+n]
+				var p, e float64
+				for l, y := range axi {
+					av := aj[l]
+					h := float64(y.hi * av)
+					lo := math.FMA(y.hi, av, -h)
+					s := p + h
+					bb := s - p
+					e += ((p - (s - bb)) + (h - bb)) + lo + y.lo*av
+					p = s
+				}
+				{
+					h := -x[i*n+j]
+					s := p + h
+					bb := s - p
+					e += (p - (s - bb)) + (h - bb)
+					p = s
+				}
+				fj := f[j*k : j*k+k]
+				for l, fv := range fi {
+					gv := fj[l]
+					h := float64(fv * gv)
+					lo := math.FMA(fv, gv, -h)
+					s := p + h
+					bb := s - p
+					e += ((p - (s - bb)) + (h - bb)) + lo
+					p = s
+				}
+				v := p + e
+				r[i*n+j] = v
+				r[j*n+i] = v
+			}
+		}
+		return
+	}
+	for i := range n {
+		ai := a[i*lda : i*lda+n]
+		xi := x[i*n : i*n+n]
+		fi := f[i*k : i*k+k]
+		for j := i; j < n; j++ {
+			aj := a[j*lda : j*lda+n]
+			xj := x[j*n : j*n+n]
+			var p, e float64
+			for l, av := range ai {
+				xv := xj[l]
+				h := float64(av * xv)
+				lo := math.FMA(av, xv, -h)
+				s := p + h
+				bb := s - p
+				e += ((p - (s - bb)) + (h - bb)) + lo
+				p = s
+				av, xv = aj[l], xi[l]
+				h = float64(av * xv)
+				lo = math.FMA(av, xv, -h)
+				s = p + h
+				bb = s - p
+				e += ((p - (s - bb)) + (h - bb)) + lo
+				p = s
+			}
+			fj := f[j*k : j*k+k]
+			for l, fv := range fi {
+				gv := fj[l]
+				h := float64(fv * gv)
+				lo := math.FMA(fv, gv, -h)
+				s := p + h
+				bb := s - p
+				e += ((p - (s - bb)) + (h - bb)) + lo
+				p = s
+			}
+			v := p + e
 			r[i*n+j] = v
 			r[j*n+i] = v
 		}

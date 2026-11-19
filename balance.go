@@ -137,11 +137,11 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	A := mat.NewDense(n, n, aData)
 	At := mat.NewDense(n, n, at)
 	discrete := !sys.IsContinuous()
-	gc, err := balrealGramian(A, fb, m, discrete, "controllability")
+	gc, err := balrealGramian(A, fb, m, discrete, "controllability", nil)
 	if err != nil {
 		return nil, err
 	}
-	gob, err := balrealGramian(At, fc, p, discrete, "observability")
+	gob, err := balrealGramian(At, fc, p, discrete, "observability", &gc.schur)
 	if err != nil {
 		return nil, err
 	}
@@ -290,10 +290,11 @@ func Balreal(sys *System) (*BalrealResult, error) {
 const hsvDDGate = 1e-12
 
 // balrealGramian returns the refined gramian of A and the n×k right-hand
-// factor f, or ErrSingularEquation when refinement cannot make it accurate.
-func balrealGramian(A *mat.Dense, f []float64, k int, discrete bool, name string) (*refinedGramian, error) {
+// factor f, or ErrSingularEquation when refinement cannot make it accurate;
+// transposeOf is as for newRefinedGramian.
+func balrealGramian(A *mat.Dense, f []float64, k int, discrete bool, name string, transposeOf *schurLyapunov) (*refinedGramian, error) {
 	n, _ := A.Dims()
-	g, ok, err := newRefinedGramian(A, f, k, discrete)
+	g, ok, err := newRefinedGramian(A, f, k, discrete, transposeOf)
 	if err != nil {
 		return nil, fmt.Errorf("Balreal: %s gramian: %w", name, err)
 	}
