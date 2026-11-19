@@ -311,7 +311,7 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 // error wrapping ErrAccuracyUnverified. Delayed and LFT models keep the transfer-function
 // roots with no such certificate.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
-	tfResult, err := sys.TransferFunction(opts)
+	tfResult, err := sys.transferFunction(opts, false)
 	if err != nil {
 		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}

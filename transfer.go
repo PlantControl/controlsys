@@ -216,6 +216,13 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // grows with the number of candidates tried. The exact tier ignores the
 // TransferFuncOpts tolerances.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	return sys.transferFunction(opts, true)
+}
+
+// transferFunction is TransferFunction; without certify the explicit and
+// E⁻¹-fold routes are returned uncertified with nil, for ZPKModel, which
+// certifies its own form.
+func (sys *System) transferFunction(opts *TransferFuncOpts, certify bool) (*TransferFuncResult, error) {
 	if err := requireFiniteSystem("TransferFunction", sys); err != nil {
 		return nil, err
 	}
@@ -228,7 +235,7 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 		if opts == nil && (rg.mainRes != nil || rg.mainErr != nil) {
 			res, certified, err = rg.mainRes, rg.certified, rg.mainErr
 		} else {
-			res, certified, err = sys.transferRationalCertified(opts, newPencilCache())
+			res, certified, err = sys.transferRationalChecked(opts, newPencilCache(), certify)
 		}
 		switch {
 		case err != nil && rg.kind == regimeNone && rg.hasV:
@@ -258,9 +265,19 @@ func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult
 // route's value is returned with certified false. A model that is not a
 // descriptor, and the E⁻¹ fold, are returned certified.
 func (sys *System) transferRationalCertified(opts *TransferFuncOpts, c *pencilCache) (_ *TransferFuncResult, certified bool, _ error) {
+	return sys.transferRationalChecked(opts, c, true)
+}
+
+// transferRationalChecked is transferRationalCertified; without certify
+// the explicit and E⁻¹-fold routes are returned certified unjudged.
+func (sys *System) transferRationalChecked(opts *TransferFuncOpts, c *pencilCache, certify bool) (_ *TransferFuncResult, certified bool, _ error) {
 	res, route, err := sys.transferRationalRoute(opts)
-	if err != nil || route == tfRouteExplicit || route == tfRouteFold {
-		return res, err == nil, err
+	if err != nil {
+		return res, false, err
+	}
+	switch {
+	case route == tfRouteExplicit || route == tfRouteFold:
+		return res, !certify || explicitTFVerified(sys, route, res.TF, c), nil
 	}
 	if descriptorTFVerifiedCached(sys, res.TF, c) {
 		return res, true, nil
