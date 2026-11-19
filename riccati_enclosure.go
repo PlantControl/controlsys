@@ -1327,7 +1327,10 @@ func (r *RiccatiResult) xConfirmed() bool {
 // certified X is kept; a corrected one is replaced by fl(X_c) and its
 // gain once the gain gates certify K with X unchanged (their refinement
 // replaced a certified fl(X_c) by a float64 Newton iterate 1.6e-6 to
-// 3.9e-6 off, zrwreg 20196, 12124), else the given X and K go to tier 2. Without an
+// 3.9e-6 off, zrwreg 20196, 12124), else the given X and K go to tier 2;
+// so does a result carrying a certified EᵀXE (xe), which the X enclosure
+// does not bound: Dlqr formed EᵀXE from the corrected X and E carried X's
+// 4.3e-9 into a Y 1.78e-8 off (rv49 3641). Without an
 // enclosure, tier 2: hewerSolution, then the extended solve as
 // lostCandidateDare runs it, each accepted only at Accuracy 0 (the
 // extended pair replacing X and K unless X is within newtonTol and K
@@ -1350,6 +1353,9 @@ func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *Ric
 	case encCertified:
 		return res
 	case encCorrected:
+		if res.xe != nil {
+			return dareTier2(A, B, Q, R, opts, res)
+		}
 		c := *res
 		symmetrize(xc.RawMatrix().Data, n, n)
 		c.X, c.K = xc, kc
