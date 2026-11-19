@@ -434,7 +434,10 @@ func (d *ddJudge) verdict() probeVerdict {
 // its foot within β_G + β_R of it) the probes keep the band's data slack,
 // and Reduce certifies nothing there: neither the stored model nor the
 // cut places that pole better than its rounding bound. The other shared
-// windows, exempt before, are judged (a contract change).
+// windows, exempt before, are judged (a contract change). Just outside
+// each such axis window the cut is judged and may refute
+// (axisWindowEdges): no probe lies there, and a cut pole further from the
+// model's than the window's bound is wrong there first.
 //
 // A hidden model pole (modelPoles) that is not axisShared is one the cut
 // drops, carries only off its location, or shares where the data place it
