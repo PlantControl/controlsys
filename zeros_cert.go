@@ -351,7 +351,7 @@ func zerosCertDetermined(pt zerosCertPoint) bool {
 type zerosBudget struct{ used, cap int64 }
 
 // zerosWorkCap is the budget of one certification, about 1 s.
-const zerosWorkCap = 250_000_000
+const zerosWorkCap = 260_000_000
 
 // zerosExactPointCost is the fixed charge of one exact point.
 const zerosExactPointCost = 100_000
@@ -1744,11 +1744,15 @@ func certifyZeros(sys *System, res *ZerosResult) (*ZerosResult, error) {
 var certifyZerosHook func(sys *System, base, out *ZerosResult, err error)
 
 func certifyZerosRun(sys *System, res *ZerosResult) (*ZerosResult, error) {
+	return certifyZerosRunB(sys, res, newZerosBudget())
+}
+
+// certifyZerosRunB is certifyZerosRun charging b.
+func certifyZerosRunB(sys *System, res *ZerosResult, b *zerosBudget) (*ZerosResult, error) {
 	n, m, p := sys.Dims()
 	if m != p || n == 0 {
 		return res, nil
 	}
-	b := newZerosBudget()
 	v := zerosVerdictB(sys, res.Zeros, res.Rank, b)
 	if v == zerosCertVerified {
 		return res, nil
