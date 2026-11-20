@@ -135,10 +135,9 @@ func TestModalTruncateRoundsOrderToRepeatedPairCluster(t *testing.T) {
 }
 
 // An exactly repeated pair rotated by random orthogonal Q: whichever copy
-// rounding makes dominant, an Order between the copies keeps both, for a
-// semisimple pair (copies within rounding, one cluster) and a defective
-// one (copies √ε apart, inseparable by Sylvester; an Order inside either
-// copy splits a pair).
+// rounding makes dominant, an Order between or inside the copies keeps
+// both, for a semisimple pair (copies within rounding) and a defective one
+// (copies √ε apart, merged by their eigenvalue condition numbers).
 func TestModalTruncateKeepsExactRepeatedPairWhole(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -147,7 +146,7 @@ func TestModalTruncateKeepsExactRepeatedPairWhole(t *testing.T) {
 		orders   []int
 	}{
 		{"semisimple", 0, 1e-12, []int{3, 4}},
-		{"defective", 1, 1e-6, []int{3}},
+		{"defective", 1, 1e-6, []int{3, 4}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			T := mat.NewDense(6, 6, []float64{

@@ -203,8 +203,10 @@ const modalSeparationBound = 1e5
 // Schur form; mean, score, imag and freq are the mean real part, real part
 // (modulus when discrete), |imaginary part| and frequency (|imaginary
 // part|, or |arg| when discrete) of its eigenvalues, which rounding spreads
-// about the exact ones far less than each copy; unstable and selected
-// (MaxRealPart) are decided by those means; move is the largest rounding
+// about the exact ones far less than each copy; unstable holds when any
+// member is unstable, so a defective copy spread across the stability
+// boundary keeps its cluster; selected (MaxRealPart) holds for unstable
+// clusters and by the mean real part; move is the largest rounding
 // move of a member; pair marks a lone complex-conjugate block whose
 // conjugates are farther apart than their moves (a rounded real double
 // is not a pair).
@@ -322,6 +324,7 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 		c.sizes = append(c.sizes, sizes[i])
 		c.states += sizes[i]
 		c.move = max(c.move, move[i])
+		c.unstable = c.unstable || modalPoleUnstable(l, dt)
 		w := float64(sizes[i])
 		c.mean += w * real(l)
 		c.score += w * cmplx.Abs(l)
@@ -341,9 +344,6 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 		c.freq /= w
 		if dt == 0 {
 			c.score = c.mean
-			c.unstable = c.mean >= 0
-		} else {
-			c.unstable = c.score >= 1
 		}
 		c.selected = c.unstable || threshold && c.mean >= maxRealPart
 		c.pair = len(c.blocks) == 1 && c.sizes[0] == 2 && 2*c.imag > max(tol, 2*modalConditionMerge*c.move)
