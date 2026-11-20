@@ -184,9 +184,11 @@ const modalConditionMerge = 16
 // move of each copy is ~1/m of that, so the cap with modalConditionMerge
 // reaches spreads of 3.2e-4·‖T‖_F (m ≤ 4); eigenvectors are computed only
 // for blocks within that reach of another.
-// Members of a modalClusterTol cluster take no move: their eigenvectors
-// are those of an exactly repeated eigenvalue, whose condition number
-// says nothing about distant eigenvalues.
+// Members of a modalClusterTol cluster take no move when merging: their
+// eigenvectors are those of an exactly repeated eigenvalue, whose
+// condition number says nothing about distant eigenvalues; near the
+// stability boundary they keep it, so a repeat that rounding cannot place
+// on one side counts as on it.
 const modalMoveCap = 1e-5
 
 // modalScoreTieTol is the score difference, relative to ‖T‖_F, below which
@@ -297,7 +299,7 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 	need := make([]bool, len(reps))
 	near := false
 	for i := range reps {
-		if !tight[i] && (sizes[i] == 2 && 2*imag(reps[i]) <= reach || math.Abs(stability(reps[i])-boundary) <= reach) {
+		if !tight[i] && sizes[i] == 2 && 2*imag(reps[i]) <= reach || math.Abs(stability(reps[i])-boundary) <= reach {
 			need[i], near = true, true
 		}
 		for j := i + 1; j < len(reps); j++ {
@@ -308,11 +310,13 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 			}
 		}
 	}
+	boundaryMove := make([]float64, len(reps))
 	if near {
 		kappa := schurEigenvalueConditions(t, n, starts, sizes, need)
 		for i := range move {
+			boundaryMove[i] = min(kappa[i]*eps()*norm.norm(), modalMoveCap*norm.norm())
 			if !tight[i] {
-				move[i] = min(kappa[i]*eps()*norm.norm(), modalMoveCap*norm.norm())
+				move[i] = boundaryMove[i]
 			}
 		}
 		for i := range reps {
@@ -346,7 +350,7 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 		c.sizes = append(c.sizes, sizes[i])
 		c.states += sizes[i]
 		c.move = max(c.move, move[i])
-		c.unstable = c.unstable || stability(l)+modalConditionMerge*move[i] >= boundary-band
+		c.unstable = c.unstable || stability(l)+modalConditionMerge*boundaryMove[i] >= boundary-band
 		w := float64(sizes[i])
 		c.mean += w * real(l)
 		c.score += w * cmplx.Abs(l)
