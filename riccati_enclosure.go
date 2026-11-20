@@ -40,6 +40,7 @@ const encPrec = 256
 // exactly: double-double (encDD) or encPrec bits (encBig).
 type encNum[M any] interface {
 	mul(b M, ta bool) M
+	symT(b M) M
 	add(b M, s float64) M
 	scale(s float64) M
 	t() M
@@ -203,6 +204,26 @@ func matOf(ws *encWS, r, c int) *mat.Dense {
 	return mat.NewDense(r, c, nil)
 }
 
+// symT is aᵀb for a symmetric exact product: the upper triangle, each
+// entry one dot product as mul forms it, mirrored.
+func (a encDD) symT(b encDD) encDD {
+	n := a.c
+	o := newEncDD(a.ws, n, n)
+	for i := range n {
+		for j := i; j < n; j++ {
+			var sh, sl float64
+			for k := range a.r {
+				p := k*a.c + i
+				ph, pl := ddTimes(a.h[p], a.l[p], b.h[k*b.c+j], b.l[k*b.c+j])
+				sh, sl = ddPlus(sh, sl, ph, pl)
+			}
+			o.h[i*n+j], o.l[i*n+j] = sh, sl
+			o.h[j*n+i], o.l[j*n+i] = sh, sl
+		}
+	}
+	return o
+}
+
 func (a encDD) mul(b encDD, ta bool) encDD {
 	ar, ac := a.r, a.c
 	if ta {
@@ -352,6 +373,26 @@ func (a encBig) dd() encDD {
 	return o
 }
 
+// symT is aᵀb for a symmetric exact product: the upper triangle, each
+// entry one dot product as mul forms it, mirrored.
+func (a encBig) symT(b encBig) encBig {
+	n := a.c
+	o := newEncBig(a.ar, n, n)
+	t := a.ar.get()
+	for i := range n {
+		for j := i; j < n; j++ {
+			for k := range a.r {
+				t.Mul(a.d[k*a.c+i], b.d[k*b.c+j])
+				o.d[i*n+j].Add(o.d[i*n+j], t)
+			}
+			if j > i {
+				o.d[j*n+i].Set(o.d[i*n+j])
+			}
+		}
+	}
+	return o
+}
+
 func (a encBig) mul(b encBig, ta bool) encBig {
 	ar, ac := a.r, a.c
 	if ta {
@@ -488,7 +529,7 @@ func (o *encOps[M]) ete(x M) M {
 	if o.eIdent {
 		return x
 	}
-	return o.e.mul(x.mul(o.e, false), true)
+	return o.e.symT(x.mul(o.e, false))
 }
 
 func (o *encOps[M]) acl(k M) M { return o.a.add(o.b.mul(k, false), -1) }
@@ -886,7 +927,7 @@ func encPiecesOf[M encNum[M]](o *encOps[M], c, k M) encPieces[M] {
 		p.rks = p.rks.add(o.s.t(), -1)
 	}
 	cak := c.mul(p.ak, false)
-	p.r = encSym(p.ak.mul(cak, true).add(o.ete(c), -1).add(p.qk, 1))
+	p.r = encSym(p.ak.symT(cak).add(o.ete(c), -1).add(p.qk, 1))
 	p.g = p.rks.add(o.b.mul(cak, true), -1)
 	p.w = encSym(o.r.add(o.b.mul(c.mul(o.b, false), true), 1))
 	return p
@@ -907,7 +948,7 @@ func encXDir[M encNum[M]](o *encOps[M], p encPieces[M], s float64, cat func(a, b
 // N_K(c − D_L) = [[r − A_KᵀD_LA_K + EᵀD_LE, −(g + BᵀD_LA_K)ᵀ], [·,
 // W(c) − BᵀD_LB]].
 func encSDir[M encNum[M]](o *encOps[M], p encPieces[M], du, dl M, cat func(a, b, c M) M) (M, M) {
-	md := func(d M) M { return p.ak.mul(d.mul(p.ak, false), true).add(o.ete(d), -1) }
+	md := func(d M) M { return p.ak.symT(d.mul(p.ak, false)).add(o.ete(d), -1) }
 	zu := encSym(p.r.add(md(du), 1).scale(-1))
 	z11 := encSym(p.r.add(md(dl), -1))
 	g := p.g.add(o.b.mul(dl.mul(p.ak, false), true), 1)
