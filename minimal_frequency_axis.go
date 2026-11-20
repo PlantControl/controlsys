@@ -106,9 +106,12 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 		return false
 	}
 	sided := sys.Dt == 0 && cutoff > 0
-	full, cut := bandResponses(sys, red, pts)
+	full, cut, inRange := bandResponses(sys, red, pts)
 	defer full.release()
 	defer cut.release()
+	if !inRange {
+		return false
+	}
 	var slow, fast int
 	verified := 0
 	isVerified := make([]bool, len(pts))
@@ -857,34 +860,21 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 	return false
 }
 
-// bandResponses returns the bounded responses of sys and red at pts. Where
-// a point of either leaves the double range (inRange; underflow only when
-// 2^(eB+eC) < 1 below), both are formed instead on their balanced
-// realizations with B̂ and Ĉ scaled by the same powers of two, 2^−eB and
-// 2^−eC with 2^eB, 2^eC the scales of sys's largest |B̂_ij| and |Ĉ_ij|,
-// when that is exact for both: every response, bound and term a band
-// judge reads is bilinear in B̂ and Ĉ and the judges compare them only
-// relative to one another, so the verdicts are those of the stored data,
-// computed with the overflow or underflow gone. A point that still
-// overflows is undetermined (classifyProbe).
-func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse) {
+// bandResponses returns the bounded responses of sys and red at pts, and
+// whether every point of both is in the double range (inRange; underflow
+// only when 2^(eB+eC) < 1, 2^eB and 2^eC the scales of sys's largest
+// |B̂_ij| and |Ĉ_ij|). The band refuses a cut whose responses are not:
+// rescaling B̂ and Ĉ by powers of two keeps the stored data exact, but the
+// pole resolutions the band's windows and probes read come from a
+// balancing that saw the unscaled B̂ and Ĉ, so a rescaled point may refute
+// and must never verify, and a band that cannot verify cannot certify.
+func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse, bool) {
 	n, m, p := sys.Dims()
 	nr, _, _ := red.Dims()
 	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
 	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
-	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
-	under := eB+eC < 0
-	if full.inRange(&rf, under) && cut.inRange(&rc, under) {
-		return full, cut
-	}
-	sf, okF := scaledIO(rf, eB, eC)
-	sc, okC := scaledIO(rc, eB, eC)
-	if eB == 0 && eC == 0 || !okF || !okC {
-		return full, cut
-	}
-	full.release()
-	cut.release()
-	return boundedResponseOf(sf, pts), boundedResponseOf(sc, pts)
+	under := maxExponent(rf.b)+maxExponent(rf.c) < 0
+	return full, cut, full.inRange(&rf, under) && cut.inRange(&rc, under)
 }
 
 // inRange reports whether every response and bound at the ok points of b,
@@ -934,26 +924,6 @@ func maxExponent(v []float64) int {
 	}
 	_, e := math.Frexp(mx)
 	return e
-}
-
-// scaledIO is rz with B̂ scaled by 2^−eB and Ĉ by 2^−eC, ok when every
-// entry scales exactly.
-func scaledIO(rz balancedRealization, eB, eC int) (balancedRealization, bool) {
-	scale := func(v []float64, e int) ([]float64, bool) {
-		out := make([]float64, len(v))
-		for i, x := range v {
-			out[i] = math.Ldexp(x, -e)
-			if math.Ldexp(out[i], e) != x {
-				return nil, false
-			}
-		}
-		return out, true
-	}
-	out := rz
-	var okB, okC bool
-	out.b, okB = scale(rz.b, eB)
-	out.c, okC = scale(rz.c, eC)
-	return out, okB && okC
 }
 
 // probeEntryFinite reports whether entry o of full and cut, with deviation
