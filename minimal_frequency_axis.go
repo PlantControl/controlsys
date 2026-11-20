@@ -312,12 +312,15 @@ func (d *ddJudge) judge(full, cut *boundedResponse, s complex128) probeVerdict {
 // bound. The test is tried first on the model's solve stage alone
 // (ddEntrySolve), with comp = 0 and T_G,hi = T̂, either of which only
 // raises its left side or lowers its right: where that passes the full
-// bounds pass too, and their inverse and |L||U| are not formed.
+// bounds pass too, and their inverse and |L||U| are not formed. A cut's
+// response at points of its own (cb ≠ cut) is sharpened for that test
+// before the model's bounds are formed: beside a pole its plain bound is
+// too loose to dismiss the point.
 func (d *ddJudge) refutes(full, cut, cb *boundedResponse, k int, s complex128) bool {
 	if !ddEntrySolve(&full.ev.br, s, &d.w, d.g) {
 		return false
 	}
-	if d.cutCannotRefute(cb, k, false) {
+	if d.cutCannotRefute(cb, k, false) || cb != cut && d.cutCannotRefute(cb, k, true) {
 		return false
 	}
 	if !ddEntryBoundStage(&full.ev.br, &d.w, d.g) {
@@ -434,7 +437,10 @@ func (d *ddJudge) verdict() probeVerdict {
 // its foot within β_G + β_R of it) the probes keep the band's data slack,
 // and Reduce certifies nothing there: neither the stored model nor the
 // cut places that pole better than its rounding bound. The other shared
-// windows, exempt before, are judged (a contract change).
+// windows, exempt before, are judged (a contract change). Just outside
+// each such axis window the cut is judged and may refute
+// (axisWindowEdges): no probe lies there, and a cut pole further from the
+// model's than the window's bound is wrong there first.
 //
 // A hidden model pole (modelPoles) that is not axisShared is one the cut
 // drops, carries only off its location, or shares where the data place it
@@ -488,6 +494,7 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 		}
 		sides = append(sides, len(near))
 	}
+	near = axisWindowEdges(near, win, discrete)
 	if len(near) == 0 {
 		return true
 	}
@@ -504,7 +511,49 @@ func judgeNearPoles(full, cut *boundedResponse, pts []complex128, verified []boo
 			}
 		}
 	}
+	for ; k < len(near); k++ {
+		if judge().refutes(full, cut, &cb, k, near[k]) {
+			return false
+		}
+	}
 	return true
+}
+
+// axisWindowEdges appends to pts the axis points just outside each axis
+// window (poleWindows.axisPole), at axial distance (1+√ε)·radius from its
+// centre on either side (one side for a real centre, its mirror the
+// conjugate), but none inside another window that is not judged. Beyond the
+// window the cut is judged: a cut pole whose exact distance from the
+// model's exceeds the window's bound β_G + β_R + min(|λ_R − λ_G|, β_G +
+// β_R) (a first-order bound for one shared pole, which eigensolver error
+// can exceed, or a cut pole moved off it) deviates there by that distance
+// over the radius, more than tol, and the deviation is largest at
+// the edge, falling as 1/d beyond it, where no probe sees it.
+func axisWindowEdges(pts []complex128, win poleWindows, discrete bool) []complex128 {
+	f := 1 + math.Sqrt(eps())
+	for i, c := range win.centre {
+		if !win.axisPole[i] || imag(c) < 0 {
+			continue
+		}
+		r := f * win.radius[i]
+		var s [2]complex128
+		if discrete {
+			th := cmplx.Phase(c)
+			s = [2]complex128{cmplx.Rect(1, th+r), cmplx.Rect(1, th-r)}
+		} else {
+			s = [2]complex128{complex(0, imag(c)+r), complex(0, imag(c)-r)}
+		}
+		for j, p := range s {
+			if j == 1 && imag(c) == 0 {
+				break
+			}
+			if win.contain(p) && !win.strictlyJudged(p) {
+				continue
+			}
+			pts = append(pts, p)
+		}
+	}
+	return pts
 }
 
 // ddEntryBounds sets e, row-major p×m, to the strictly proper response of
@@ -1024,10 +1073,11 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // ρ_G)) or is, with λ_R, a rounding-level zero (|λ_G|, |λ_R| ≤ β_G ≤ ρ_G:
 // a rotated integrator, which no realization places better than β_G), and
 // is carried by the cut to that pole's resolution (β_R ≤ ρ_G), the disk of
-// radius max(β_G, β_R)/tol about it: there a rounding-level move of either
-// realization's pole changes the response by more than tol, so no
-// realization is determined to tol, however exactly the model carries the
-// pole (a kept integrator that the rotated cut holds only to rounding).
+// radius max(β_G, β_R)/tol about it (an axis window's below): there a
+// rounding-level move of either realization's pole changes the response by
+// more than tol, so no realization is determined to tol, however exactly
+// the model carries the pole (a kept integrator that the rotated cut holds
+// only to rounding).
 // A model pole the cut drops has no window, so a cut that drops a pole
 // within rounding of the axis is judged beside it. One shared pole that
 // refuses forbids the window, so a cut pole smeared off a graded pole
@@ -1049,6 +1099,17 @@ func (w poleWindows) strictlyJudged(s complex128) bool {
 // within rounding of the axis, its foot within β_G + β_R of it, is an axis
 // window (axisPole): the cut may carry that pole anywhere within rounding,
 // and inside the window the stored model is not judged (judgeNearPoles).
+// The exact values of one shared pole lie, to first order, within β_G +
+// β_R of each computed one, so the computed λ_R and λ_G of a pole the cut
+// keeps differ by at most β_G + β_R and the exact ones by at most 2(β_G +
+// β_R); a distance δ the cut shows as a deviation δ/d at distance d
+// relative to the pole's term. The radius of an axis window is therefore
+// δ/tol, δ = β_G + β_R + min(|λ_R − λ_G|, β_G + β_R), the largest over its
+// axis-shared poles: the deviation rounding explains is tol at its edge. A
+// computed distance beyond β_G + β_R is a real move of the pole, which
+// buys no wider window (HO6UP6 condition 4): beyond the edge the cut is
+// judged, at the edge first (axisWindowEdges), where a cut whose exact
+// pole lies further off deviates most.
 // The windows of the other shared poles, exempt before, are now judged.
 // The test reads the computed eigenvalues, whose error can exceed β, so it
 // can err either way: a window wrongly exempted is only left uncertified,
@@ -1075,6 +1136,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 	var with []int
 	for i, lr := range evR {
 		shared, ok, rad, lim, axis := false, true, betaR[i], math.Inf(1), false
+		axisRad := 0.0
 		rR := math.Min(rho0R, 2*float64(nr)*betaR[i])
 		with = with[:0]
 		for j, lg := range mp.evals {
@@ -1091,6 +1153,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 			if mp.foot != nil && cmplx.Abs(mp.foot[j]-lg) <= bG+betaR[i] {
 				with = append(with, j)
 				axis = true
+				axisRad = math.Max(axisRad, bG+betaR[i]+math.Min(cmplx.Abs(lr-lg), bG+betaR[i]))
 			}
 			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
@@ -1101,7 +1164,7 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		}
 		if ok && shared {
 			w.centre = append(w.centre, lr)
-			w.radius = append(w.radius, math.Min(rad/tol, lim))
+			w.radius = append(w.radius, math.Min(math.Max(rad, axisRad)/tol, lim))
 			w.axisPole = append(w.axisPole, axis)
 			for _, j := range with {
 				w.axisShared[j] = true

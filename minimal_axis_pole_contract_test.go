@@ -18,10 +18,20 @@ import (
 // its scale: the points beside a pole within rounding of the axis, which
 // axisProbes drops.
 func contractSweepAtPoles(sys, red *System, tol float64) (float64, complex128) {
+	pts, ok := contractPolesGrid(sys, red)
+	if !ok {
+		return math.Inf(1), 0
+	}
+	return contractWorst(sys, red, pts, tol)
+}
+
+// contractPolesGrid is contractSweepAtPoles' grid; false when the
+// eigenvalues of sys or red do not converge.
+func contractPolesGrid(sys, red *System) ([]complex128, bool) {
 	_, poles, ok := axisProbes(sys, nil)
 	evR, _, okR := eigenRoundingBounds(red.A)
 	if !ok || !okR {
-		return math.Inf(1), 0
+		return nil, false
 	}
 	evs := append(slices.Clone(poles.evals), evR...)
 	var pts []complex128
@@ -58,6 +68,12 @@ func contractSweepAtPoles(sys, red *System, tol float64) (float64, complex128) {
 			}
 		}
 	}
+	return pts, true
+}
+
+// contractWorst is the largest exact |G−R|/(tol·max(scale, terms)) of sys
+// against red over pts, with the point.
+func contractWorst(sys, red *System, pts []complex128, tol float64) (float64, complex128) {
 	worst, at := 0.0, complex128(0)
 	for _, s := range pts {
 		g, r, tg := oracleStrictlyProper(sys, s), oracleStrictlyProper(red, s), oracleTerms(sys, s)

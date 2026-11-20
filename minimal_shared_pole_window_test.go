@@ -211,7 +211,9 @@ func TestReduceSharedPoleWindowKeyedPerPole(t *testing.T) {
 // main accepted, folds the −1 coupling into the integrator and moves it to
 // 5e-5: against the stored model's exact integrator it is off by 0.98 of
 // the response at s = 1.1e-5j (1e4·Tol), below every probe the slow count
-// takes, so no Tol below 1 admits it and Reduce keeps the order.
+// takes, so no Tol below 1 admits it and Reduce keeps the order. Its
+// integrator, 5e-5 from the stored model's exact one, gains no window
+// wider than 2(β_G + β_R)/Tol, so 1.1e-5j stays judged (SSOTWL ruling (a)).
 func TestReduceWindowCapAtExactIntegrator(t *testing.T) {
 	const d = 1e-4
 	fast := math.Ldexp(1, 50)
@@ -266,6 +268,14 @@ func TestReduceWindowCapAtExactIntegrator(t *testing.T) {
 		t.Errorf("Tol 1e-4 split: ok %v", ok)
 	} else if c, at := contractSweep(sys, split.Sys, 1e-4); !(c > 1) {
 		t.Errorf("Tol 1e-4 split off by %.3g·Tol·max(scale, terms) at %v, within the contract", c, at)
+	}
+	if split, ok := reduceAcrossSpectralGap(sys, newRealizationTransformPolicy(sys), &ReduceOpts{Tol: 1e-4}, cutoff); ok && split.Order == 2 {
+		if sw, _ := sharedPoleWindows(poles, split.Sys, 1e-4); sw.contain(1.1e-5i) {
+			t.Errorf("Tol 1e-4 split: a window about its moved integrator covers 1.1e-5j: centres %v radii %v", sw.centre, sw.radius)
+		}
+		if x := axisWindowRadiusExcess(t, sys, split.Sys, 1e-4); x > 1 {
+			t.Errorf("Tol 1e-4 split: axis window radius %.3g·2(β_G + β_R)/Tol", x)
+		}
 	}
 	for _, tc := range []struct {
 		opts *ReduceOpts
