@@ -205,10 +205,12 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // IsProper and Step share that verdict for singular E. The E⁻¹ fold
 // returns the explicit model's transfer function, verified as an explicit
 // one when the fold is exactly that of one ε-rounding of A and B
-// (foldWithinRounding), else against the pencil (descriptorTFVerified),
-// and returned with ErrAccuracyUnverified where it does not verify; a nil
-// error then certifies it within terms of an ε-rounding of the stored
-// data. When the reduction does not verify and the
+// (foldWithinRounding), else against the stored pencil with the fold's
+// residual carried into each point's bound (foldBound), points that bound
+// leaves open going to the pencil judge (descriptorTFVerified), and
+// returned with ErrAccuracyUnverified where it does not verify; a nil
+// error then certifies it within terms of the stored data, or of an
+// ε-rounding of it where the fold is one. When the reduction does not verify and the
 // pencil (E singular, not index 1, within a cost cap) has an index ≥ 2
 // chain, the exact rational num/den of the stored data, trimmed to the
 // least degrees whose model is within terms, is tried instead, and when

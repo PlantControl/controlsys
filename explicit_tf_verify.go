@@ -16,9 +16,11 @@ import (
 // verifies; a point it leaves undecided goes to the pencil judge
 // (judgeDescriptorCached), which alone refutes, the points after a refuted
 // one in a batch left unjudged. The fold's model is
-// (E⁻¹A, E⁻¹B, C, D) as ToExplicit forms it, and the fast tier runs on it
-// only when foldWithinRounding charges its whole residual to one
-// ε-rounding of A and B; otherwise every point goes to the pencil judge.
+// (E⁻¹A, E⁻¹B, C, D) as ToExplicit forms it: the fast tier runs on it as
+// is when foldWithinRounding charges its whole residual to one ε-rounding
+// of A and B, else against the stored pencil with that residual carried
+// (foldBound), and only where neither applies does every point go to the
+// pencil judge.
 // A model whose B or C is zero has the response D everywhere, and tf is
 // verified at once when it is D exactly (staticTFExact).
 func explicitTFVerified(sys *System, route tfRoute, tf *TransferFunc, c *pencilCache) bool {
