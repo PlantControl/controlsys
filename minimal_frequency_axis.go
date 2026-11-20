@@ -352,7 +352,7 @@ func (d *ddJudge) verifies(full, cut, cb *boundedResponse, k int, s complex128) 
 }
 
 // cutCannotRefute is refutes' test with cb's bounds at k, sharpened first
-// with sharpen.
+// with sharpen; a non-finite quantity fails the test.
 func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool {
 	if !cb.ok[k] || sharpen && cb.sharp[k] {
 		return false
@@ -368,7 +368,8 @@ func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool
 	}
 	for i := range g {
 		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.ver[o+i])*(1+8*eps()) - g[i].comp
-		if !(up <= d.tol*math.Max(sg, g[i].hi)*(1-8*eps())) {
+		thr := d.tol * math.Max(sg, g[i].hi) * (1 - 8*eps())
+		if !finiteAll(up, thr) || !(up <= thr) {
 			return false
 		}
 	}
@@ -376,7 +377,8 @@ func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool
 }
 
 // cutVerifies is verdict's verification with cb's response and ver bounds
-// at k for the cut's, sharpened first with sharpen.
+// at k for the cut's, sharpened first with sharpen; a non-finite quantity
+// does not verify.
 func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
 	if !cb.ok[k] || sharpen && cb.sharp[k] {
 		return false
@@ -390,26 +392,37 @@ func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
 	for i := range g {
 		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(cb.g[o+i])))
 	}
+	if !isFinite(tol * scale) {
+		return false
+	}
 	for i := range g {
 		lhs := cmplx.Abs(g[i].g-cb.g[o+i]) + g[i].ver + cb.ver[o+i]
-		if !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
+		if !finiteAll(lhs, g[i].lo) || !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
 			return false
 		}
 	}
 	return true
 }
 
-// verdict judges the bounds judge formed.
+// verdict judges the bounds judge formed, an entry or scale with a
+// non-finite quantity as classifyProbe does.
 func (d *ddJudge) verdict() probeVerdict {
 	g, r, tol := d.g, d.r, d.tol
 	scale := 0.0
 	for i := range g {
 		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
 	}
+	if !isFinite(tol * scale) {
+		return probeUninformative
+	}
 	v := probeVerified
 	for i := range g {
 		diff := cmplx.Abs(g[i].g - r[i].g)
 		lhs := diff + g[i].ver + r[i].ver
+		if !finiteAll(lhs, g[i].comp, r[i].comp, g[i].lo, g[i].hi) {
+			v = probeUninformative
+			continue
+		}
 		if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
 			continue
 		}
@@ -742,7 +755,12 @@ const (
 // otherwise both responses are sharpened there before the judgement.
 //
 // A point where GEPP meets an exactly singular model is uninformative, one
-// with a singular cut rejects.
+// with a singular cut rejects. An entry with a non-finite quantity
+// (probeEntryFinite) is undetermined: it neither verifies nor refutes and
+// its point does not verify, while the point's finite entries are judged
+// as before; a point whose tol·scale is not finite is uninformative, as
+// its true scale is unknown. The other judges of the band follow the
+// same rule.
 func classifyProbe(full, cut *boundedResponse, k int, tol float64, inShared bool) probeVerdict {
 	if !full.ok[k] {
 		return probeUninformative
@@ -764,10 +782,17 @@ func classifyProbe(full, cut *boundedResponse, k int, tol float64, inShared bool
 	}
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	scale := probeScale(g, r)
+	if !isFinite(tol * scale) {
+		return probeUninformative
+	}
 	verdict := probeVerified
 	for i, v := range g {
 		gc, rc := full.comp[o+i], cut.comp[o+i]
 		diff := cmplx.Abs(v - r[i])
+		if !probeEntryFinite(full, cut, o+i, diff) {
+			verdict = probeUninformative
+			continue
+		}
 		if diff+full.ver[o+i]+cut.ver[o+i] <= tol*scale {
 			continue
 		}
@@ -790,8 +815,15 @@ func probeRefuted(full, cut *boundedResponse, k int, tol float64, inShared bool)
 	o := k * pm
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	scale := probeScale(g, r)
+	if !isFinite(tol * scale) {
+		return false
+	}
 	for i, v := range g {
-		d := cmplx.Abs(v-r[i]) - full.comp[o+i] - cut.comp[o+i]
+		diff := cmplx.Abs(v - r[i])
+		if !probeEntryFinite(full, cut, o+i, diff) {
+			continue
+		}
+		d := diff - full.comp[o+i] - cut.comp[o+i]
 		if inShared {
 			if d-full.data[o+i]-cut.data[o+i] > tol*scale {
 				return true
@@ -810,12 +842,26 @@ func probeRefuted(full, cut *boundedResponse, k int, tol float64, inShared bool)
 // uninformative.
 func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 	ts := tol * probeScale(g, r)
+	if !isFinite(ts) {
+		return false
+	}
 	for i, v := range g {
-		if cmplx.Abs(v-r[i])-gc[i]-rc[i] > ts {
+		d := cmplx.Abs(v - r[i])
+		if !finiteAll(d, gc[i], rc[i]) {
+			continue
+		}
+		if d-gc[i]-rc[i] > ts {
 			return true
 		}
 	}
 	return false
+}
+
+// probeEntryFinite reports whether entry o of full and cut, with deviation
+// diff = |Ĝ−R̂|, has finite responses, bounds, terms and deviation.
+func probeEntryFinite(full, cut *boundedResponse, o int, diff float64) bool {
+	return finiteAll(diff, full.comp[o], full.ver[o], full.data[o], full.terms[o],
+		cut.comp[o], cut.ver[o], cut.data[o], cut.terms[o])
 }
 
 // probeScale is the largest |Ĝ|, |R̂| of a point's entries.
@@ -867,9 +913,16 @@ func probeMargin(full, cut *boundedResponse, k int, tol float64) (bool, float64)
 	o := k * pm
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	ts := tol * probeScale(g, r)
+	if !isFinite(ts) {
+		return false, math.Inf(-1)
+	}
 	ok, dev := true, math.Inf(-1)
 	for i, v := range g {
 		d, b := cmplx.Abs(v-r[i]), full.ver[o+i]+cut.ver[o+i]
+		if !probeEntryFinite(full, cut, o+i, d) {
+			ok = false
+			continue
+		}
 		ok = ok && d+b <= ts
 		dev = math.Max(dev, d-b)
 	}
