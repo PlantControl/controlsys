@@ -1100,6 +1100,42 @@ func (e *encCentre) testS(du, dl encDD) encTier {
 	return encNone
 }
 
+// zeroExact proves the stabilizing solution exactly 0 at X = 0 with Q, S
+// and K zero (X not measurable against it). Then Q_K = 0, g_K(0) = 0 and
+// −Ric_K(0) = 0 ⪰ 0 exactly: X_s ⪯ 0. W(0) = R ≻ 0 and N_K(−D_L) ≻ 0 for
+// a Stein solution D_L, scaled by a power of two, prove A_K stable and,
+// N_K(−tD_L) being
+// tN_K(−D_L) + (1 − t)·diag(0, R) ≻ 0, X_s ⪰ −tD_L for every t in (0, 1]:
+// X_s = 0.
+func (e *encCentre) zeroExact(Q, S, X, K *mat.Dense) (encTier, bool) {
+	if !allZeroDense(X) || !allZeroDense(K) || !allZeroDense(Q) || S != nil && !allZeroDense(S) {
+		return encNone, false
+	}
+	d := e.d
+	if !e.wPD() {
+		return encNone, false
+	}
+	nrm := d.ws.mat(d.n, d.n)
+	for i := range d.n {
+		nrm.Set(i, i, 1)
+	}
+	dl, ok := d.stein(e.k, nrm)
+	if !ok || !d.exactPD(dl) {
+		return encNone, false
+	}
+	zero := newEncDD(d.ws, d.n, d.n)
+	adu := zero.abs()
+	for k := 0; k <= 52; k += 4 {
+		dk := dl.scale(math.Ldexp(1, -k))
+		adl := dk.abs()
+		_, zl := encSDir(&d.dd, e.p, zero, dk, catDD)
+		if _, hl := d.sdirBounds(e.b, adu, adl, math.Ldexp(1, -106)); encPDDD(zl, hl) {
+			return encTierDD, true
+		}
+	}
+	return encNone, false
+}
+
 // wPD proves W(c) ≻ 0.
 func (e *encCentre) wPD() bool {
 	h := e.d.ws.mat(e.d.m, e.d.m)
@@ -1450,6 +1486,9 @@ func encloseDare(opts *RiccatiOpts, A, B, Q, R, S, E, X, K, dx *mat.Dense) (out 
 	kret := encDDIn(d.ws, K)
 	e0 := d.centre(c, kret)
 	e0.zeroLo = true
+	if t, ok := e0.zeroExact(Q, S, X, K); ok {
+		return encCertified, nil, nil, t
+	}
 	if v, ok := e0.encloseX(X, encDDOnly); ok && v.ret {
 		return encCertified, nil, nil, v.tier
 	}
