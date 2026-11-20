@@ -159,9 +159,7 @@ func TestTransferFunctionKeepsBadlyScaledLeadingCoefficient(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.TransferFunction(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
 	cb := 0.0
 	for k := range 5 {
 		cb += c[5+k] * b[k]

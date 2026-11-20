@@ -61,9 +61,7 @@ func TestTransferFunctionTinyB(t *testing.T) {
 		sys := r.Sys
 		sys.D.Set(0, 0, d)
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireTFWithinTermsOrUnverified(t, sys, res, err)
 		if res.MinimalOrder != 6 {
 			t.Fatalf("D=%g: MinimalOrder %d, want 6", d, res.MinimalOrder)
 		}
@@ -123,9 +121,7 @@ func TestTransferFunctionIOScaleOverflowFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := sys.TransferFunction(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireTFWithinTermsOrUnverified(t, sys, res, err)
 	for _, c := range append(slices.Clone(res.TF.Den[0]), res.TF.Num[0][0]...) {
 		if math.IsInf(c, 0) || math.IsNaN(c) {
 			t.Fatalf("non-finite coefficient: %v / %v", res.TF.Num, res.TF.Den)

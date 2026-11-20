@@ -30,9 +30,7 @@ func TestTransferFunctionSISONumeratorCappedAtRelativeDegree(t *testing.T) {
 			continue
 		}
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
-			t.Fatalf("case %d: %v", i, err)
-		}
+		requireTFWithinTermsOrUnverified(t, sys, res, err)
 		num, den := res.TF.Num[0][0], res.TF.Den[0]
 		if len(num) > len(den)-r {
 			if bad++; bad <= 5 {

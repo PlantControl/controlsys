@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -74,7 +75,13 @@ func illConditionedEDescriptor(t *testing.T, rng *rand.Rand, n, m, p int, k, dt 
 // exact row scaling. The normwise SVD/QZ route of the ill-conditioned-E
 // path would perturb the small entries by ε·‖E‖ (response error ~1e-9), so
 // TransferFunction must judge cond(E) after equilibration (QKYC6R).
-// Oracle: the pencil response of the same data.
+// Oracle: the pencil response of the same data. The E⁻¹ fold's
+// TransferFunction carries the within-terms claim (SL352H, user decision
+// 2026-11-18): a nil error certifies the response within rounding of the
+// stored terms (withinTermsWorst ≤ 1), and a value it cannot certify comes
+// with ErrAccuracyUnverified. Seed 199 (n = 6) misses at s = 0 by 1.95× the
+// threshold through ss→tf cancellation of the constant term, the fold
+// itself exact, and is returned unverified.
 func TestTransferFunctionBadlyScaledDiagonalEStaysExact(t *testing.T) {
 	pts := []complex128{0.05i, 0.37i, complex(0.5, 3), 10i, 100i}
 	for seed := range uint64(600) {
@@ -98,8 +105,13 @@ func TestTransferFunctionBadlyScaledDiagonalEStaysExact(t *testing.T) {
 			t.Fatal(err)
 		}
 		res, err := sys.TransferFunction(nil)
-		if err != nil {
+		if err != nil && (!errors.Is(err, ErrAccuracyUnverified) || res == nil) {
 			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if err == nil {
+			if w, at := withinTermsWorst(t, sys, res.TF, math.Inf(1)); w > 1 {
+				t.Errorf("seed %d (n=%d): nil TF outside terms at %v, %.3g× the threshold", seed, n, at, w)
+			}
 		}
 		worst := 0.0
 		for _, s := range pts {
