@@ -222,7 +222,7 @@ func zerosCertifyB(sys *System, zeros []complex128, mode zerosCertMode, b *zeros
 	var c float64
 	cOK := false
 	run := func() bool {
-		for round := 0; round < 4; round++ {
+		for range 4 {
 			changed := false
 			for q := range cp {
 				if cp[q].state == zerosPtPending && !usable(cp[q]) && !cp[q].pole {
@@ -1659,8 +1659,8 @@ func zerosTier2B(sys *System, rank, baseZ int, rankRefuted bool, b *zerosBudget)
 		return nil, 0, false
 	}
 	exact := -1
-	for d := len(bp.coef) - 1; d >= 0; d-- {
-		if bp.coef[d].Sign() != 0 {
+	for d, v := range slices.Backward(bp.coef) {
+		if v.Sign() != 0 {
 			exact = d
 			break
 		}
