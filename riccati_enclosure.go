@@ -96,9 +96,25 @@ type encWS struct {
 	data   encData
 }
 
-var encWSs = sync.Pool{New: func() any {
+var encWSs = sync.Pool{New: func() any { return newEncWS() }}
+
+func newEncWS() *encWS {
 	return &encWS{sym: map[int]*mat.SymDense{}, chol: map[int]*mat.Cholesky{}}
-}}
+}
+
+// encWSOf is the gate's workspace: the caller's RiccatiWorkspace keeps it
+// across calls, since the pool drops it at every garbage collection;
+// without one, the pool.
+func encWSOf(opts *RiccatiOpts) (ws *encWS, pooled bool) {
+	if opts != nil && opts.Workspace != nil {
+		w := opts.Workspace
+		if w.enc == nil {
+			w.enc = newEncWS()
+		}
+		return w.enc, false
+	}
+	return encWSs.Get().(*encWS), true
+}
 
 // floats returns n zeroed float64s.
 func (w *encWS) floats(n int) []float64 {
@@ -158,7 +174,18 @@ func (w *encWS) cholesky(n int) *mat.Cholesky {
 	return c
 }
 
-func (w *encWS) reset() { w.ci, w.co, w.dn, w.cn = 0, 0, 0, 0 }
+// reset frees the workspace for the next call, merging the chunks of a
+// call that overflowed the first so that the next one fits in one.
+func (w *encWS) reset() {
+	if w.ci > 0 {
+		t := 0
+		for _, c := range w.chunks {
+			t += len(c)
+		}
+		w.chunks = [][]float64{make([]float64, t)}
+	}
+	w.ci, w.co, w.dn, w.cn = 0, 0, 0, 0
+}
 
 func newEncDD(ws *encWS, r, c int) encDD {
 	if ws != nil {
@@ -488,6 +515,7 @@ type encData struct {
 	bg                     *encOps[encBig]
 	ar                     *encArena
 	ws                     *encWS
+	pooled                 bool
 }
 
 // release returns the encPrec arena and the workspace; no value of d is
@@ -499,15 +527,17 @@ func (d *encData) release() {
 		d.ar, d.bg = nil, nil
 	}
 	if ws := d.ws; ws != nil {
+		pooled := d.pooled
 		ws.reset()
 		*d = encData{}
-		encWSs.Put(ws)
+		if pooled {
+			encWSs.Put(ws)
+		}
 	}
 }
 
-func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
+func newEncData(ws *encWS, pooled bool, A, B, Q, R, S, E *mat.Dense) *encData {
 	n, m := B.Dims()
-	ws := encWSs.Get().(*encWS)
 	if E == nil {
 		E = ws.mat(n, n)
 		for i := range n {
@@ -515,7 +545,7 @@ func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
 		}
 	}
 	d := &ws.data
-	*d = encData{n: n, m: m, A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws}
+	*d = encData{n: n, m: m, A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, pooled: pooled}
 	d.aA, d.aB, d.aQ, d.aR, d.aE = d.absOf(A), d.absOf(B), d.absOf(Q), d.absOf(R), d.absOf(E)
 	d.dd = encOps[encDD]{a: encDDIn(ws, A), b: encDDIn(ws, B), q: encDDIn(ws, Q), r: encDDIn(ws, R), e: encDDIn(ws, E), hasS: S != nil, eIdent: isIdentityDescriptor(E)}
 	if S != nil {
@@ -1411,8 +1441,9 @@ const (
 // with a fresh gain. While W(X_c) is not proved positive definite the
 // step takes the returned K, and W-not-PD fails only at the last centre.
 // corrected is fl(X_c) and its gain where X_c, not X, is within budget.
-func encloseDare(A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
-	d := newEncData(A, B, Q, R, S, E)
+func encloseDare(opts *RiccatiOpts, A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
+	ws, pooled := encWSOf(opts)
+	d := newEncData(ws, pooled, A, B, Q, R, S, E)
 	defer d.release()
 	c := encDDIn(d.ws, X)
 	symmetrize(c.h, d.n, d.n)
@@ -1535,7 +1566,7 @@ func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *Ric
 	if res.newtonDelta != nil && mat.Equal(res.X, res.newtonX) {
 		dx = res.newtonDelta
 	}
-	out, xc, kc, _ := encloseDare(A, B, Q, R, S, E, res.X, res.K, dx)
+	out, xc, kc, _ := encloseDare(opts, A, B, Q, R, S, E, res.X, res.K, dx)
 	switch out {
 	case encCertified:
 		return res

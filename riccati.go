@@ -68,6 +68,7 @@ type RiccatiWorkspace struct {
 	gainStep    []float64
 	refine      []float64
 	lyap        *LyapunovWorkspace
+	enc         *encWS
 }
 
 // NewRiccatiWorkspace returns a workspace for problems with up to n states
@@ -3956,7 +3957,10 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		step := problem.newtonStep(x1, xData)
 		if it == 0 {
 			if step <= newtonTol {
-				delta := slices.Clone(problem.lastDelta)
+				var delta []float64
+				if !continuous {
+					delta = slices.Clone(problem.lastDelta)
+				}
 				problem.closedLoopEig(eig)
 				var c1 []float64
 				if !continuous && step > eps() {
@@ -3987,7 +3991,10 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, x2, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
-				delta := slices.Clone(problem.lastDelta)
+				var delta []float64
+				if !continuous {
+					delta = slices.Clone(problem.lastDelta)
+				}
 				if !problem.descriptorGainCertified(continuous, K1, xData, x2, eig) {
 					return nil, fail
 				}
@@ -4000,7 +4007,10 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil {
 				return nil, fail
 			}
-			delta := slices.Clone(problem.lastDelta)
+			var delta []float64
+			if !continuous {
+				delta = slices.Clone(problem.lastDelta)
+			}
 			if !problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
 				return nil, fail
 			}
@@ -4105,7 +4115,9 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 		return nil, err
 	}
 	problem.newtonDelta(x1)
-	problem.lastDelta = append(problem.lastDelta[:0], x1...)
+	if !continuous {
+		problem.lastDelta = append(problem.lastDelta[:0], x1...)
+	}
 	for i, v := range xData {
 		x1[i] += v
 	}

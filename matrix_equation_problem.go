@@ -291,7 +291,7 @@ func (problem *riccatiProblem) scale(opts *RiccatiOpts, costProxy bool) {
 
 // result maps the scaled solution back: X = T·X̂·T, K = K̂·T.
 func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd float64, accuracy int) *RiccatiResult {
-	certDelta := problem.certDelta != nil && slices.Equal(problem.certDeltaX, mat.DenseCopyOf(X).RawMatrix().Data)
+	certDelta := problem.certDelta != nil && denseDataEqual(X, problem.certDeltaX)
 	if t := problem.t; t != nil {
 		n, m := problem.n, problem.m
 		x, k := X.RawMatrix(), K.RawMatrix()
@@ -350,4 +350,19 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 		res.step = problem.poor.step
 	}
 	return res
+}
+
+// denseDataEqual reports whether X's entries, row-major, are d.
+func denseDataEqual(X *mat.Dense, d []float64) bool {
+	r, c := X.Dims()
+	if len(d) != r*c {
+		return false
+	}
+	x := X.RawMatrix()
+	for i := range r {
+		if !slices.Equal(x.Data[i*x.Stride:i*x.Stride+c], d[i*c:(i+1)*c]) {
+			return false
+		}
+	}
+	return true
 }

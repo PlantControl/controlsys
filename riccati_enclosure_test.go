@@ -258,7 +258,7 @@ func TestDareEnclosureTiers(t *testing.T) {
 		if res.newtonDelta != nil && mat.Equal(res.X, res.newtonX) {
 			dx = res.newtonDelta
 		}
-		out, _, _, tier := encloseDare(A, B, Q, R, S, E, res.X, res.K, dx)
+		out, _, _, tier := encloseDare(nil, A, B, Q, R, S, E, res.X, res.K, dx)
 		if out != tc.want || tier != tc.tier {
 			t.Errorf("%s: enclosure %v tier %v, want %v tier %v", tc.c.name, out, tier, tc.want, tc.tier)
 		}
@@ -295,10 +295,10 @@ func TestDareEnclosureAtXAllocationFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, _, _, tier := encloseDare(A, B, Q, R, S, E, res.X, res.K, nil); out != encCertified || tier != encTierDD {
+	if out, _, _, tier := encloseDare(nil, A, B, Q, R, S, E, res.X, res.K, nil); out != encCertified || tier != encTierDD {
 		t.Fatalf("enclosure %v tier %v, want certified in double-double", out, tier)
 	}
-	if n := testing.AllocsPerRun(50, func() { encloseDare(A, B, Q, R, S, E, res.X, res.K, nil) }); n != 0 {
+	if n := testing.AllocsPerRun(50, func() { encloseDare(nil, A, B, Q, R, S, E, res.X, res.K, nil) }); n != 0 {
 		t.Errorf("%v allocations per enclosure at X, want 0", n)
 	}
 }
