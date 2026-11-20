@@ -254,10 +254,14 @@ func rvOracles(cs []rvCase) []rvOra {
 	return oras
 }
 
-// rlrvLimits are base-correct breakaway verdicts logged, not enforced
-// (none since the exact breakaway path; the w17 #58 cancellation class
-// 1328, 1517, 1622, 1794 is resolved exactly).
-var rlrvLimits = map[int]string{}
+// rlrvLimits are base-correct verdicts logged, not enforced. No Breakaway
+// since the exact breakaway path (the w17 #58 cancellation class 1328,
+// 1517, 1622, 1794 is resolved exactly). 1691 (GVD7AS ruling 9): on both
+// arches the within-terms oracle scores base's zeros wrong and the
+// certified ones right, and one zero added in band is refuted.
+var rlrvLimits = map[int]string{
+	1691: "certified zeros 5e-5 from the intended −30 ± 3.75i; an arrival angle 1.3e-3 rad off",
+}
 
 type rlrvGolden struct {
 	Base string            `json:"base"`
@@ -339,8 +343,8 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 				t.Logf("case %d %s/%s: %s differs from base on a float TF that is not the intended one", c.ID, c.Fam, c.Xf, names[k])
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvCen && base&rlrvAsym == 0:
 				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", c.ID, c.Fam, c.Xf, outs[i].Cen, oras[i].I.Centroid)
-			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && sw.limits[c.ID] != "":
-				t.Logf("case %d %s/%s: Breakaway differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, sw.limits[c.ID])
+			case base&m != 0 && bits[i]&m == 0 && sw.limits[c.ID] != "":
+				t.Logf("case %d %s/%s: %s differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, names[k], sw.limits[c.ID])
 			case base&m != 0 && bits[i]&m == 0 && rlswCertifiedCountExempt(sw.golden, c.ID, names[k], len(outs[i].Arr), oras[i].DegN):
 				t.Logf("case %d %s/%s: %s differs from the intended TF's zero count: %s", c.ID, c.Fam, c.Xf, names[k], rlswCertifiedCounts[sw.golden][c.ID].reason)
 			case base&m != 0 && bits[i]&m == 0:
