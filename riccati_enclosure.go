@@ -7,6 +7,7 @@ import (
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack/lapack64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -81,7 +82,7 @@ type encDD struct {
 }
 
 // encWS is the workspace of one gate call: double-double entries, float64
-// matrices and the Cholesky factorizations of the definiteness tests, all
+// matrices and the symmetric scratch of the definiteness tests, all
 // reused from the pool (encWSs) so that a gate passing at X allocates
 // nothing once warm. Values from it die with the call (release).
 type encWS struct {
@@ -92,14 +93,13 @@ type encWS struct {
 	cents  []*encCentre
 	cn     int
 	sym    map[int]*mat.SymDense
-	chol   map[int]*mat.Cholesky
 	data   encData
 }
 
 var encWSs = sync.Pool{New: func() any { return newEncWS() }}
 
 func newEncWS() *encWS {
-	return &encWS{sym: map[int]*mat.SymDense{}, chol: map[int]*mat.Cholesky{}}
+	return &encWS{sym: map[int]*mat.SymDense{}}
 }
 
 // encWSOf is the gate's workspace: the caller's RiccatiWorkspace keeps it
@@ -163,15 +163,6 @@ func (w *encWS) symDense(n int) *mat.SymDense {
 		w.sym[n] = s
 	}
 	return s
-}
-
-func (w *encWS) cholesky(n int) *mat.Cholesky {
-	c, ok := w.chol[n]
-	if !ok {
-		c = new(mat.Cholesky)
-		w.chol[n] = c
-	}
-	return c
 }
 
 // reset frees the workspace for the next call, merging the chunks of a
@@ -719,11 +710,10 @@ func encPDDD(z encDD, h *mat.Dense) bool {
 		return false
 	}
 	var s *mat.SymDense
-	var ch *mat.Cholesky
 	if z.ws != nil {
-		s, ch = z.ws.symDense(n), z.ws.cholesky(n)
+		s = z.ws.symDense(n)
 	} else {
-		s, ch = mat.NewSymDense(n, nil), new(mat.Cholesky)
+		s = mat.NewSymDense(n, nil)
 	}
 	for i := range n {
 		for j := i; j < n; j++ {
@@ -734,7 +724,8 @@ func encPDDD(z encDD, h *mat.Dense) bool {
 			s.SetSym(i, j, v)
 		}
 	}
-	return ch.Factorize(s)
+	_, ok := lapack64.Potrf(s.RawSymmetric())
+	return ok
 }
 
 // encPDBig is encPDDD with the factorization in encPrec bits: scaled to
