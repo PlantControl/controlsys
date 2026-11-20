@@ -106,7 +106,7 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 		return false
 	}
 	sided := sys.Dt == 0 && cutoff > 0
-	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
+	full, cut := bandResponses(sys, red, pts)
 	defer full.release()
 	defer cut.release()
 	var slow, fast int
@@ -855,6 +855,86 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 		}
 	}
 	return false
+}
+
+// bandResponses returns the bounded responses of sys and red at pts. Where
+// a point of either leaves the double range, both are formed instead on
+// their balanced realizations with B̂ and Ĉ scaled by the same powers of
+// two, 2^−eB and 2^−eC with 2^eB, 2^eC the scales of sys's largest |B̂_ij|
+// and |Ĉ_ij|, when that is exact for both: every response, bound and term
+// a band judge reads is bilinear in B̂ and Ĉ and the judges compare them
+// only relative to one another, so the verdicts are those of the stored
+// data, computed with the overflow gone. A point that still leaves the
+// range is undetermined (classifyProbe).
+func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse) {
+	n, m, p := sys.Dims()
+	nr, _, _ := red.Dims()
+	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
+	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
+	if full.finite() && cut.finite() {
+		return full, cut
+	}
+	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
+	sf, okF := scaledIO(rf, eB, eC)
+	sc, okC := scaledIO(rc, eB, eC)
+	if eB == 0 && eC == 0 || !okF || !okC {
+		return full, cut
+	}
+	full.release()
+	cut.release()
+	return boundedResponseOf(sf, pts), boundedResponseOf(sc, pts)
+}
+
+// finite reports whether every response and bound at the ok points of b
+// is finite.
+func (b *boundedResponse) finite() bool {
+	pm := b.p * b.m
+	for k, ok := range b.ok {
+		if !ok {
+			continue
+		}
+		for o := k * pm; o < (k+1)*pm; o++ {
+			g := b.g[o]
+			if !finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// maxExponent is the binary exponent e of the largest |v_i|, 2^(e−1) ≤
+// |v_i| < 2^e, 0 for a zero or empty v.
+func maxExponent(v []float64) int {
+	mx := 0.0
+	for _, x := range v {
+		mx = math.Max(mx, math.Abs(x))
+	}
+	if mx == 0 || !isFinite(mx) {
+		return 0
+	}
+	_, e := math.Frexp(mx)
+	return e
+}
+
+// scaledIO is rz with B̂ scaled by 2^−eB and Ĉ by 2^−eC, ok when every
+// entry scales exactly.
+func scaledIO(rz balancedRealization, eB, eC int) (balancedRealization, bool) {
+	scale := func(v []float64, e int) ([]float64, bool) {
+		out := make([]float64, len(v))
+		for i, x := range v {
+			out[i] = math.Ldexp(x, -e)
+			if math.Ldexp(out[i], e) != x {
+				return nil, false
+			}
+		}
+		return out, true
+	}
+	out := rz
+	var okB, okC bool
+	out.b, okB = scale(rz.b, eB)
+	out.c, okC = scale(rz.c, eC)
+	return out, okB && okC
 }
 
 // probeEntryFinite reports whether entry o of full and cut, with deviation
