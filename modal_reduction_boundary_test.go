@@ -55,10 +55,12 @@ func TestModalTruncateKeepsSplitDoubleOnStabilityBoundary(t *testing.T) {
 	})
 }
 
-// A census row (IURGLT) whose close stable pair near the imaginary axis
-// rounds to a split with one copy at Re > 0: the pair stays stable, so the
-// slower stable modes are kept ahead of it.
-func TestModalTruncateKeepsCloseStablePairNearAxisStable(t *testing.T) {
+// A census row (IURGLT) whose close pair near the imaginary axis, at
+// Re = −2^-23 and −2^-39 in the stored data, rounds to copies split by
+// ±1.5e-8 with one at Re > 0: the copy at −2^-39 is within rounding of
+// the axis, so the pair counts as marginal and is kept ahead of the
+// slower stable modes, whichever way rounding splits it.
+func TestModalTruncateKeepsPairWithinRoundingOfAxis(t *testing.T) {
 	sys := modalTestRows(t, []float64{
 		-2.9802322387695312e-08, -2, -0.5, 0, 0, 0, 0,
 		2, -2.9802322387695312e-08, -1, 0, 0, 1, 0,
@@ -68,7 +70,7 @@ func TestModalTruncateKeepsCloseStablePairNearAxisStable(t *testing.T) {
 		0, 0, 0.5, 0, 0, -1.8189894035458565e-12, 0,
 		0, -1, -0.5, 0.5, 0, -1, -1.1920928955078125e-07,
 	}, []float64{1, 0, 0.5, 2, 0, 1, -1}, []float64{-1, 2, 1, 1, -1, 2, 0.5}, []float64{0}, 1, 1, 0)
-	assertModalTruncateKeeps(t, sys, 3, 3, []complex128{-0x1p-30, complex(-0x1p-25, 2), complex(-0x1p-25, -2)}, 1e-12)
+	assertModalTruncateKeeps(t, sys, 3, 4, []complex128{complex(-0x1p-23, 0.5), complex(-0x1p-23, -0.5), complex(-0x1p-39, 0.5), complex(-0x1p-39, -0.5)}, 1e-6)
 }
 
 // Exact integrators rotated by random orthogonal Q: a simple pole at 0 is
