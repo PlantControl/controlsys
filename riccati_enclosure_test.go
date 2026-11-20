@@ -271,3 +271,34 @@ func TestDareEnclosureTiers(t *testing.T) {
 		}
 	}
 }
+
+// dareEnclosureAtXCase is a small row (rv39 1404, n 2, m 1) whose enclosure
+// double-double proves at X with the returned K. Its base Dare took 9 µs,
+// so a gate costing more than that doubled it.
+var dareEnclosureAtXCase = dareFloorCase{name: "rv39:1404", n: 2, m: 1,
+	a: []float64{-0.36099411891775407, -0.3912904258972426, -0.9389618301559354, -0.46258833335301336},
+	b: []float64{0.3286214490966315, -0.6423663925234435},
+	q: []float64{187.97929794822315, -108.20414005361816, -108.20414005361816, 62.28417731386514},
+	r: []float64{0.5282440771379608},
+	s: nil,
+	e: nil,
+}
+
+// TestDareEnclosureAtXAllocationFree: the enclosure at X, certified in
+// double-double, allocates nothing once its pooled workspace is warm.
+func TestDareEnclosureAtXAllocationFree(t *testing.T) {
+	if raceEnabled {
+		t.Skip("sync.Pool drops items under the race detector")
+	}
+	A, B, Q, R, S, E := dareEnclosureAtXCase.dense()
+	res, err := dareInputs(A, B, Q, R, &RiccatiOpts{S: S, E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, _, _, tier := encloseDare(A, B, Q, R, S, E, res.X, res.K, nil); out != encCertified || tier != encTierDD {
+		t.Fatalf("enclosure %v tier %v, want certified in double-double", out, tier)
+	}
+	if n := testing.AllocsPerRun(50, func() { encloseDare(A, B, Q, R, S, E, res.X, res.K, nil) }); n != 0 {
+		t.Errorf("%v allocations per enclosure at X, want 0", n)
+	}
+}

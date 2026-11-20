@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"sync"
 
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -75,18 +77,112 @@ func ddTimes(xh, xl, yh, yl float64) (float64, float64) {
 type encDD struct {
 	r, c int
 	h, l []float64
+	ws   *encWS
 }
 
-func newEncDD(r, c int) encDD {
-	return encDD{r, c, make([]float64, r*c), make([]float64, r*c)}
+// encWS is the workspace of one gate call: double-double entries, float64
+// matrices and the Cholesky factorizations of the definiteness tests, all
+// reused from the pool (encWSs) so that a gate passing at X allocates
+// nothing once warm. Values from it die with the call (release).
+type encWS struct {
+	chunks [][]float64
+	ci, co int
+	dense  []*mat.Dense
+	dn     int
+	cents  []*encCentre
+	cn     int
+	sym    map[int]*mat.SymDense
+	chol   map[int]*mat.Cholesky
+	data   encData
 }
 
-func encDDOf(a *mat.Dense) encDD {
+var encWSs = sync.Pool{New: func() any {
+	return &encWS{sym: map[int]*mat.SymDense{}, chol: map[int]*mat.Cholesky{}}
+}}
+
+// floats returns n zeroed float64s.
+func (w *encWS) floats(n int) []float64 {
+	const chunk = 4096
+	for {
+		if w.ci == len(w.chunks) {
+			w.chunks = append(w.chunks, make([]float64, max(chunk, n)))
+		}
+		c := w.chunks[w.ci]
+		if w.co+n <= len(c) {
+			v := c[w.co : w.co+n : w.co+n]
+			w.co += n
+			clear(v)
+			return v
+		}
+		w.ci, w.co = w.ci+1, 0
+	}
+}
+
+// mat returns a zeroed r×c matrix.
+func (w *encWS) mat(r, c int) *mat.Dense {
+	if w.dn == len(w.dense) {
+		w.dense = append(w.dense, new(mat.Dense))
+	}
+	m := w.dense[w.dn]
+	w.dn++
+	m.Reset()
+	m.ReuseAs(r, c)
+	return m
+}
+
+func (w *encWS) centre() *encCentre {
+	if w.cn == len(w.cents) {
+		w.cents = append(w.cents, new(encCentre))
+	}
+	e := w.cents[w.cn]
+	w.cn++
+	*e = encCentre{}
+	return e
+}
+
+func (w *encWS) symDense(n int) *mat.SymDense {
+	s, ok := w.sym[n]
+	if !ok {
+		s = mat.NewSymDense(n, nil)
+		w.sym[n] = s
+	}
+	return s
+}
+
+func (w *encWS) cholesky(n int) *mat.Cholesky {
+	c, ok := w.chol[n]
+	if !ok {
+		c = new(mat.Cholesky)
+		w.chol[n] = c
+	}
+	return c
+}
+
+func (w *encWS) reset() { w.ci, w.co, w.dn, w.cn = 0, 0, 0, 0 }
+
+func newEncDD(ws *encWS, r, c int) encDD {
+	if ws != nil {
+		return encDD{r, c, ws.floats(r * c), ws.floats(r * c), ws}
+	}
+	return encDD{r, c, make([]float64, r*c), make([]float64, r*c), nil}
+}
+
+func encDDOf(a *mat.Dense) encDD { return encDDIn(nil, a) }
+
+func encDDIn(ws *encWS, a *mat.Dense) encDD {
 	r, c := a.Dims()
-	o := newEncDD(r, c)
+	o := newEncDD(ws, r, c)
 	raw := a.RawMatrix()
 	copyStrided(o.h, c, raw.Data, raw.Stride, r, c)
 	return o
+}
+
+// matOf is a zeroed r×c float64 matrix from ws, else allocated.
+func matOf(ws *encWS, r, c int) *mat.Dense {
+	if ws != nil {
+		return ws.mat(r, c)
+	}
+	return mat.NewDense(r, c, nil)
 }
 
 func (a encDD) mul(b encDD, ta bool) encDD {
@@ -94,7 +190,7 @@ func (a encDD) mul(b encDD, ta bool) encDD {
 	if ta {
 		ar, ac = ac, ar
 	}
-	o := newEncDD(ar, b.c)
+	o := newEncDD(a.ws, ar, b.c)
 	for i := range ar {
 		for j := range b.c {
 			var sh, sl float64
@@ -113,7 +209,7 @@ func (a encDD) mul(b encDD, ta bool) encDD {
 }
 
 func (a encDD) add(b encDD, s float64) encDD {
-	o := newEncDD(a.r, a.c)
+	o := newEncDD(a.ws, a.r, a.c)
 	for i := range a.h {
 		bh, bl := b.h[i], b.l[i]
 		if s != 1 {
@@ -125,7 +221,7 @@ func (a encDD) add(b encDD, s float64) encDD {
 }
 
 func (a encDD) scale(s float64) encDD {
-	o := newEncDD(a.r, a.c)
+	o := newEncDD(a.ws, a.r, a.c)
 	for i := range a.h {
 		o.h[i], o.l[i] = ddTimes(a.h[i], a.l[i], s, 0)
 	}
@@ -133,7 +229,7 @@ func (a encDD) scale(s float64) encDD {
 }
 
 func (a encDD) t() encDD {
-	o := newEncDD(a.c, a.r)
+	o := newEncDD(a.ws, a.c, a.r)
 	for i := range a.r {
 		for j := range a.c {
 			o.h[j*a.r+i], o.l[j*a.r+i] = a.h[i*a.c+j], a.l[i*a.c+j]
@@ -143,19 +239,21 @@ func (a encDD) t() encDD {
 }
 
 func (a encDD) round() *mat.Dense {
-	d := make([]float64, len(a.h))
+	m := matOf(a.ws, a.r, a.c)
+	d := m.RawMatrix().Data
 	for i := range d {
 		d[i] = a.h[i] + a.l[i]
 	}
-	return mat.NewDense(a.r, a.c, d)
+	return m
 }
 
 func (a encDD) abs() *mat.Dense {
-	d := make([]float64, len(a.h))
+	m := matOf(a.ws, a.r, a.c)
+	d := m.RawMatrix().Data
 	for i := range d {
 		d[i] = math.Abs(a.h[i]) + math.Abs(a.l[i])
 	}
-	return mat.NewDense(a.r, a.c, d)
+	return m
 }
 
 type encBig struct {
@@ -225,7 +323,7 @@ func encBigDD(ar *encArena, a encDD) encBig {
 }
 
 func (a encBig) dd() encDD {
-	o := newEncDD(a.r, a.c)
+	o := newEncDD(nil, a.r, a.c)
 	t, hf := a.ar.get(), a.ar.get()
 	for i, v := range a.d {
 		h, _ := v.Float64()
@@ -374,33 +472,71 @@ type encData struct {
 	n, m                   int
 	A, B, Q, R, S, E       *mat.Dense
 	aA, aB, aQ, aR, aS, aE *mat.Dense
+	aSt                    *mat.Dense
 	dd                     encOps[encDD]
 	bg                     *encOps[encBig]
 	ar                     *encArena
+	ws                     *encWS
 }
 
-// release returns the encPrec arena; no encBig of d is used after.
+// release returns the encPrec arena and the workspace; no value of d is
+// used after.
 func (d *encData) release() {
 	if d.ar != nil {
 		d.ar.reset()
 		encArenas.Put(d.ar)
 		d.ar, d.bg = nil, nil
 	}
+	if ws := d.ws; ws != nil {
+		ws.reset()
+		*d = encData{}
+		encWSs.Put(ws)
+	}
 }
 
 func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
 	n, m := B.Dims()
+	ws := encWSs.Get().(*encWS)
 	if E == nil {
-		E = eyeDense(n)
+		E = ws.mat(n, n)
+		for i := range n {
+			E.Set(i, i, 1)
+		}
 	}
-	d := &encData{n: n, m: m, A: A, B: B, Q: Q, R: R, S: S, E: E,
-		aA: absDense(A), aB: absDense(B), aQ: absDense(Q), aR: absDense(R), aE: absDense(E)}
-	d.dd = encOps[encDD]{a: encDDOf(A), b: encDDOf(B), q: encDDOf(Q), r: encDDOf(R), e: encDDOf(E), hasS: S != nil}
+	d := &ws.data
+	*d = encData{n: n, m: m, A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws}
+	d.aA, d.aB, d.aQ, d.aR, d.aE = d.absOf(A), d.absOf(B), d.absOf(Q), d.absOf(R), d.absOf(E)
+	d.dd = encOps[encDD]{a: encDDIn(ws, A), b: encDDIn(ws, B), q: encDDIn(ws, Q), r: encDDIn(ws, R), e: encDDIn(ws, E), hasS: S != nil}
 	if S != nil {
-		d.aS = absDense(S)
-		d.dd.s = encDDOf(S)
+		d.aS = d.absOf(S)
+		d.aSt = d.transposed(d.aS)
+		d.dd.s = encDDIn(ws, S)
 	}
 	return d
+}
+
+// absOf is |a| in the workspace.
+func (d *encData) absOf(a *mat.Dense) *mat.Dense {
+	r, c := a.Dims()
+	o := d.ws.mat(r, c)
+	o.Copy(a)
+	raw := o.RawMatrix().Data
+	for i, v := range raw {
+		raw[i] = math.Abs(v)
+	}
+	return o
+}
+
+// transposed is aᵀ in the workspace.
+func (d *encData) transposed(a *mat.Dense) *mat.Dense {
+	r, c := a.Dims()
+	o := d.ws.mat(c, r)
+	for i := range r {
+		for j := range c {
+			o.Set(j, i, a.At(i, j))
+		}
+	}
+	return o
 }
 
 func (d *encData) big() *encOps[encBig] {
@@ -418,11 +554,16 @@ func (d *encData) big() *encOps[encBig] {
 	return d.bg
 }
 
-func mul3T(a, b, c *mat.Dense) *mat.Dense {
-	var t, o mat.Dense
+// mul3T is aᵀbc as Dense.Mul forms it (Gemm, aᵀ by its Trans flag).
+func (d *encData) mul3T(a, b, c *mat.Dense) *mat.Dense {
+	br, _ := b.Dims()
+	_, cc := c.Dims()
+	_, ac := a.Dims()
+	t := d.ws.mat(br, cc)
 	t.Mul(b, c)
-	o.Mul(a.T(), &t)
-	return &o
+	o := d.ws.mat(ac, cc)
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, a.RawMatrix(), t.RawMatrix(), 0, o.RawMatrix())
+	return o
 }
 
 // psi returns the entrywise magnitudes Ψ of the terms of Ric_K(x),
@@ -443,47 +584,49 @@ func mul3T(a, b, c *mat.Dense) *mat.Dense {
 // gam was first derived for, which double counted A_K's error against
 // the far larger Âᵀ|x|Â under cheap control.
 func (d *encData) psi(ax, ak, ahat *mat.Dense, v float64) (pr, pg, pw *mat.Dense) {
-	ah := mat.DenseCopyOf(d.aA)
-	var bk mat.Dense
+	n, m := d.n, d.m
+	ah := d.ws.mat(n, n)
+	ah.Copy(d.aA)
+	bk := d.ws.mat(n, n)
 	bk.Mul(d.aB, ak)
-	ah.Add(ah, &bk)
+	ah.Add(ah, bk)
 	if ahat == nil {
-		pr = mul3T(ah, ax, ah)
-		pg = mul3T(d.aB, ax, ah)
+		pr = d.mul3T(ah, ax, ah)
+		pg = d.mul3T(d.aB, ax, ah)
 	} else {
-		c1 := float64(d.m+1) / float64(2*(d.n+d.m+8))
-		c2 := 2 * float64(d.m+1) * v
-		pr = mul3T(ahat, ax, ahat)
-		x1 := mul3T(ah, ax, ahat)
+		c1 := float64(m+1) / float64(2*(n+m+8))
+		c2 := 2 * float64(m+1) * v
+		pr = d.mul3T(ahat, ax, ahat)
+		x1 := d.mul3T(ah, ax, ahat)
 		x1.Scale(c1, x1)
 		pr.Add(pr, x1)
-		pr.Add(pr, x1.T())
-		x2 := mul3T(ah, ax, ah)
+		pr.Add(pr, d.transposed(x1))
+		x2 := d.mul3T(ah, ax, ah)
 		x2.Scale(c2, x2)
 		pr.Add(pr, x2)
-		pg = mul3T(d.aB, ax, ahat)
-		g1 := mul3T(d.aB, ax, ah)
+		pg = d.mul3T(d.aB, ax, ahat)
+		g1 := d.mul3T(d.aB, ax, ah)
 		g1.Scale(c1, g1)
 		pg.Add(pg, g1)
 	}
-	pr.Add(pr, mul3T(d.aE, ax, d.aE))
+	pr.Add(pr, d.mul3T(d.aE, ax, d.aE))
 	pr.Add(pr, d.aQ)
-	pr.Add(pr, mul3T(ak, d.aR, ak))
-	rk := mat.NewDense(d.m, d.n, nil)
+	pr.Add(pr, d.mul3T(ak, d.aR, ak))
+	rk := d.ws.mat(m, n)
 	rk.Mul(d.aR, ak)
 	if d.aS != nil {
-		var sk mat.Dense
+		sk := d.ws.mat(n, n)
 		sk.Mul(d.aS, ak)
-		pr.Add(pr, &sk)
-		pr.Add(pr, sk.T())
-		rk.Add(rk, d.aS.T())
+		pr.Add(pr, sk)
+		pr.Add(pr, d.transposed(sk))
+		rk.Add(rk, d.aSt)
 	}
 	pg.Add(pg, rk)
-	pw = mul3T(d.aB, ax, d.aB)
+	pw = d.mul3T(d.aB, ax, d.aB)
 	pw.Add(pw, d.aR)
-	for _, p := range []*mat.Dense{pr, pg, pw} {
-		p.Scale(1+1e-10, p)
-	}
+	pr.Scale(1+1e-10, pr)
+	pg.Scale(1+1e-10, pg)
+	pw.Scale(1+1e-10, pw)
 	return
 }
 
@@ -505,7 +648,12 @@ func encPDDD(z encDD, h *mat.Dense) bool {
 	n := z.r
 	u := math.Ldexp(1, -53)
 	zf := z.round()
-	sc := make([]float64, n)
+	var sc []float64
+	if z.ws != nil {
+		sc = z.ws.floats(n)
+	} else {
+		sc = make([]float64, n)
+	}
 	for i := range n {
 		v := zf.At(i, i)
 		if !(v > 0) || math.IsInf(v, 0) {
@@ -525,7 +673,13 @@ func encPDDD(z encDD, h *mat.Dense) bool {
 	if !(c < 1) {
 		return false
 	}
-	s := mat.NewSymDense(n, nil)
+	var s *mat.SymDense
+	var ch *mat.Cholesky
+	if z.ws != nil {
+		s, ch = z.ws.symDense(n), z.ws.cholesky(n)
+	} else {
+		s, ch = mat.NewSymDense(n, nil), new(mat.Cholesky)
+	}
 	for i := range n {
 		for j := i; j < n; j++ {
 			v := 0.5 * (zf.At(i, j) + zf.At(j, i)) * sc[i] * sc[j]
@@ -535,7 +689,6 @@ func encPDDD(z encDD, h *mat.Dense) bool {
 			s.SetSym(i, j, v)
 		}
 	}
-	var ch mat.Cholesky
 	return ch.Factorize(s)
 }
 
@@ -600,7 +753,7 @@ func encPDBig(z encBig, h *mat.Dense) bool {
 
 func catDD(r, g, w encDD) encDD {
 	n, m := r.r, w.r
-	o := newEncDD(n+m, n+m)
+	o := newEncDD(r.ws, n+m, n+m)
 	set := func(i, j int, h, l float64) { o.h[i*(n+m)+j], o.l[i*(n+m)+j] = h, l }
 	for i := range n {
 		for j := range n {
@@ -639,14 +792,24 @@ func catBig(r, g, w encBig) encBig {
 	return o
 }
 
-func catBound(hr, hg, hw *mat.Dense) *mat.Dense {
+func catBound(ws *encWS, hr, hg, hw *mat.Dense) *mat.Dense {
 	n, _ := hr.Dims()
 	m, _ := hw.Dims()
-	o := mat.NewDense(n+m, n+m, nil)
-	o.Slice(0, n, 0, n).(*mat.Dense).Copy(hr)
-	o.Slice(n, n+m, 0, n).(*mat.Dense).Copy(hg)
-	o.Slice(0, n, n, n+m).(*mat.Dense).Copy(hg.T())
-	o.Slice(n, n+m, n, n+m).(*mat.Dense).Copy(hw)
+	o := matOf(ws, n+m, n+m)
+	for i := range n {
+		for j := range n {
+			o.Set(i, j, hr.At(i, j))
+		}
+	}
+	for i := range m {
+		for j := range n {
+			o.Set(n+i, j, hg.At(i, j))
+			o.Set(j, n+i, hg.At(i, j))
+		}
+		for j := range m {
+			o.Set(n+i, n+j, hw.At(i, j))
+		}
+	}
 	return o
 }
 
@@ -723,49 +886,52 @@ type encBounds struct {
 
 func (d *encData) bounds(c, k encDD, p encPieces[encDD]) encBounds {
 	var b encBounds
+	n, m := d.n, d.m
 	ak := k.abs()
 	u2 := math.Ldexp(1, -106)
 	ahat := p.ak.abs()
-	var bk0 mat.Dense
+	bk0 := d.ws.mat(n, n)
 	bk0.Mul(d.aB, ak)
-	bk0.Add(&bk0, d.aA)
-	bk0.Scale(8*float64(d.m+1)*u2, &bk0)
-	ahat.Add(ahat, &bk0)
+	bk0.Add(bk0, d.aA)
+	bk0.Scale(8*float64(m+1)*u2, bk0)
+	ahat.Add(ahat, bk0)
 	ahat.Scale(1+1e-10, ahat)
 	b.pr, b.pg, b.pw = d.psi(c.abs(), ak, ahat, u2)
-	b.pq = mat.DenseCopyOf(d.aQ)
-	b.pq.Add(b.pq, mul3T(ak, d.aR, ak))
-	b.prks = mat.NewDense(d.m, d.n, nil)
+	b.pq = d.ws.mat(n, n)
+	b.pq.Copy(d.aQ)
+	b.pq.Add(b.pq, d.mul3T(ak, d.aR, ak))
+	b.prks = d.ws.mat(m, n)
 	b.prks.Mul(d.aR, ak)
 	if d.aS != nil {
-		var sk mat.Dense
+		sk := d.ws.mat(n, n)
 		sk.Mul(d.aS, ak)
-		b.pq.Add(b.pq, &sk)
-		b.pq.Add(b.pq, sk.T())
-		b.prks.Add(b.prks, d.aS.T())
+		b.pq.Add(b.pq, sk)
+		b.pq.Add(b.pq, d.transposed(sk))
+		b.prks.Add(b.prks, d.aSt)
 	}
 	b.pq.Scale(1+1e-10, b.pq)
 	b.prks.Scale(1+1e-10, b.prks)
-	b.ah = mat.DenseCopyOf(d.aA)
-	var bk mat.Dense
+	b.ah = d.ws.mat(n, n)
+	b.ah.Copy(d.aA)
+	bk := d.ws.mat(n, n)
 	bk.Mul(d.aB, ak)
-	b.ah.Add(b.ah, &bk)
+	b.ah.Add(b.ah, bk)
 	b.ah.Scale(1+1e-10, b.ah)
-	b.r, b.qk, b.g, b.rks, b.w = absDense(p.r.round()), absDense(p.qk.round()), absDense(p.g.round()), absDense(p.rks.round()), absDense(p.w.round())
+	b.r, b.qk, b.g, b.rks, b.w = d.absOf(p.r.round()), d.absOf(p.qk.round()), d.absOf(p.g.round()), d.absOf(p.rks.round()), d.absOf(p.w.round())
 	return b
 }
 
-func lin(terms ...any) *mat.Dense {
-	var o *mat.Dense
-	for i := 0; i < len(terms); i += 2 {
-		f, m := terms[i].(float64), terms[i+1].(*mat.Dense)
-		if o == nil {
-			r, c := m.Dims()
-			o = mat.NewDense(r, c, nil)
+// lin is Σ|f_i|·m_i, each term scaled, then summed, in order.
+func (d *encData) lin(f [4]float64, ms [4]*mat.Dense) *mat.Dense {
+	r, c := ms[0].Dims()
+	o := d.ws.mat(r, c)
+	t := d.ws.mat(r, c)
+	for i, m := range ms {
+		if m == nil {
+			break
 		}
-		var t mat.Dense
-		t.Scale(math.Abs(f), m)
-		o.Add(o, &t)
+		t.Scale(math.Abs(f[i]), m)
+		o.Add(o, t)
 	}
 	return o
 }
@@ -776,11 +942,11 @@ func lin(terms ...any) *mat.Dense {
 func (d *encData) xdirBounds(b encBounds, s, v float64) (*mat.Dense, *mat.Dense) {
 	g := d.gam(v)
 	f := 8 * v
-	hu := lin(g*(1+s), b.pr, g*s, b.pq, f*(1+s), b.r, f*s, b.qk)
-	h11 := lin(g*(1-s), b.pr, g*s, b.pq, f*(1-s), b.r, f*s, b.qk)
-	hg := lin(g*(1-s), b.pg, g*s, b.prks, f*(1-s), b.g, f*s, b.rks)
-	hw := lin(g, b.pw, f, b.w, f*s, d.aR)
-	return hu, catBound(h11, hg, hw)
+	hu := d.lin([4]float64{g * (1 + s), g * s, f * (1 + s), f * s}, [4]*mat.Dense{b.pr, b.pq, b.r, b.qk})
+	h11 := d.lin([4]float64{g * (1 - s), g * s, f * (1 - s), f * s}, [4]*mat.Dense{b.pr, b.pq, b.r, b.qk})
+	hg := d.lin([4]float64{g * (1 - s), g * s, f * (1 - s), f * s}, [4]*mat.Dense{b.pg, b.prks, b.g, b.rks})
+	hw := d.lin([4]float64{g, f, f * s}, [4]*mat.Dense{b.pw, b.w, d.aR})
+	return hu, catBound(d.ws, h11, hg, hw)
 }
 
 // sdirBounds is xdirBounds for encSDir with radii |D_U|, |D_L|.
@@ -788,8 +954,8 @@ func (d *encData) sdirBounds(b encBounds, du, dl *mat.Dense, v float64) (*mat.De
 	g := d.gam(v)
 	f := 8 * v
 	mpsi := func(x *mat.Dense) *mat.Dense {
-		o := mul3T(b.ah, x, b.ah)
-		o.Add(o, mul3T(d.aE, x, d.aE))
+		o := d.mul3T(b.ah, x, b.ah)
+		o.Add(o, d.mul3T(d.aE, x, d.aE))
 		return o
 	}
 	pu, pl := mpsi(du), mpsi(dl)
@@ -797,12 +963,12 @@ func (d *encData) sdirBounds(b encBounds, du, dl *mat.Dense, v float64) (*mat.De
 	bda.Mul(d.aB.T(), dl)
 	bdaA := mat.NewDense(d.m, d.n, nil)
 	bdaA.Mul(&bda, b.ah)
-	bdb := mul3T(d.aB, dl, d.aB)
-	hu := lin(g, b.pr, g, pu, f, b.r, f, pu)
-	h11 := lin(g, b.pr, g, pl, f, b.r, f, pl)
-	hg := lin(g, b.pg, g, bdaA, f, b.g, f, bdaA)
-	hw := lin(g, b.pw, g, bdb, f, b.w, f, bdb)
-	return hu, catBound(h11, hg, hw)
+	bdb := d.mul3T(d.aB, dl, d.aB)
+	hu := d.lin([4]float64{g, g, f, f}, [4]*mat.Dense{b.pr, pu, b.r, pu})
+	h11 := d.lin([4]float64{g, g, f, f}, [4]*mat.Dense{b.pr, pl, b.r, pl})
+	hg := d.lin([4]float64{g, g, f, f}, [4]*mat.Dense{b.pg, bdaA, b.g, bdaA})
+	hw := d.lin([4]float64{g, g, f, f}, [4]*mat.Dense{b.pw, bdb, b.w, bdb})
+	return hu, catBound(d.ws, h11, hg, hw)
 }
 
 // encCentre is a centre with its gain and pieces in both arithmetics
@@ -822,7 +988,8 @@ type encCentre struct {
 }
 
 func (d *encData) centre(c, k encDD) *encCentre {
-	e := &encCentre{d: d, c: c, k: k}
+	e := d.ws.centre()
+	e.d, e.c, e.k = d, c, k
 	e.p = encPiecesOf(&d.dd, c, k)
 	e.b = d.bounds(c, k, e.p)
 	return e
@@ -885,18 +1052,18 @@ func (e *encCentre) testS(du, dl encDD) encTier {
 
 // wPD proves W(c) ≻ 0.
 func (e *encCentre) wPD() bool {
-	var h mat.Dense
+	h := e.d.ws.mat(e.d.m, e.d.m)
 	h.Scale(e.d.gam(math.Ldexp(1, -106)), e.b.pw)
-	if encPDDD(e.p.w, &h) {
+	if encPDDD(e.p.w, h) {
 		return true
 	}
 	h.Scale(e.d.gam(math.Ldexp(1, -encPrec)), e.b.pw)
-	return encPDBig(e.big().w, &h)
+	return encPDBig(e.big().w, h)
 }
 
 // exactPD proves the double-double x positive definite (its value exact).
 func (d *encData) exactPD(x encDD) bool {
-	if encPDDD(x, mat.NewDense(x.r, x.c, nil)) {
+	if encPDDD(x, matOf(x.ws, x.r, x.c)) {
 		return true
 	}
 	d.big()
@@ -1173,9 +1340,9 @@ func (e *encCentre) enclose(x *mat.Dense) (encVerdict, bool) {
 // budget returns the measures of X − X_c and fl(X_c) − X_c.
 func (e *encCentre) budget(x, cf *mat.Dense) (m, mr float64) {
 	n := e.d.n
-	var diff mat.Dense
+	diff := e.d.ws.mat(n, n)
 	diff.Sub(x, cf)
-	m = encMeasure(&diff, cf)
+	m = encMeasure(diff, cf)
 	if e.zeroLo {
 		return m, m
 	}
@@ -1227,9 +1394,9 @@ const (
 func encloseDare(A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *mat.Dense, tier encTier) {
 	d := newEncData(A, B, Q, R, S, E)
 	defer d.release()
-	c := encDDOf(X)
+	c := encDDIn(d.ws, X)
 	symmetrize(c.h, d.n, d.n)
-	kret := encDDOf(K)
+	kret := encDDIn(d.ws, K)
 	e0 := d.centre(c, kret)
 	e0.zeroLo = true
 	if v, ok := e0.encloseX(X, encDDOnly); ok && v.ret {
@@ -1237,7 +1404,7 @@ func encloseDare(A, B, Q, R, S, E, X, K, dx *mat.Dense) (out encResult, xc, kc *
 	}
 	var e1 *encCentre
 	if dx != nil {
-		c1 := encSym(c.add(encDDOf(dx), 1))
+		c1 := encSym(c.add(encDDIn(d.ws, dx), 1))
 		if k1, ok := d.gain(c1); ok {
 			e1 = d.centre(c1, k1)
 			if v, ok := e1.encloseX(X, encDDOnly); ok {
@@ -1292,7 +1459,7 @@ func (e *encCentre) outcome(v encVerdict) (encResult, *mat.Dense, *mat.Dense, en
 	if v.ret {
 		return encCertified, nil, nil, v.tier
 	}
-	return encCorrected, e.c.round(), e.k.round(), v.tier
+	return encCorrected, mat.DenseCopyOf(e.c.round()), mat.DenseCopyOf(e.k.round()), v.tier
 }
 
 // confirm records X as confirmed in extended precision (an extended
