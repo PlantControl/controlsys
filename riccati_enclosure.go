@@ -864,8 +864,9 @@ func encPiecesOf[M encNum[M]](o *encOps[M], c, k M) encPieces[M] {
 		p.qk = p.qk.add(sk, -1).add(sk.t(), -1)
 		p.rks = p.rks.add(o.s.t(), -1)
 	}
-	p.r = encSym(p.ak.mul(c.mul(p.ak, false), true).add(o.ete(c), -1).add(p.qk, 1))
-	p.g = p.rks.add(o.b.mul(c.mul(p.ak, false), true), -1)
+	cak := c.mul(p.ak, false)
+	p.r = encSym(p.ak.mul(cak, true).add(o.ete(c), -1).add(p.qk, 1))
+	p.g = p.rks.add(o.b.mul(cak, true), -1)
 	p.w = encSym(o.r.add(o.b.mul(c.mul(o.b, false), true), 1))
 	return p
 }
