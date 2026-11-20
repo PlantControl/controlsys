@@ -861,28 +861,53 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 }
 
 // bandResponses returns the bounded responses of sys and red at pts, and
-// whether every point of both is in the double range (inRange; underflow
-// only when 2^(eB+eC) < 1, 2^eB and 2^eC the scales of sys's largest
-// |B̂_ij| and |Ĉ_ij|). The band refuses a cut whose responses are not:
-// rescaling B̂ and Ĉ by powers of two keeps the stored data exact, but the
-// pole resolutions the band's windows and probes read come from a
-// balancing that saw the unscaled B̂ and Ĉ, so a rescaled point may refute
-// and must never verify, and a band that cannot verify cannot certify.
+// whether the band may judge them. A response or bound that overflows, or
+// with 2^(eB+eC) < 1 an entry not zeroed by B̂ and Ĉ whose terms fall below
+// 2^−969, where rounding stops being relative (inRange), leaves the double
+// range; 2^eB and 2^eC are the scales of sys's largest |B̂_ij| and |Ĉ_ij|.
+// On overflow the band refuses the cut: the pole resolutions its windows
+// and probes read come from a balancing that saw the huge B̂ and Ĉ, so a
+// point rescaled into range may refute but must never verify, and a band
+// that cannot verify cannot certify. On underflow both responses are formed
+// instead on the realizations with B̂ and Ĉ scaled up by 2^−eB and 2^−eC,
+// exact for both or the cut is refused: every quantity a judge reads is
+// bilinear in B̂ and Ĉ and compared only relative to the others, and tiny
+// B̂ and Ĉ do not inflate those resolutions, so the rescaled points judge
+// as the stored data's would.
 func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse, bool) {
 	n, m, p := sys.Dims()
 	nr, _, _ := red.Dims()
 	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
 	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
-	under := maxExponent(rf.b)+maxExponent(rf.c) < 0
-	return full, cut, full.inRange(&rf, under) && cut.inRange(&rc, under)
+	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
+	under := eB+eC < 0
+	finF, bigF := full.inRange(&rf, under)
+	finC, bigC := cut.inRange(&rc, under)
+	if !finF || !finC {
+		return full, cut, false
+	}
+	if bigF && bigC {
+		return full, cut, true
+	}
+	sf, okF := scaledIO(rf, eB, eC)
+	sc, okC := scaledIO(rc, eB, eC)
+	if !okF || !okC {
+		return full, cut, false
+	}
+	full.release()
+	cut.release()
+	full, cut = boundedResponseOf(sf, pts), boundedResponseOf(sc, pts)
+	finF, bigF = full.inRange(&sf, under)
+	finC, bigC = cut.inRange(&sc, under)
+	return full, cut, finF && finC && bigF && bigC
 }
 
 // inRange reports whether every response and bound at the ok points of b,
-// the response of rz, is finite and, with under, every entry that rz's B̂
-// and Ĉ do not zero structurally has terms of at least 2^−969, above which
-// their rounding is relative: below it a response and its bounds
-// underflow, to an exact zero that verifies any cut.
-func (b *boundedResponse) inRange(rz *balancedRealization, under bool) bool {
+// the response of rz, is finite, and, with under, whether every entry that
+// rz's B̂ and Ĉ do not zero structurally has terms of at least 2^−969,
+// above which their rounding is relative: below it a response and its
+// bounds underflow, to an exact zero that verifies any cut.
+func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, big bool) {
 	const tiny = 0x1p-969
 	n, m, p := rz.n, rz.m, rz.p
 	live := make([]bool, p*m)
@@ -897,6 +922,7 @@ func (b *boundedResponse) inRange(rz *balancedRealization, under bool) bool {
 		}
 	}
 	pm := p * m
+	finite, big = true, true
 	for k, ok := range b.ok {
 		if !ok {
 			continue
@@ -904,12 +930,11 @@ func (b *boundedResponse) inRange(rz *balancedRealization, under bool) bool {
 		for y := range pm {
 			o := k*pm + y
 			g := b.g[o]
-			if !finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o]) || live[y] && b.terms[o] < tiny {
-				return false
-			}
+			finite = finite && finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o])
+			big = big && !(live[y] && b.terms[o] < tiny)
 		}
 	}
-	return true
+	return finite, big
 }
 
 // maxExponent is the binary exponent e of the largest |v_i|, 2^(e−1) ≤
@@ -924,6 +949,26 @@ func maxExponent(v []float64) int {
 	}
 	_, e := math.Frexp(mx)
 	return e
+}
+
+// scaledIO is rz with B̂ scaled by 2^−eB and Ĉ by 2^−eC, ok when every
+// entry scales exactly.
+func scaledIO(rz balancedRealization, eB, eC int) (balancedRealization, bool) {
+	scale := func(v []float64, e int) ([]float64, bool) {
+		out := make([]float64, len(v))
+		for i, x := range v {
+			out[i] = math.Ldexp(x, -e)
+			if math.Ldexp(out[i], e) != x {
+				return nil, false
+			}
+		}
+		return out, true
+	}
+	out := rz
+	var okB, okC bool
+	out.b, okB = scale(rz.b, eB)
+	out.c, okC = scale(rz.c, eC)
+	return out, okB && okC
 }
 
 // probeEntryFinite reports whether entry o of full and cut, with deviation

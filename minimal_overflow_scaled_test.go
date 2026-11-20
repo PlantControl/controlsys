@@ -79,3 +79,47 @@ func TestReduceUnderflowScaledIONoZeroCut(t *testing.T) {
 		t.Fatalf("underflow-scaled order %d, in-range %d", got.Order, want.Order)
 	}
 }
+
+// An underflow-scaled discrete model (B·2^−424, C·2^−593: |G| ≈ 2^−1015)
+// whose terms fall below 2^−969 at every probe: the band judges it on B̂
+// and Ĉ scaled up by exact powers of two, which tiny B̂ and Ĉ leave the
+// band's pole resolutions unchanged for, and keeps the in-range model's
+// correct cut under Equalize (census row axis-hid/2-unobs, unf scaling;
+// QMVNHR ruling B′).
+func TestReduceUnderflowScaledIOKeepsCut(t *testing.T) {
+	a := []float64{
+		0x1.0e577b9dfedep+00, 0x1.8e01a23cdf608p-02, -0x1.2345739318bd6p-04,
+		-0x1.0f166e636c1e3p-02, -0x1.4a07a66a6fec6p-02, 0x1.aa59a605018dap-03,
+		-0x1.19c58c849e1d2p+00, -0x1.622a83bfa97c5p-02, 0x1.2b8ac51a53086p-01,
+	}
+	b := []float64{0x1.416912ad0e8f8p-424, -0x1.55a8ccd139d74p-424, -0x1.a6720538b9d1ep-423}
+	c := []float64{-0x1.d1b2ab292bc4dp-593, 0x1.cd610064c0719p-594, -0x1.0d47f647143b8p-593}
+	sys, err := New(mat.NewDense(3, 3, a), mat.NewDense(3, 1, b), mat.NewDense(1, 3, c), mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := func(m *mat.Dense, e int) *mat.Dense {
+		out := mat.DenseCopyOf(m)
+		out.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, e) }, out)
+		return out
+	}
+	ref, err := New(sys.A, up(sys.B, 424), up(sys.C, 593), sys.D, sys.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := &ReduceOpts{Equalize: true}
+	want, err := ref.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.Order >= 3 {
+		t.Fatalf("in-range model not reduced (order %d)", want.Order)
+	}
+	got, err := sys.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Order != want.Order {
+		t.Fatalf("underflow-scaled order %d, in-range %d", got.Order, want.Order)
+	}
+}
