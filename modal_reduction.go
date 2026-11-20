@@ -36,7 +36,8 @@ type ModalReductionResult struct {
 }
 
 // ModalTruncate keeps the dominant modes of a delay-free state-space model
-// (slowest first, unstable modes always kept) by projecting onto an ordered
+// (slowest first; unstable modes, including those on the stability boundary
+// within rounding, always kept) by projecting onto an ordered
 // real Schur basis, never splitting a complex-conjugate pair; the feedthrough
 // D is kept unchanged. It mirrors MATLAB reducespec(sys,"modal") with getrom.
 // Like MATLAB's mode clusters, modes that cannot be separated reliably
@@ -193,6 +194,14 @@ const modalMoveCap = 1e-5
 // scores) and are ordered by frequency instead.
 const modalScoreTieTol = 1e-12
 
+// modalBoundaryBand is the width, in units of eps·‖T‖_F, of the band
+// below the stability boundary (Re = 0, or |z| = 1) within which a
+// cluster mean counts as on it, and so unstable: rounding moves the mean
+// of a cluster, even of defective copies split across the boundary, by a
+// few such units, so exactly marginal modes are kept whatever the
+// rounding, while modes farther inside stay stable.
+const modalBoundaryBand = 64
+
 // modalSeparationBound caps ‖X‖_F of the Sylvester separation of the kept
 // modes from the discarded ones; a larger X means the cut cannot be made
 // reliably and the kept set grows by the next cluster.
@@ -203,9 +212,9 @@ const modalSeparationBound = 1e5
 // Schur form; mean, score, imag and freq are the mean real part, real part
 // (modulus when discrete), |imaginary part| and frequency (|imaginary
 // part|, or |arg| when discrete) of its eigenvalues, which rounding spreads
-// about the exact ones far less than each copy; unstable holds when any
-// member is unstable, so a defective copy spread across the stability
-// boundary keeps its cluster; selected (MaxRealPart) holds for unstable
+// about the exact ones far less than each copy; unstable holds when the
+// mean score is within modalBoundaryBand rounding units of the stability
+// boundary or beyond it; selected (MaxRealPart) holds for unstable
 // clusters and by the mean real part; move is the largest rounding
 // move of a member; pair marks a lone complex-conjugate block whose
 // conjugates are farther apart than their moves (a rounded real double
@@ -249,6 +258,7 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 	}
 	tol := modalClusterTol * norm.norm()
 	tieTol := modalScoreTieTol * norm.norm()
+	band := modalBoundaryBand * eps() * norm.norm()
 	parent := rangeInts(len(reps))
 	find := func(i int) int {
 		for parent[i] != i {
@@ -324,7 +334,6 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 		c.sizes = append(c.sizes, sizes[i])
 		c.states += sizes[i]
 		c.move = max(c.move, move[i])
-		c.unstable = c.unstable || modalPoleUnstable(l, dt)
 		w := float64(sizes[i])
 		c.mean += w * real(l)
 		c.score += w * cmplx.Abs(l)
@@ -342,9 +351,12 @@ func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) 
 		c.score /= w
 		c.imag /= w
 		c.freq /= w
+		boundary := 1.0
 		if dt == 0 {
 			c.score = c.mean
+			boundary = 0
 		}
+		c.unstable = c.score >= boundary-band
 		c.selected = c.unstable || threshold && c.mean >= maxRealPart
 		c.pair = len(c.blocks) == 1 && c.sizes[0] == 2 && 2*c.imag > max(tol, 2*modalConditionMerge*c.move)
 	}
