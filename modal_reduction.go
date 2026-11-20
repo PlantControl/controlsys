@@ -1,9 +1,11 @@
 package controlsys
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -14,7 +16,8 @@ import (
 // ModalTruncateOptions selects the retained modes. Set at most one of Order
 // and MaxRealPart; with neither, ModalTruncate keeps about half the modes.
 type ModalTruncateOptions struct {
-	// Order is the number of retained states; 0 means unset.
+	// Order is the number of retained states, rounded up to the end of a
+	// mode cluster it would split; 0 means unset.
 	Order int
 	// MaxRealPart, when non-nil, keeps every mode with real part at or
 	// above *MaxRealPart (any value, including 0), plus all unstable modes.
@@ -33,11 +36,17 @@ type ModalReductionResult struct {
 }
 
 // ModalTruncate keeps the dominant modes of a delay-free state-space model
-// (slowest first, unstable modes always kept) by projecting onto an ordered
+// (slowest first; unstable modes, including those on the stability boundary
+// within rounding, always kept) by projecting onto an ordered
 // real Schur basis, never splitting a complex-conjugate pair; the feedthrough
 // D is kept unchanged. It mirrors MATLAB reducespec(sys,"modal") with getrom.
-// Order out of range, an order that would split a pair or drop an unstable
-// mode, and a MaxRealPart that selects nothing return ErrInvalidOrder; both
+// Like MATLAB's mode clusters, modes that cannot be separated reliably
+// (repeated eigenvalues, or a cut whose Sylvester separation is
+// ill-conditioned) are kept or dropped together: the kept order is rounded
+// up to the end of such a cluster, so Result.Order may exceed Order, up to
+// the full model.
+// Order out of range, an order that would split a lone pair or drop an
+// unstable mode, and a MaxRealPart that selects nothing return ErrInvalidOrder; both
 // Order and MaxRealPart set return ErrInvalidArgument; a model without states
 // returns ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/lti.reducespec.html.
@@ -78,39 +87,35 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 	if threshold {
 		maxRealPart = *opts.MaxRealPart
 	}
-	if err := orderModalSchur(t, z, n, sys.Dt, maxRealPart, threshold); err != nil {
-		return nil, fmt.Errorf("ModalTruncate: %w", err)
-	}
-	poles := schurEigenvaluesRaw(t, n)
-	order, err := modalReductionOrder(t, poles, n, sys.Dt, opts)
+	clusters := modalClusters(t, n, sys.Dt, maxRealPart, threshold)
+	order, err := modalReductionOrder(clusters, n, opts)
 	if err != nil {
 		return nil, err
 	}
-	if order < 1 || order > n {
-		return nil, fmt.Errorf("ModalTruncate: order %d outside [1,%d]: %w", order, n, ErrInvalidOrder)
+	if err := reorderModalClusters(t, z, n, clusters); err != nil {
+		return nil, fmt.Errorf("ModalTruncate: %w", err)
 	}
-	if splitsSchurBlock(t, n, order) {
-		return nil, fmt.Errorf("ModalTruncate: order %d splits a complex-conjugate mode pair: %w", order, ErrInvalidOrder)
+	var x []float64
+	for order < n {
+		if splitsSchurBlock(t, n, order) {
+			return nil, fmt.Errorf("ModalTruncate: reordered Schur form splits a block at %d: %w", order, ErrSchurFailed)
+		}
+		if x, err = separateSchurBlocks(t, n, order, "ModalTruncate"); err == nil && modalSeparable(x) {
+			break
+		}
+		order = nextModalClusterEnd(clusters, order)
 	}
-	if order < unstableModalCount(poles, sys.Dt) {
-		return nil, fmt.Errorf("ModalTruncate: order %d would discard an unstable mode: %w", order, ErrInvalidOrder)
-	}
-	keptPoles := append([]complex128(nil), poles[:order]...)
+	keptPoles := schurEigenvaluesRaw(t, n)[:order:order]
 	if order == n {
-		identity := eyeDense(n)
 		return &ModalReductionResult{
 			Sys:        sys.Copy(),
 			Order:      n,
 			KeptPoles:  keptPoles,
-			Basis:      identity,
+			Basis:      eyeDense(n),
 			Projection: eyeDense(n),
 		}, nil
 	}
 
-	x, err := separateSchurBlocks(t, n, order, "ModalTruncate")
-	if err != nil {
-		return nil, err
-	}
 	bModal, cModal := modalInputOutput(sys, z, n, m, p)
 	aReduced := extractModalBlock(t, n, 0, order, 0, order)
 	bReduced := newDense(order, m)
@@ -160,75 +165,402 @@ func modalSchur(sys *System) (t, z []float64, err error) {
 	return t, z, nil
 }
 
-func orderModalSchur(t, z []float64, n int, dt, maxRealPart float64, threshold bool) error {
-	work := make([]float64, n)
-	placed := 0
-	for placed < n {
-		evals := schurEigenvaluesRaw(t, n)
-		best := placed
-		for i := placed; i < n; i += schurBlockSize(t, n, i) {
-			if modalBlockBefore(evals[i], evals[best], dt, maxRealPart, threshold) {
-				best = i
-			}
-		}
-		if best != placed {
-			_, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, best, placed, work)
-			if !ok {
-				return fmt.Errorf("reordering the real Schur form failed: %w", ErrSchurFailed)
-			}
-		}
-		placed += schurBlockSize(t, n, placed)
-	}
-	return nil
+// modalClusterTol is the distance, relative to ‖T‖_F, within which Schur
+// eigenvalues always count as copies of one repeated eigenvalue: computed
+// copies of an exactly repeated semisimple eigenvalue lie within ~1e-15.
+const modalClusterTol = 1e-10
+
+// modalConditionMerge scales the first-order rounding move eps·‖T‖_F·κ of
+// an eigenvalue with condition number κ: two eigenvalues closer than
+// modalConditionMerge times the sum of their moves are one cluster. A
+// defective eigenvalue of multiplicity m spreads into copies ~m moves
+// apart, so copies are merged for m up to about 8, while well-conditioned
+// close eigenvalues stay apart.
+const modalConditionMerge = 16
+
+// modalMoveCap bounds the rounding move, relative to ‖T‖_F, of an
+// eigenvalue whose condition number is huge or infinite. A defective
+// eigenvalue of multiplicity m spreads by ~eps^(1/m) and the first-order
+// move of each copy is ~1/m of that, so the cap with modalConditionMerge
+// reaches spreads of 3.2e-4·‖T‖_F (m ≤ 4); eigenvectors are computed only
+// for blocks within that reach of another.
+// Members of a modalClusterTol cluster take no move when merging: their
+// eigenvectors are those of an exactly repeated eigenvalue, whose
+// condition number says nothing about distant eigenvalues; near the
+// stability boundary they keep it, so a repeat that rounding cannot place
+// on one side counts as on it.
+const modalMoveCap = 1e-5
+
+// modalScoreTieTol is the score difference, relative to ‖T‖_F, below which
+// two clusters count as equally dominant (rounding noise of equal exact
+// scores) and are ordered by frequency instead.
+const modalScoreTieTol = 1e-12
+
+// modalBoundaryBand is the width, in units of eps·‖T‖_F, of the band
+// below the stability boundary (Re = 0, or |z| = 1) within which a mode
+// counts as on it, and so unstable, on top of its own rounding move:
+// exactly marginal modes are kept whatever the rounding, while modes
+// farther inside stay stable. In the census, clusters exactly on the
+// boundary land within 7.1 units of it, clusters with a root within
+// rounding of it reach 25.3 units, and the next ones lie beyond 190; the
+// band sits in that gap.
+const modalBoundaryBand = 64
+
+// modalSeparationBound caps ‖X‖_F of the Sylvester separation of the kept
+// modes from the discarded ones; a larger X means the cut cannot be made
+// reliably and the kept set grows by the next cluster.
+const modalSeparationBound = 1e5
+
+// modalCluster is a set of Schur blocks kept or dropped together. blocks
+// and sizes are the start rows and orders of its blocks in the unordered
+// Schur form; mean, score, imag and freq are the mean real part, real part
+// (modulus when discrete), |imaginary part| and frequency (|imaginary
+// part|, or |arg| when discrete) of its eigenvalues, which rounding spreads
+// about the exact ones far less than each copy; unstable holds when some
+// member could be unstable within rounding: its real part (modulus when
+// discrete) plus modalConditionMerge rounding moves reaches the stability
+// boundary less modalBoundaryBand rounding units; selected (MaxRealPart) holds for unstable
+// clusters and by the mean real part; move is the largest rounding
+// move of a member; pair marks a lone complex-conjugate block whose
+// conjugates are farther apart than their moves (a rounded real double
+// is not a pair).
+type modalCluster struct {
+	blocks, sizes []int
+	states        int
+	mean, score   float64
+	imag, freq    float64
+	move          float64
+	selected      bool
+	unstable      bool
+	pair          bool
 }
 
-func modalBlockBefore(candidate, current complex128, dt, maxRealPart float64, threshold bool) bool {
-	if threshold {
-		candidateSelected := real(candidate) >= maxRealPart || modalPoleUnstable(candidate, dt)
-		currentSelected := real(current) >= maxRealPart || modalPoleUnstable(current, dt)
-		if candidateSelected != currentSelected {
-			return candidateSelected
+// modalClusters groups the blocks of the real Schur form t into clusters,
+// transitively merging eigenvalues within modalClusterTol·‖T‖_F or within
+// modalConditionMerge times their rounding moves, and returns them in
+// retention order: unstable clusters first, then selected (MaxRealPart)
+// ones, then by descending score, where scores within modalScoreTieTol
+// count as tied and are ordered by ascending frequency. All decisions use
+// the eigenvalues of the unordered form, so ulp differences between copies
+// never decide which copy is kept.
+func modalClusters(t []float64, n int, dt, maxRealPart float64, threshold bool) []modalCluster {
+	evals := schurEigenvaluesRaw(t, n)
+	starts := make([]int, 0, n)
+	sizes := make([]int, 0, n)
+	reps := make([]complex128, 0, n)
+	for i := 0; i < n; i += schurBlockSize(t, n, i) {
+		l := evals[i]
+		if imag(l) < 0 {
+			l = cmplx.Conj(l)
+		}
+		starts = append(starts, i)
+		sizes = append(sizes, schurBlockSize(t, n, i))
+		reps = append(reps, l)
+	}
+	var norm l2
+	for _, v := range t {
+		norm.add(v)
+	}
+	tol := modalClusterTol * norm.norm()
+	tieTol := modalScoreTieTol * norm.norm()
+	band := modalBoundaryBand * eps() * norm.norm()
+	parent := rangeInts(len(reps))
+	find := func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	union := func(i, j int) {
+		a, b := find(i), find(j)
+		parent[max(a, b)] = min(a, b)
+	}
+	tight := make([]bool, len(reps))
+	for i := range reps {
+		for j := i + 1; j < len(reps); j++ {
+			if cmplx.Abs(reps[i]-reps[j]) <= tol {
+				union(i, j)
+				tight[i], tight[j] = true, true
+			}
 		}
 	}
-	candidateScore := real(candidate)
-	currentScore := real(current)
-	if dt > 0 {
-		candidateScore = cmplx.Abs(candidate)
-		currentScore = cmplx.Abs(current)
+	move := make([]float64, len(reps))
+	reach := 2 * modalConditionMerge * modalMoveCap * norm.norm()
+	boundary := 1.0
+	if dt == 0 {
+		boundary = 0
 	}
-	if candidateScore != currentScore {
-		return candidateScore > currentScore
+	stability := func(l complex128) float64 {
+		if dt > 0 {
+			return cmplx.Abs(l)
+		}
+		return real(l)
 	}
-	return math.Abs(imag(candidate)) < math.Abs(imag(current))
+	need := make([]bool, len(reps))
+	near := false
+	for i := range reps {
+		if !tight[i] && sizes[i] == 2 && 2*imag(reps[i]) <= reach || math.Abs(stability(reps[i])-boundary) <= reach {
+			need[i], near = true, true
+		}
+		for j := i + 1; j < len(reps); j++ {
+			if !(tight[i] && tight[j]) && cmplx.Abs(reps[i]-reps[j]) <= reach {
+				need[i] = need[i] || !tight[i]
+				need[j] = need[j] || !tight[j]
+				near = true
+			}
+		}
+	}
+	boundaryMove := make([]float64, len(reps))
+	if near {
+		kappa := schurEigenvalueConditions(t, n, starts, sizes, need)
+		for i := range move {
+			boundaryMove[i] = min(kappa[i]*eps()*norm.norm(), modalMoveCap*norm.norm())
+			if !tight[i] {
+				move[i] = boundaryMove[i]
+			}
+		}
+		for i := range reps {
+			for j := i + 1; j < len(reps); j++ {
+				if cmplx.Abs(reps[i]-reps[j]) <= modalConditionMerge*(move[i]+move[j]) {
+					union(i, j)
+				}
+			}
+		}
+	}
+	index := make([]int, len(reps))
+	count := make([]int, len(reps))
+	clusters := make([]modalCluster, 0, len(reps))
+	for i := range reps {
+		root := find(i)
+		if root == i {
+			index[i] = len(clusters)
+			clusters = append(clusters, modalCluster{})
+		}
+		count[index[root]]++
+	}
+	backing := make([]int, 2*len(reps))
+	for k := range clusters {
+		clusters[k].blocks = backing[:0:count[k]]
+		clusters[k].sizes = backing[len(reps) : len(reps) : len(reps)+count[k]]
+		backing = backing[count[k]:]
+	}
+	for i, l := range reps {
+		c := &clusters[index[find(i)]]
+		c.blocks = append(c.blocks, starts[i])
+		c.sizes = append(c.sizes, sizes[i])
+		c.states += sizes[i]
+		c.move = max(c.move, move[i])
+		c.unstable = c.unstable || stability(l)+modalConditionMerge*boundaryMove[i] >= boundary-band
+		w := float64(sizes[i])
+		c.mean += w * real(l)
+		c.score += w * cmplx.Abs(l)
+		c.imag += w * imag(l)
+		if dt > 0 {
+			c.freq += w * math.Abs(cmplx.Phase(l))
+		} else {
+			c.freq += w * imag(l)
+		}
+	}
+	for i := range clusters {
+		c := &clusters[i]
+		w := float64(c.states)
+		c.mean /= w
+		c.score /= w
+		c.imag /= w
+		c.freq /= w
+		if dt == 0 {
+			c.score = c.mean
+		}
+		c.selected = c.unstable || threshold && c.mean >= maxRealPart
+		c.pair = len(c.blocks) == 1 && c.sizes[0] == 2 && 2*c.imag > max(tol, 2*modalConditionMerge*c.move)
+	}
+	class := func(c modalCluster) int {
+		switch {
+		case c.unstable:
+			return 0
+		case c.selected:
+			return 1
+		}
+		return 2
+	}
+	slices.SortStableFunc(clusters, func(a, b modalCluster) int {
+		if c := cmp.Compare(class(a), class(b)); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.score, a.score)
+	})
+	for lo := 0; lo < len(clusters); {
+		hi := lo + 1
+		for hi < len(clusters) && class(clusters[hi]) == class(clusters[lo]) && clusters[hi-1].score-clusters[hi].score <= tieTol {
+			hi++
+		}
+		slices.SortStableFunc(clusters[lo:hi], func(a, b modalCluster) int {
+			if c := cmp.Compare(a.freq, b.freq); c != 0 {
+				return c
+			}
+			return cmp.Compare(b.score, a.score)
+		})
+		lo = hi
+	}
+	return clusters
 }
 
-func modalReductionOrder(t []float64, poles []complex128, n int, dt float64, opts *ModalTruncateOptions) (int, error) {
-	if opts.Order > 0 {
-		return opts.Order, nil
+// modalReductionOrder is the number of kept states before the separation
+// check: Order rounded up to the end of the cluster it falls in (an Order
+// inside a lone complex pair or below the unstable states is
+// ErrInvalidOrder), the selected clusters for MaxRealPart, or about half
+// the states, rounded up and covering the unstable clusters.
+func modalReductionOrder(clusters []modalCluster, n int, opts *ModalTruncateOptions) (int, error) {
+	unstable := 0
+	for _, c := range clusters {
+		if c.unstable {
+			unstable += c.states
+		}
 	}
-	if opts.MaxRealPart != nil {
-		maxRealPart := *opts.MaxRealPart
+	switch {
+	case opts.Order > 0:
+		order := opts.Order
+		end := 0
+		for _, c := range clusters {
+			start := end
+			end += c.states
+			if start < order && order < end {
+				if c.pair {
+					return 0, fmt.Errorf("ModalTruncate: order %d splits a complex-conjugate mode pair: %w", order, ErrInvalidOrder)
+				}
+				order = end
+				break
+			}
+		}
+		if order < unstable {
+			return 0, fmt.Errorf("ModalTruncate: order %d would discard an unstable mode: %w", opts.Order, ErrInvalidOrder)
+		}
+		return order, nil
+	case opts.MaxRealPart != nil:
 		order := 0
-		for order < n && (real(poles[order]) >= maxRealPart || modalPoleUnstable(poles[order], dt)) {
-			order += schurBlockSize(t, n, order)
+		for _, c := range clusters {
+			if c.selected {
+				order += c.states
+			}
 		}
 		if order == 0 {
-			return 0, fmt.Errorf("ModalTruncate: no modes satisfy MaxRealPart %g: %w", maxRealPart, ErrInvalidOrder)
+			return 0, fmt.Errorf("ModalTruncate: no modes satisfy MaxRealPart %g: %w", *opts.MaxRealPart, ErrInvalidOrder)
 		}
 		return order, nil
 	}
-	order := n / 2
-	if order == 0 {
-		order = 1
+	order := max(n/2, 1)
+	end := 0
+	for _, c := range clusters {
+		end += c.states
+		if end >= order {
+			break
+		}
 	}
-	if splitsSchurBlock(t, n, order) {
-		order++
+	return max(end, unstable), nil
+}
+
+// schurEigenvalueConditions returns the condition number ‖x‖‖y‖/|yᴴx| of
+// the eigenvalue of each block of the quasi-triangular t (starts, sizes)
+// marked in need, from its right and left eigenvectors (+Inf where yᴴx
+// vanishes), and 0 for the others.
+func schurEigenvalueConditions(t []float64, n int, starts, sizes []int, need []bool) []float64 {
+	selected := make([]bool, n)
+	cols := 0
+	for b, j := range starts {
+		if need[b] {
+			selected[j] = true
+			cols += sizes[b]
+		}
 	}
-	unstable := unstableModalCount(poles, dt)
-	if order < unstable {
-		order = unstable
+	vl := make([]float64, n*cols)
+	vr := make([]float64, n*cols)
+	work := make([]float64, max(1, 3*n))
+	impl.Dtrevc3(lapack.EVBoth, lapack.EVSelected, selected, n, t, n, vl, cols, vr, cols, cols, work, len(work))
+	kappa := make([]float64, len(starts))
+	col := 0
+	for b := range starts {
+		if !need[b] {
+			continue
+		}
+		var nx, ny l2
+		var dot complex128
+		for k := range n {
+			x := complex(vr[k*cols+col], 0)
+			y := complex(vl[k*cols+col], 0)
+			if sizes[b] == 2 {
+				x = complex(vr[k*cols+col], vr[k*cols+col+1])
+				y = complex(vl[k*cols+col], vl[k*cols+col+1])
+			}
+			nx.addC(x)
+			ny.addC(y)
+			dot += cmplx.Conj(y) * x
+		}
+		col += sizes[b]
+		kappa[b] = nx.norm() * ny.norm() / cmplx.Abs(dot)
+		if math.IsNaN(kappa[b]) {
+			kappa[b] = math.Inf(1)
+		}
 	}
-	return order, nil
+	return kappa
+}
+
+func nextModalClusterEnd(clusters []modalCluster, order int) int {
+	end := 0
+	for _, c := range clusters {
+		end += c.states
+		if end > order {
+			return end
+		}
+	}
+	return end
+}
+
+func modalSeparable(x []float64) bool {
+	var norm l2
+	for _, v := range x {
+		norm.add(v)
+	}
+	return norm.norm() <= modalSeparationBound
+}
+
+// reorderModalClusters moves the Schur blocks of t into the order of
+// clusters, updating z. Blocks are tracked by their state counts, so a
+// 2×2 block that Dtrexc splits into two 1×1 blocks still moves whole.
+func reorderModalClusters(t, z []float64, n int, clusters []modalCluster) error {
+	type block struct{ start, size int }
+	var pending []block
+	for i := 0; i < n; i += schurBlockSize(t, n, i) {
+		pending = append(pending, block{i, schurBlockSize(t, n, i)})
+	}
+	work := make([]float64, n)
+	placed := 0
+	for _, c := range clusters {
+		for _, start := range c.blocks {
+			j := slices.IndexFunc(pending, func(b block) bool { return b.start == start })
+			pos := placed
+			for _, b := range pending[:j] {
+				pos += b.size
+			}
+			remaining := pending[j].size
+			pending = slices.Delete(pending, j, j+1)
+			for remaining > 0 {
+				got := schurBlockSize(t, n, pos)
+				if got > remaining {
+					return fmt.Errorf("reordering the real Schur form merged blocks: %w", ErrSchurFailed)
+				}
+				if pos != placed {
+					if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, pos, placed, work); !ok {
+						return fmt.Errorf("reordering the real Schur form failed: %w", ErrSchurFailed)
+					}
+				}
+				placed += got
+				pos += got
+				remaining -= got
+			}
+		}
+	}
+	return nil
 }
 
 func separateSchurBlocks(t []float64, n, order int, context string) ([]float64, error) {
