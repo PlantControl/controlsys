@@ -873,21 +873,29 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 // exact for both or the cut is refused: every quantity a judge reads is
 // bilinear in B̂ and Ĉ and compared only relative to the others, and tiny
 // B̂ and Ĉ do not inflate those resolutions, so the rescaled points judge
-// as the stored data's would.
+// as the stored data's would. With 2^(eB+eC) < 2^−512 they are scaled up
+// before the first evaluation, which is then the only one.
 func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse, bool) {
 	n, m, p := sys.Dims()
 	nr, _, _ := red.Dims()
 	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
-	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
 	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
-	under := eB+eC < 0
+	under, scaled := eB+eC < 0, false
+	if eB+eC < -512 {
+		sf, okF := scaledIO(rf, eB, eC)
+		sc, okC := scaledIO(rc, eB, eC)
+		if okF && okC {
+			rf, rc, scaled = sf, sc, true
+		}
+	}
+	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
 	finF, bigF := full.inRange(&rf, under)
 	finC, bigC := cut.inRange(&rc, under)
 	if !finF || !finC {
 		return full, cut, false
 	}
-	if bigF && bigC {
-		return full, cut, true
+	if bigF && bigC || scaled {
+		return full, cut, bigF && bigC
 	}
 	sf, okF := scaledIO(rf, eB, eC)
 	sc, okC := scaledIO(rc, eB, eC)
@@ -910,15 +918,18 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, big bool) {
 	const tiny = 0x1p-969
 	n, m, p := rz.n, rz.m, rz.p
-	live := make([]bool, p*m)
-	for i := range p {
-		for j := range m {
-			var cz, bz bool
-			for l := range n {
-				cz = cz || rz.c[i*n+l] != 0
-				bz = bz || rz.b[l*m+j] != 0
+	var live []bool
+	if under {
+		live = make([]bool, p*m)
+		for i := range p {
+			for j := range m {
+				var cz, bz bool
+				for l := range n {
+					cz = cz || rz.c[i*n+l] != 0
+					bz = bz || rz.b[l*m+j] != 0
+				}
+				live[i*m+j] = cz && bz
 			}
-			live[i*m+j] = under && cz && bz
 		}
 	}
 	pm := p * m
@@ -931,7 +942,7 @@ func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, 
 			o := k*pm + y
 			g := b.g[o]
 			finite = finite && finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o])
-			big = big && !(live[y] && b.terms[o] < tiny)
+			big = big && !(under && live[y] && b.terms[o] < tiny)
 		}
 	}
 	return finite, big
