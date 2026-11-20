@@ -953,8 +953,8 @@ func ddPolyAt(c []float64, s complex128) (v ddComplex, e float64, ok bool) {
 			return v, 0, false
 		}
 		ya := v.abs1()
-		re := v.re.mul(dd{sr, 0}).add(v.im.mul(dd{si, 0}).neg()).add(dd{a, 0})
-		im := v.re.mul(dd{si, 0}).add(v.im.mul(dd{sr, 0}))
+		re := ddMulF(v.re, sr).add(ddMulF(v.im, si).neg()).add(dd{a, 0})
+		im := ddMulF(v.re, si).add(ddMulF(v.im, sr))
 		v = ddComplex{re, im}
 		if !inRange(re.hi) || !inRange(im.hi) {
 			return v, 0, false
@@ -1940,4 +1940,11 @@ func (mb *markovBounds) bound(k, i, j int) float64 {
 	}
 	sum += mat.Dot(absC, absVec(right[0])) + mat.Dot(absVec(left[2*k-1]), absB)
 	return eps() * sum * (1 + gammaN((2*k+1)*n))
+}
+
+// ddMulF is x.mul(dd{y, 0}) with the product's error by prodErr, so that
+// it takes Dekker's form where FMA is emulated.
+func ddMulF(x dd, y float64) dd {
+	p := float64(x.hi * y)
+	return quickTwoSum(p, prodErr(x.hi, y, p)+(x.hi*0+x.lo*y))
 }

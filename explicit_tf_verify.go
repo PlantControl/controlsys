@@ -685,14 +685,14 @@ func (fb *foldBound) applyKRaw(y []float64) bool {
 // matrices, within |E|e_f + |R_A − R̂_A||x| + |R_B − R̂_B| +
 // γ_{2n+3}(|E||r̂_f| + |R̂_A||x| + |R̂_B|) plus its underflow.
 func (fb *foldBound) storedResidual(f *explicitFastTier, pt frequencyPoint) bool {
-	n, m, hs := fb.n, fb.m, f.hs
+	n, m := fb.n, fb.m
 	g := gammaN(2*n + 3)
 	uf := float64(8*n+16) * 0x1p-1074
 	for j := range m {
 		xb := f.xf[j*n : (j+1)*n]
 		rr := fb.rr
 		for i := range n {
-			rc, e := denseResidualRow(xb, hs.a[i*n:(i+1)*n], i, hs.b[i*m+j], pt.p)
+			rc, e := f.residualRow(xb, i, j, pt.p)
 			rr[i] = rc
 			fb.w[i] = e + 2*termsEps*cabs1(rc)
 			fb.ax[i] = cabs1(xb[i])
@@ -898,6 +898,14 @@ type explicitFastTier struct {
 	// preferPair skips the plain solution's check after a point that
 	// needed the pair.
 	preferPair bool
+	// aH, aL split Â and xs the solution xsOf, valid for point gen, where
+	// FMA is emulated (residualRow); aBig marks an Â too large to split.
+	aH, aL []float64
+	aBig   bool
+	xs     []float64
+	xsOf   *complex128
+	xsGen  int
+	gen    int
 	// tfR and tfB hold the transfer function's rows and bounds at tfAt.
 	tfR         []complex128
 	tfB         []float64
@@ -948,6 +956,7 @@ func (f *explicitFastTier) verify(s complex128) bool {
 	}
 	pt := pointAt(s)
 	f.pt = pt
+	f.gen++
 	if hs.factor(pt) != nil {
 		return false
 	}
@@ -987,7 +996,7 @@ func (f *explicitFastTier) refinePair(pt frequencyPoint) bool {
 	for j := range m {
 		x := f.xf[j*n : (j+1)*n]
 		for i := range n {
-			rc, e := denseResidualRow(x, hs.a[i*n:(i+1)*n], i, hs.b[i*m+j], pt.p)
+			rc, e := f.residualRow(x, i, j, pt.p)
 			f.res[j*n+i], f.resE[j*n+i] = rc, e
 		}
 	}
@@ -1409,6 +1418,11 @@ func denseResidualRow(x []complex128, row []float64, i int, b float64, s complex
 		si = t
 		inner += math.Abs(a) * (math.Abs(xr) + math.Abs(xi))
 	}
+	return residualRowTail(x, i, b, s, sr, cr, si, ci, inner, len(row))
+}
+
+// residualRowTail completes denseResidualRow from the compensated row sums.
+func residualRowTail(x []complex128, i int, b float64, s complex128, sr, cr, si, ci, inner float64, k int) (r complex128, e float64) {
 	axr, axi := compensatedSum{sr, cr}, compensatedSum{si, ci}
 	pr, pi := real(s), imag(s)
 	var re, im compensatedSum
@@ -1421,7 +1435,6 @@ func denseResidualRow(x []complex128, row []float64, i int, b float64, s complex
 	re.addScaled(1, axr)
 	im.addScaled(1, axi)
 	outer := math.Abs(b) + cabs1(s)*cabs1(x[i]) + math.Abs(sr) + math.Abs(cr) + math.Abs(si) + math.Abs(ci)
-	k := len(row)
 	e = (dot2Err(7)*outer+dot2Err(k)*inner)*(1+float64(k+16)*termsEps) + (float64(4*k)+64)*0x1p-1074
 	return complex(re.value(), im.value()), e
 }
@@ -1444,4 +1457,60 @@ func prodErr(a, b, p float64) float64 {
 	bh, bl := veltkampSplit(b)
 	_, e := twoProdSplit(a, ah, al, b, bh, bl)
 	return e
+}
+
+// residualRow is denseResidualRow of row i of the sweep's Â and column j of
+// its B̂ for x; where FMA is emulated (fmaFast false) its products take
+// Dekker's form on Veltkamp splits of Â, formed once, and of x, formed once
+// per x.
+func (f *explicitFastTier) residualRow(x []complex128, i, j int, s complex128) (complex128, float64) {
+	n, hs := f.n, f.hs
+	row := hs.a[i*n : (i+1)*n]
+	if fmaFast {
+		return denseResidualRow(x, row, i, hs.b[i*f.m+j], s)
+	}
+	if f.aH == nil {
+		f.aH, f.aL = make([]float64, n*n), make([]float64, n*n)
+		f.aBig = false
+		for q, a := range hs.a {
+			f.aH[q], f.aL[q] = veltkampSplit(a)
+			f.aBig = f.aBig || math.Abs(a) >= 0x1p995
+		}
+		f.xs = make([]float64, 4*n)
+	}
+	if f.aBig || &x[0] != f.xsOf || f.xsGen != f.gen {
+		f.xsOf, f.xsGen = &x[0], f.gen
+		for k, v := range x {
+			if math.Abs(real(v)) >= 0x1p995 || math.Abs(imag(v)) >= 0x1p995 {
+				f.xsOf = nil
+				return denseResidualRow(x, row, i, hs.b[i*f.m+j], s)
+			}
+			f.xs[k], f.xs[n+k] = veltkampSplit(real(v))
+			f.xs[2*n+k], f.xs[3*n+k] = veltkampSplit(imag(v))
+		}
+	}
+	if f.aBig {
+		return denseResidualRow(x, row, i, hs.b[i*f.m+j], s)
+	}
+	rh, rl := f.aH[i*n:(i+1)*n], f.aL[i*n:(i+1)*n]
+	xrh, xrl, xih, xil := f.xs[:n], f.xs[n:2*n], f.xs[2*n:3*n], f.xs[3*n:]
+	var sr, cr, si, ci, inner float64
+	for k, a := range row {
+		xr, xi := real(x[k]), imag(x[k])
+		ah, al := rh[k], rl[k]
+		p := float64(a * xr)
+		t := sr + p
+		bp := t - sr
+		e := float64(float64(float64(float64(ah*xrh[k])-p)+float64(ah*xrl[k]))+float64(al*xrh[k])) + float64(al*xrl[k])
+		cr += (sr - (t - bp)) + (p - bp) + e
+		sr = t
+		p = float64(a * xi)
+		t = si + p
+		bp = t - si
+		e = float64(float64(float64(float64(ah*xih[k])-p)+float64(ah*xil[k]))+float64(al*xih[k])) + float64(al*xil[k])
+		ci += (si - (t - bp)) + (p - bp) + e
+		si = t
+		inner += math.Abs(a) * (math.Abs(xr) + math.Abs(xi))
+	}
+	return residualRowTail(x, i, hs.b[i*f.m+j], s, sr, cr, si, ci, inner, len(row))
 }
