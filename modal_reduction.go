@@ -200,9 +200,10 @@ const modalScoreTieTol = 1e-12
 // below the stability boundary (Re = 0, or |z| = 1) within which a mode
 // counts as on it, and so unstable, on top of its own rounding move:
 // exactly marginal modes are kept whatever the rounding, while modes
-// farther inside stay stable. In the census, modes exactly on the boundary
-// land within 8 units of it; the stable ones nearest it lie at 25 and then
-// beyond 190.
+// farther inside stay stable. In the census, clusters exactly on the
+// boundary land within 7.1 units of it, clusters with a root within
+// rounding of it reach 25.3 units, and the next ones lie beyond 190; the
+// band sits in that gap.
 const modalBoundaryBand = 64
 
 // modalSeparationBound caps ‖X‖_F of the Sylvester separation of the kept
