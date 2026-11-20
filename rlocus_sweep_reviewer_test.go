@@ -3,6 +3,7 @@ package controlsys
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -60,6 +61,7 @@ func rvRun(c rvCase) rvOut {
 		o.Err = "new: " + err.Error()
 		return o
 	}
+	undelayed := sys.Copy()
 	if c.InDelay > 0 {
 		if err := sys.SetInputDelay([]float64{float64(c.InDelay)}); err != nil {
 			o.Err = "delay: " + err.Error()
@@ -79,10 +81,13 @@ func rvRun(c rvCase) rvOut {
 	if p, err := abs.Poles(); err == nil {
 		o.Poles = rvPairs(p)
 	}
-	if z, err := abs.Zeros(); err == nil {
+	if z, err := undelayed.Zeros(); err == nil || errors.Is(err, ErrAccuracyUnverified) {
 		o.Zeros = rvPairs(z)
 	}
 	res, err := RootLocus(sys, c.Gains)
+	if errors.Is(err, ErrAccuracyUnverified) && res != nil {
+		o.Unv, err = true, nil
+	}
 	if err != nil {
 		o.Err = err.Error()
 		return o
@@ -249,10 +254,14 @@ func rvOracles(cs []rvCase) []rvOra {
 	return oras
 }
 
-// rlrvLimits are base-correct breakaway verdicts logged, not enforced
-// (none since the exact breakaway path; the w17 #58 cancellation class
-// 1328, 1517, 1622, 1794 is resolved exactly).
-var rlrvLimits = map[int]string{}
+// rlrvLimits are base-correct verdicts logged, not enforced. No Breakaway
+// since the exact breakaway path (the w17 #58 cancellation class 1328,
+// 1517, 1622, 1794 is resolved exactly). 1691 (GVD7AS ruling 9): on both
+// arches the within-terms oracle scores base's zeros wrong and the
+// certified ones right, and one zero added in band is refuted.
+var rlrvLimits = map[int]string{
+	1691: "certified zeros 5e-5 from the intended −30 ± 3.75i; an arrival angle 1.3e-3 rad off",
+}
 
 type rlrvGolden struct {
 	Base string            `json:"base"`
@@ -275,10 +284,15 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 	oras := sw.cachedOracles(t, cs)
 	bits := make([]int, len(cs))
 	outs := make([]rvOut, len(cs))
+	unv := 0
 	for i, c := range cs {
 		outs[i] = rvRun(c)
 		bits[i] = rvBits(rvScoreCase(c, oras[i], outs[i]))
+		if outs[i].Unv {
+			unv++
+		}
 	}
+	rlswCheckUnv(t, sw.golden, unv)
 	enc := func(v []int) string {
 		b := make([]byte, 0, 2*len(v))
 		for _, x := range v {
@@ -329,8 +343,10 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 				t.Logf("case %d %s/%s: %s differs from base on a float TF that is not the intended one", c.ID, c.Fam, c.Xf, names[k])
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvCen && base&rlrvAsym == 0:
 				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", c.ID, c.Fam, c.Xf, outs[i].Cen, oras[i].I.Centroid)
-			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && sw.limits[c.ID] != "":
-				t.Logf("case %d %s/%s: Breakaway differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, sw.limits[c.ID])
+			case base&m != 0 && bits[i]&m == 0 && sw.limits[c.ID] != "":
+				t.Logf("case %d %s/%s: %s differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, names[k], sw.limits[c.ID])
+			case base&m != 0 && bits[i]&m == 0 && rlswCertifiedCountExempt(sw.golden, c.ID, names[k], len(outs[i].Arr), oras[i].DegN):
+				t.Logf("case %d %s/%s: %s differs from the intended TF's zero count: %s", c.ID, c.Fam, c.Xf, names[k], rlswCertifiedCounts[sw.golden][c.ID].reason)
 			case base&m != 0 && bits[i]&m == 0:
 				regressed[k]++
 				if regressed[k] <= 5 {
@@ -1599,6 +1615,7 @@ func rvSamePts(a, b rvOracle, far float64) bool {
 type rvOut struct {
 	ID     int
 	Err    string
+	Unv    bool
 	Bk     [][2]float64
 	Asym   []float64
 	Cen    float64

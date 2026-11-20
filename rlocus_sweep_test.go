@@ -2,12 +2,14 @@ package controlsys
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -514,12 +516,18 @@ func rlswGains(d float64) []float64 {
 // twice: distinct exact stationary points may round close). Breakaway is
 // judged by the float-realization oracle oFlt alone, the others by the
 // intended TF.
-func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, err error) {
+// rlswVerdict judges RootLocus on c; a result returned with
+// ErrAccuracyUnverified (uncertified zeros) is judged as a value, and unv
+// reports it.
+func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup, unv bool, err error) {
 	sys, err := c.system()
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, false, false, err
 	}
 	res, rerr := RootLocus(sys, rlswGains(c.d))
+	if errors.Is(rerr, ErrAccuracyUnverified) && res != nil {
+		unv, rerr = true, nil
+	}
 	if oFlt.posed {
 		posed |= rlswBreak
 	}
@@ -552,7 +560,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 		posed |= rlswDepart
 	}
 	if rerr != nil {
-		return 0, posed, false, nil
+		return 0, posed, false, false, nil
 	}
 	for i, x := range res.Breakaway {
 		dup = dup || slices.Contains(res.Breakaway[i+1:], x)
@@ -594,12 +602,12 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 		abs := sys
 		if c.L > 0 {
 			if abs, err = sys.AbsorbDelay(); err != nil {
-				return ok, posed, dup, err
+				return ok, posed, dup, unv, err
 			}
 		}
 		got, err := abs.Poles()
 		if err != nil {
-			return ok, posed, dup, err
+			return ok, posed, dup, unv, err
 		}
 		dok := len(got) == len(poles) && len(res.DepartureAngles) == len(poles)
 		for i := 0; dok && i < len(got); i++ {
@@ -625,7 +633,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 			ok |= rlswDepart
 		}
 	}
-	return ok, posed, dup, nil
+	return ok, posed, dup, unv, nil
 }
 
 func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
@@ -653,21 +661,51 @@ type rlswGolden struct {
 	Posed string `json:"posed"`
 }
 
-func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int) {
+func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int, unv int) {
 	ok, posed = make([]int, len(cases)), make([]int, len(cases))
 	for i := range cases {
 		oi, of := cases[i].oracles()
 		var err error
-		var dup bool
-		ok[i], posed[i], dup, err = rlswVerdict(&cases[i], oi, of)
+		var dup, u bool
+		ok[i], posed[i], dup, u, err = rlswVerdict(&cases[i], oi, of)
 		if err != nil {
 			t.Fatalf("case %d: %v\n%s", i, err, &cases[i])
 		}
 		if dup {
 			dups = append(dups, i)
 		}
+		if u {
+			unv++
+		}
 	}
-	return ok, posed, dups
+	return ok, posed, dups, unv
+}
+
+// rlswCheckUnv fails when the number of cases whose RootLocus returned
+// uncertified zeros (ErrAccuracyUnverified, judged as a value) differs
+// from the count pinned for the sweep and architecture.
+func rlswCheckUnv(t *testing.T, sweep string, unv int) {
+	t.Helper()
+	want, ok := rlswUnvPinned[sweep][runtime.GOARCH]
+	if !ok {
+		t.Logf("%s: %d cases with uncertified zeros (no count pinned for %s)", sweep, unv, runtime.GOARCH)
+		return
+	}
+	if unv != want {
+		t.Errorf("%s: %d cases with uncertified zeros, pinned %d", sweep, unv, want)
+	}
+}
+
+// rlswUnvPinned is, per sweep and architecture, the number of cases whose
+// Zeros are not certified within the data's rounding (GVD7AS): RootLocus
+// returns their locus with ErrAccuracyUnverified, judged as a value.
+var rlswUnvPinned = map[string]map[string]int{
+	"pair":                                {"arm64": 3, "amd64": 1},
+	"testdata/rlocus_sweep_base.json":     {"arm64": 2, "amd64": 3},
+	"testdata/rlocus_sweep_dbl_base.json": {"arm64": 33, "amd64": 31},
+	"testdata/rlocus_sweep_ext_base.json": {"arm64": 17, "amd64": 15},
+	"testdata/rlocus_sweep_rv_base.json":  {"arm64": 0, "amd64": 0},
+	"testdata/rlocus_sweep_rv5_base.json": {"arm64": 21, "amd64": 24},
 }
 
 func rlswHex(v []int) string {
@@ -729,7 +767,8 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // when any case's Breakaway lists a point twice.
 func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
 	t.Helper()
-	ok, posed, dups := rlswRun(t, cases)
+	ok, posed, dups, unv := rlswRun(t, cases)
+	rlswCheckUnv(t, golden, unv)
 	if path := os.Getenv(env); path != "" {
 		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {
@@ -775,6 +814,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
+			case base[i]&m != 0 && ok[i]&m == 0 && rlswCertifiedCountExempt(golden, i, names[m], rlswZeroCount(&cases[i]), len(fzTrimRat(cases[i].num))-1):
+				t.Logf("case %d: %s differs from the intended TF's zero count: %s", i, names[m], rlswCertifiedCounts[golden][i].reason)
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
 				if regressed[bit] <= 5 {
@@ -795,6 +836,45 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
 		}
 	}
+}
+
+// rlswCertified is a sweep case whose Zeros certify, within the data's
+// rounding, a zero count other than the intended TF's: the components
+// listed (asymptotes, arrival angles) follow the certified count.
+type rlswCertified struct {
+	comps  []string
+	reason string
+}
+
+// rlswCertifiedCounts lists, per sweep golden file and case, the
+// certified-count exemptions (GVD7AS rulings 7, 8), each applied only
+// while the returned zero count differs from the intended TF's. Each holds
+// on arm64 and amd64: the 320-bit within-terms oracle scores base's zeros
+// wrong and the returned zeros right, and one zero added in band is
+// refuted.
+var rlswCertifiedCounts = map[string]map[int]rlswCertified{
+	"testdata/rlocus_sweep_base.json": {
+		347: {[]string{"Asymptotes", "ArrivalAngles count"}, "base Rank 0 refuted; 2 certified zeros, exact TF degree 3 (D = 0, data degree 0)"},
+	},
+}
+
+func rlswCertifiedCountExempt(golden string, id int, comp string, returned, intended int) bool {
+	e, ok := rlswCertifiedCounts[golden][id]
+	return ok && returned != intended && slices.Contains(e.comps, comp)
+}
+
+// rlswZeroCount is the number of finite zeros RootLocus reports for c (its
+// arrival angles), −1 on error.
+func rlswZeroCount(c *rlswCase) int {
+	sys, err := c.system()
+	if err != nil {
+		return -1
+	}
+	res, err := RootLocus(sys, rlswGains(c.d))
+	if res == nil || err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+		return -1
+	}
+	return len(res.ArrivalAngles)
 }
 
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64

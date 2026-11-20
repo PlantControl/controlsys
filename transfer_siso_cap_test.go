@@ -75,7 +75,7 @@ func TestTransferFunctionSISONoiseNumeratorRootLocus(t *testing.T) {
 			}
 		}
 		oi, of := c.oracles()
-		ok, posed, _, err := rlswVerdict(c, oi, of)
+		ok, posed, _, _, err := rlswVerdict(c, oi, of)
 		if err != nil {
 			t.Fatal(err)
 		}

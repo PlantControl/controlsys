@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -33,24 +34,66 @@ type ZerosResult struct {
 // contribute no finite zeros and are ignored. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html and
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
+//
+// For a square model (as many inputs as outputs, at most four) a nil error
+// certifies the returned zeros and Rank within the stored data's rounding:
+// there is a real c with |det G(s) − Z(s)| ≤ max(√ε·max(|det G|, |Z|),
+// K·ε·T_data) at the points of the check (the axis points beside every
+// zero, the static point, s = ∞ where G = D, and geometric fills over the
+// eigenvalues and over those resolved from the origin, 1 if discrete),
+// Z = c·Π(s − zᵢ)/det(sI − A), G the k×k response of rank k (of rows and columns spanning the others to
+// rounding when k is below the number of inputs), T_data = Σ|adj G_ji|·
+// T_ij and T_ij = Σ_l|C_il||X_lj| + |D_ij| + Σ_l|CY|_il(|A||X| + |B|)_lj,
+// Y = (sI − A)⁻¹, X = YB, the first-order change of G_ij when every stored
+// entry moves by ε relative, K = 8 (zerosCertify). Rank is the rank floor
+// at that rounding: det G must exceed K·ε·T_data at n + 1 of those points
+// (rank k), and every (k+1)-minor stays within it (rank below k). The zero
+// count is certified, individual root locations are not; a probe within
+// √ε|ẑ| of a nonzero zero is not judged. Where the computed zeros do not
+// verify, those of the exact determinant of the system pencil of the
+// stored data are tried (zerosTier2); where neither certifies within a
+// fixed work budget (about 1 s), the computed zeros and Rank are
+// returned with an error wrapping ErrAccuracyUnverified.
+//
+// Departures from that certificate: at Rank 0 the zeros (decoupling zeros
+// of the pencil) are returned unjudged, except where G ≡ 0 exactly, whose
+// zero count is checked exactly (follow-up 6UHLZO); square models with
+// more than four inputs, non-square models and descriptor models are not
+// checked (follow-ups SGROCT, 43EIC7).
 func (sys *System) Zeros() ([]complex128, error) {
 	res, err := sys.zerosDetail("Zeros")
-	if err != nil {
+	if res == nil {
 		return nil, err
 	}
-	return res.Zeros, nil
+	return res.Zeros, err
+}
+
+// zerosValue is Zeros without the within-terms certificate, for callers
+// that use the zeros as a value (seeds, scales, matched-pole fits): the
+// computed zeros as before the certificate, at no added cost.
+func (sys *System) zerosValue() ([]complex128, error) {
+	res, err := sys.zerosDetailOpt("Zeros", false)
+	if res == nil {
+		return nil, err
+	}
+	return res.Zeros, err
 }
 
 // ZerosDetail returns the invariant zeros together with the normal rank of
 // the transfer matrix, as MATLAB [z, nrank] = tzero(sys). A static gain has no
 // zeros and rank rank(D); a model with no inputs or outputs has rank 0.
-// Non-finite model data returns ErrInvalidArgument. See
+// Non-finite model data returns ErrInvalidArgument, and zeros not certified
+// within terms are returned with ErrAccuracyUnverified (see Zeros). See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) ZerosDetail() (*ZerosResult, error) {
 	return sys.zerosDetail("ZerosDetail")
 }
 
 func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
+	return sys.zerosDetailOpt(op, true)
+}
+
+func (sys *System) zerosDetailOpt(op string, certify bool) (*ZerosResult, error) {
 	if err := requireFiniteSystem(op, sys); err != nil {
 		return nil, err
 	}
@@ -71,8 +114,14 @@ func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
 		res, err = descriptorZeros(sys)
 	default:
 		res, err = mimoZeros(sys)
+		if err == nil && certify {
+			res, err = certifyZeros(sys, res)
+		}
 	}
 	if err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return res, fmt.Errorf("%s: %w", op, err)
+		}
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	return res, nil

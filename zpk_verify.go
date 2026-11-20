@@ -855,102 +855,21 @@ const zpkExactCapBits = 1 << 15
 // or a value is not finite in double.
 func zpkExactResponse(ref *System, s complex128) (e []zpkEntryBounds, zero, ok bool) {
 	n, m, _ := ref.Dims()
-	type crat struct{ re, im *big.Rat }
-	newC := func(re, im float64) crat {
-		return crat{new(big.Rat).SetFloat64(re), new(big.Rat).SetFloat64(im)}
+	x, _, zero, ok := exactSolveAt(ref.A, ref.B, s)
+	if !ok {
+		return nil, zero, false
 	}
-	big1 := func(x *big.Rat) bool {
-		return x.Num().BitLen() > zpkExactCapBits || x.Denom().BitLen() > zpkExactCapBits
-	}
-	aRaw, bRaw, cRaw := ref.A.RawMatrix(), ref.B.RawMatrix(), ref.C.RawMatrix()
-	w := n + m
-	a := make([]crat, n*w)
-	for i := range n {
-		for j := range n {
-			v := -aRaw.Data[i*aRaw.Stride+j]
-			if i == j {
-				a[i*w+j] = crat{new(big.Rat).SetFloat64(v), new(big.Rat).SetFloat64(imag(s))}
-				a[i*w+j].re.Add(a[i*w+j].re, new(big.Rat).SetFloat64(real(s)))
-			} else {
-				a[i*w+j] = newC(v, 0)
-			}
-		}
-		for j := range m {
-			a[i*w+n+j] = newC(bRaw.Data[i*bRaw.Stride+j], 0)
-		}
-	}
-	t1, t2, t3 := new(big.Rat), new(big.Rat), new(big.Rat)
-	mul := func(x, y crat) crat {
-		re := new(big.Rat).Mul(x.re, y.re)
-		re.Sub(re, t1.Mul(x.im, y.im))
-		im := new(big.Rat).Mul(x.re, y.im)
-		im.Add(im, t1.Mul(x.im, y.re))
-		return crat{re, im}
-	}
-	inv := func(x crat) crat {
-		d := new(big.Rat).Mul(x.re, x.re)
-		d.Add(d, t2.Mul(x.im, x.im))
-		re := new(big.Rat).Quo(x.re, d)
-		im := new(big.Rat).Quo(t3.Neg(x.im), d)
-		return crat{re, im}
-	}
-	for k := range n {
-		p := -1
-		for i := k; i < n; i++ {
-			if a[i*w+k].re.Sign() != 0 || a[i*w+k].im.Sign() != 0 {
-				p = i
-				break
-			}
-		}
-		if p < 0 {
-			return nil, true, false
-		}
-		if p != k {
-			for j := range w {
-				a[k*w+j], a[p*w+j] = a[p*w+j], a[k*w+j]
-			}
-		}
-		ip := inv(a[k*w+k])
-		for i := k + 1; i < n; i++ {
-			if a[i*w+k].re.Sign() == 0 && a[i*w+k].im.Sign() == 0 {
-				continue
-			}
-			f := mul(a[i*w+k], ip)
-			for j := k + 1; j < w; j++ {
-				d := mul(f, a[k*w+j])
-				a[i*w+j].re.Sub(a[i*w+j].re, d.re)
-				a[i*w+j].im.Sub(a[i*w+j].im, d.im)
-				if big1(a[i*w+j].re) || big1(a[i*w+j].im) {
-					return nil, false, false
-				}
-			}
-		}
-	}
-	x := make([]crat, n*m)
-	for j := range m {
-		for i := n - 1; i >= 0; i-- {
-			v := crat{new(big.Rat).Set(a[i*w+n+j].re), new(big.Rat).Set(a[i*w+n+j].im)}
-			for l := i + 1; l < n; l++ {
-				d := mul(a[i*w+l], x[l*m+j])
-				v.re.Sub(v.re, d.re)
-				v.im.Sub(v.im, d.im)
-			}
-			x[i*m+j] = mul(v, inv(a[i*w+i]))
-			if big1(x[i*m+j].re) || big1(x[i*m+j].im) {
-				return nil, false, false
-			}
-		}
-	}
+	cRaw := ref.C.RawMatrix()
 	e = make([]zpkEntryBounds, m)
 	for j := range m {
-		g := crat{new(big.Rat), new(big.Rat)}
+		g := ratC{new(big.Rat), new(big.Rat)}
 		t := 0.0
 		for l := range n {
 			c := cRaw.Data[l]
 			if c == 0 {
 				continue
 			}
-			d := mul(newC(c, 0), x[l*m+j])
+			d := x[l*m+j].mulReal(c)
 			g.re.Add(g.re, d.re)
 			g.im.Add(g.im, d.im)
 			xr, _ := x[l*m+j].re.Float64()
@@ -968,6 +887,177 @@ func zpkExactResponse(ref *System, s complex128) (e []zpkEntryBounds, zero, ok b
 		e[j] = zpkEntryBounds{g: gv, ver: vb, comp: vb, lo: t - dT, hi: t + dT, determined: true}
 	}
 	return e, false, true
+}
+
+// ratC is a complex rational.
+type ratC struct{ re, im *big.Rat }
+
+func newRatC(re, im float64) ratC {
+	return ratC{new(big.Rat).SetFloat64(re), new(big.Rat).SetFloat64(im)}
+}
+
+func (x ratC) mul(y ratC) ratC {
+	var t big.Rat
+	re := new(big.Rat).Mul(x.re, y.re)
+	re.Sub(re, t.Mul(x.im, y.im))
+	im := new(big.Rat).Mul(x.re, y.im)
+	im.Add(im, t.Mul(x.im, y.re))
+	return ratC{re, im}
+}
+
+func (x ratC) mulReal(c float64) ratC {
+	r := new(big.Rat).SetFloat64(c)
+	return ratC{new(big.Rat).Mul(x.re, r), new(big.Rat).Mul(x.im, r)}
+}
+
+func (x ratC) inv() ratC {
+	var t big.Rat
+	d := new(big.Rat).Mul(x.re, x.re)
+	d.Add(d, t.Mul(x.im, x.im))
+	return ratC{new(big.Rat).Quo(x.re, d), new(big.Rat).Quo(new(big.Rat).Neg(x.im), d)}
+}
+
+func (x ratC) isZero() bool { return x.re.Sign() == 0 && x.im.Sign() == 0 }
+
+func (x ratC) complex128() complex128 {
+	re, _ := x.re.Float64()
+	im, _ := x.im.Float64()
+	return complex(re, im)
+}
+
+// exactSolveAt returns X = (sI − A)⁻¹B and χ = det(sI − A) of the stored
+// data at the floating-point s exactly, by Gaussian elimination in complex
+// rationals. zero reports an exactly singular sI − A, s an exact
+// eigenvalue; ok is false then or when a numerator or denominator exceeds
+// zpkExactCapBits bits.
+func exactSolveAt(A, B *mat.Dense, s complex128) (x []ratC, chi ratC, zero, ok bool) {
+	return exactSolveAtSpend(A, B, s, nil)
+}
+
+// ratCWords is the size of x in 64-bit words, numerators and denominators.
+func ratCWords(x ratC) int64 {
+	return int64(x.re.Num().BitLen()+x.re.Denom().BitLen()+x.im.Num().BitLen()+x.im.Denom().BitLen())/64 + 1
+}
+
+// ratSubCost is the work charged for v − f·a with operands of wf, wa and
+// wv words: the product, the quadratic gcd that normalizes the result and
+// a fixed cost per rational operation.
+func ratSubCost(wf, wa, wv int64) int64 {
+	w := wf + wa + wv
+	return wf*wa + w*w + 40
+}
+
+// exactSolveAtSpend is exactSolveAt charging spend, when non-nil,
+// ratSubCost for every update of the elimination and the back
+// substitution, and stopping (ok false) once spend refuses.
+func exactSolveAtSpend(A, B *mat.Dense, s complex128, spend func(int64) bool) (x []ratC, chi ratC, zero, ok bool) {
+	n, m := B.Dims()
+	big1 := func(x *big.Rat) bool {
+		return x.Num().BitLen() > zpkExactCapBits || x.Denom().BitLen() > zpkExactCapBits
+	}
+	aRaw, bRaw := A.RawMatrix(), B.RawMatrix()
+	w := n + m
+	a := make([]ratC, n*w)
+	for i := range n {
+		for j := range n {
+			v := -aRaw.Data[i*aRaw.Stride+j]
+			if i == j {
+				a[i*w+j] = ratC{new(big.Rat).SetFloat64(v), new(big.Rat).SetFloat64(imag(s))}
+				a[i*w+j].re.Add(a[i*w+j].re, new(big.Rat).SetFloat64(real(s)))
+			} else {
+				a[i*w+j] = newRatC(v, 0)
+			}
+		}
+		for j := range m {
+			a[i*w+n+j] = newRatC(bRaw.Data[i*bRaw.Stride+j], 0)
+		}
+	}
+	chi = newRatC(1, 0)
+	for k := range n {
+		p := -1
+		for i := k; i < n; i++ {
+			if !a[i*w+k].isZero() {
+				p = i
+				break
+			}
+		}
+		if p < 0 {
+			return nil, ratC{}, true, false
+		}
+		if p != k {
+			for j := range w {
+				a[k*w+j], a[p*w+j] = a[p*w+j], a[k*w+j]
+			}
+			chi = ratC{new(big.Rat).Neg(chi.re), new(big.Rat).Neg(chi.im)}
+		}
+		if spend != nil {
+			wp := ratCWords(a[k*w+k])
+			if !spend(ratSubCost(ratCWords(chi), wp, 0) + ratSubCost(wp, wp, 0)) {
+				return nil, ratC{}, false, false
+			}
+		}
+		chi = chi.mul(a[k*w+k])
+		ip := a[k*w+k].inv()
+		for i := k + 1; i < n; i++ {
+			if a[i*w+k].isZero() {
+				continue
+			}
+			if spend != nil && !spend(ratSubCost(ratCWords(a[i*w+k]), ratCWords(ip), 0)) {
+				return nil, ratC{}, false, false
+			}
+			f := a[i*w+k].mul(ip)
+			if spend != nil {
+				fw, u := ratCWords(f), int64(0)
+				for j := k + 1; j < w; j++ {
+					if !a[k*w+j].isZero() {
+						u += ratSubCost(fw, ratCWords(a[k*w+j]), ratCWords(a[i*w+j]))
+					}
+				}
+				if !spend(u) {
+					return nil, ratC{}, false, false
+				}
+			}
+			for j := k + 1; j < w; j++ {
+				if a[k*w+j].isZero() {
+					continue
+				}
+				d := f.mul(a[k*w+j])
+				a[i*w+j].re.Sub(a[i*w+j].re, d.re)
+				a[i*w+j].im.Sub(a[i*w+j].im, d.im)
+				if big1(a[i*w+j].re) || big1(a[i*w+j].im) {
+					return nil, ratC{}, false, false
+				}
+			}
+		}
+	}
+	x = make([]ratC, n*m)
+	for j := range m {
+		for i := n - 1; i >= 0; i-- {
+			v := ratC{new(big.Rat).Set(a[i*w+n+j].re), new(big.Rat).Set(a[i*w+n+j].im)}
+			for l := i + 1; l < n; l++ {
+				if a[i*w+l].isZero() || x[l*m+j].isZero() {
+					continue
+				}
+				if spend != nil && !spend(ratSubCost(ratCWords(a[i*w+l]), ratCWords(x[l*m+j]), ratCWords(v))) {
+					return nil, ratC{}, false, false
+				}
+				d := a[i*w+l].mul(x[l*m+j])
+				v.re.Sub(v.re, d.re)
+				v.im.Sub(v.im, d.im)
+			}
+			if spend != nil {
+				wp := ratCWords(a[i*w+i])
+				if !spend(ratSubCost(wp, wp, 0) + ratSubCost(ratCWords(v), wp, 0)) {
+					return nil, ratC{}, false, false
+				}
+			}
+			x[i*m+j] = v.mul(a[i*w+i].inv())
+			if big1(x[i*m+j].re) || big1(x[i*m+j].im) {
+				return nil, ratC{}, false, false
+			}
+		}
+	}
+	return x, chi, false, true
 }
 
 // zpkDDResponse evaluates the strictly proper single-output response

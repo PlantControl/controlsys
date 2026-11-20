@@ -146,7 +146,7 @@ func matchedD2CPencilRoots(sys *System, numerator []float64, cz, cp []complex128
 // matchedD2CInvariantZeros returns the count invariant zeros of sys less
 // the artificial ones nearest −1.
 func matchedD2CInvariantZeros(sys *System, count, artificial int) ([]complex128, bool) {
-	pz, err := sys.Zeros()
+	pz, err := sys.zerosValue()
 	if err != nil || len(pz) != count {
 		return nil, false
 	}
@@ -377,7 +377,7 @@ func matchedPencilRoots(sys *System, cz, cp []complex128, k float64) (zeros, pol
 	if err != nil || len(poles) == 0 || len(poles) != len(cp) {
 		return nil, nil, 0, false
 	}
-	zeros, err = sys.Zeros()
+	zeros, err = sys.zerosValue()
 	if err != nil || len(zeros) != len(cz) {
 		return nil, nil, 0, false
 	}

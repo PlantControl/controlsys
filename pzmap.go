@@ -1,6 +1,9 @@
 package controlsys
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // PzmapResult holds the poles and transmission zeros of a model.
 type PzmapResult struct {
@@ -10,7 +13,9 @@ type PzmapResult struct {
 
 // Pzmap returns the poles and transmission zeros of sys, as the
 // [p,z] = pzmap(sys) outputs of MATLAB pzmap
-// (https://www.mathworks.com/help/control/ref/lti.pzmap.html).
+// (https://www.mathworks.com/help/control/ref/lti.pzmap.html). Zeros that
+// Zeros does not certify within the data's rounding terms are returned
+// with the result and an error wrapping ErrAccuracyUnverified.
 func Pzmap(sys *System) (*PzmapResult, error) {
 	if err := requireFiniteSystem("Pzmap", sys); err != nil {
 		return nil, err
@@ -20,8 +25,12 @@ func Pzmap(sys *System) (*PzmapResult, error) {
 		return nil, fmt.Errorf("Pzmap: %w", err)
 	}
 	zeros, err := sys.Zeros()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 		return nil, fmt.Errorf("Pzmap: %w", err)
 	}
-	return &PzmapResult{Poles: poles, Zeros: zeros}, nil
+	res := &PzmapResult{Poles: poles, Zeros: zeros}
+	if err != nil {
+		return res, fmt.Errorf("Pzmap: %w", err)
+	}
+	return res, nil
 }
