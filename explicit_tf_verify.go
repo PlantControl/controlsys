@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"runtime"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -433,7 +434,7 @@ func foldResidualFull(sys, ex *System, k int) (ra, rb, raV, rbV, raE, rbE []floa
 					p := float64(ev * xs[l])
 					t := rs + p
 					bp := t - rs
-					rc += (rs - (t - bp)) + (p - bp) + math.FMA(ev, xs[l], -p)
+					rc += (rs - (t - bp)) + (p - bp) + prodErr(ev, xs[l], p)
 					rs = t
 					mag += math.Abs(p)
 				}
@@ -1399,12 +1400,12 @@ func denseResidualRow(x []complex128, row []float64, i int, b float64, s complex
 		p := float64(a * xr)
 		t := sr + p
 		bp := t - sr
-		cr += (sr - (t - bp)) + (p - bp) + math.FMA(a, xr, -p)
+		cr += (sr - (t - bp)) + (p - bp) + prodErr(a, xr, p)
 		sr = t
 		p = float64(a * xi)
 		t = si + p
 		bp = t - si
-		ci += (si - (t - bp)) + (p - bp) + math.FMA(a, xi, -p)
+		ci += (si - (t - bp)) + (p - bp) + prodErr(a, xi, p)
 		si = t
 		inner += math.Abs(a) * (math.Abs(xr) + math.Abs(xi))
 	}
@@ -1423,4 +1424,24 @@ func denseResidualRow(x []complex128, row []float64, i int, b float64, s complex
 	k := len(row)
 	e = (dot2Err(7)*outer+dot2Err(k)*inner)*(1+float64(k+16)*termsEps) + (float64(4*k)+64)*0x1p-1074
 	return complex(re.value(), im.value()), e
+}
+
+// fmaFast reports a hardware FMA: arm64 always has one, while amd64
+// emulates math.FMA in software where the CPU lacks it.
+var fmaFast = runtime.GOARCH == "arm64"
+
+// prodErr is a·b − p exactly for p = fl(a·b): by FMA where it is fast,
+// else by Dekker's product on Veltkamp splits (twoProdSplit), exact while
+// |a| and |b| stay below 2⁹⁹⁵ and p does not underflow, FMA past that.
+func prodErr(a, b, p float64) float64 {
+	if fmaFast {
+		return math.FMA(a, b, -p)
+	}
+	if math.Abs(a) >= 0x1p995 || math.Abs(b) >= 0x1p995 {
+		return math.FMA(a, b, -p)
+	}
+	ah, al := veltkampSplit(a)
+	bh, bl := veltkampSplit(b)
+	_, e := twoProdSplit(a, ah, al, b, bh, bl)
+	return e
 }
