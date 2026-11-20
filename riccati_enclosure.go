@@ -460,6 +460,17 @@ func encSym[M encNum[M]](a M) M { return a.add(a.t(), 1).scale(0.5) }
 type encOps[M encNum[M]] struct {
 	a, b, q, r, s, e M
 	hasS             bool
+	// eIdent: E is the identity, EᵀXE = X exactly (a product by 1 and
+	// sums of exact zeros), so it is not formed.
+	eIdent bool
+}
+
+// ete is EᵀxE.
+func (o *encOps[M]) ete(x M) M {
+	if o.eIdent {
+		return x
+	}
+	return o.e.mul(x.mul(o.e, false), true)
 }
 
 func (o *encOps[M]) acl(k M) M { return o.a.add(o.b.mul(k, false), -1) }
@@ -506,7 +517,7 @@ func newEncData(A, B, Q, R, S, E *mat.Dense) *encData {
 	d := &ws.data
 	*d = encData{n: n, m: m, A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws}
 	d.aA, d.aB, d.aQ, d.aR, d.aE = d.absOf(A), d.absOf(B), d.absOf(Q), d.absOf(R), d.absOf(E)
-	d.dd = encOps[encDD]{a: encDDIn(ws, A), b: encDDIn(ws, B), q: encDDIn(ws, Q), r: encDDIn(ws, R), e: encDDIn(ws, E), hasS: S != nil}
+	d.dd = encOps[encDD]{a: encDDIn(ws, A), b: encDDIn(ws, B), q: encDDIn(ws, Q), r: encDDIn(ws, R), e: encDDIn(ws, E), hasS: S != nil, eIdent: isIdentityDescriptor(E)}
 	if S != nil {
 		d.aS = d.absOf(S)
 		d.aSt = d.transposed(d.aS)
@@ -545,7 +556,7 @@ func (d *encData) big() *encOps[encBig] {
 			d.ar = encArenas.Get().(*encArena)
 		}
 		ar := d.ar
-		o := &encOps[encBig]{a: encBigOf(ar, d.A), b: encBigOf(ar, d.B), q: encBigOf(ar, d.Q), r: encBigOf(ar, d.R), e: encBigOf(ar, d.E), hasS: d.S != nil}
+		o := &encOps[encBig]{a: encBigOf(ar, d.A), b: encBigOf(ar, d.B), q: encBigOf(ar, d.Q), r: encBigOf(ar, d.R), e: encBigOf(ar, d.E), hasS: d.S != nil, eIdent: d.dd.eIdent}
 		if d.S != nil {
 			o.s = encBigOf(ar, d.S)
 		}
@@ -609,7 +620,11 @@ func (d *encData) psi(ax, ak, ahat *mat.Dense, v float64) (pr, pg, pw *mat.Dense
 		g1.Scale(c1, g1)
 		pg.Add(pg, g1)
 	}
-	pr.Add(pr, d.mul3T(d.aE, ax, d.aE))
+	if d.dd.eIdent {
+		pr.Add(pr, ax)
+	} else {
+		pr.Add(pr, d.mul3T(d.aE, ax, d.aE))
+	}
 	pr.Add(pr, d.aQ)
 	pr.Add(pr, d.mul3T(ak, d.aR, ak))
 	rk := d.ws.mat(m, n)
@@ -849,7 +864,7 @@ func encPiecesOf[M encNum[M]](o *encOps[M], c, k M) encPieces[M] {
 		p.qk = p.qk.add(sk, -1).add(sk.t(), -1)
 		p.rks = p.rks.add(o.s.t(), -1)
 	}
-	p.r = encSym(p.ak.mul(c.mul(p.ak, false), true).add(o.e.mul(c.mul(o.e, false), true), -1).add(p.qk, 1))
+	p.r = encSym(p.ak.mul(c.mul(p.ak, false), true).add(o.ete(c), -1).add(p.qk, 1))
 	p.g = p.rks.add(o.b.mul(c.mul(p.ak, false), true), -1)
 	p.w = encSym(o.r.add(o.b.mul(c.mul(o.b, false), true), 1))
 	return p
@@ -870,7 +885,7 @@ func encXDir[M encNum[M]](o *encOps[M], p encPieces[M], s float64, cat func(a, b
 // N_K(c − D_L) = [[r − A_KᵀD_LA_K + EᵀD_LE, −(g + BᵀD_LA_K)ᵀ], [·,
 // W(c) − BᵀD_LB]].
 func encSDir[M encNum[M]](o *encOps[M], p encPieces[M], du, dl M, cat func(a, b, c M) M) (M, M) {
-	md := func(d M) M { return p.ak.mul(d.mul(p.ak, false), true).add(o.e.mul(d.mul(o.e, false), true), -1) }
+	md := func(d M) M { return p.ak.mul(d.mul(p.ak, false), true).add(o.ete(d), -1) }
 	zu := encSym(p.r.add(md(du), 1).scale(-1))
 	z11 := encSym(p.r.add(md(dl), -1))
 	g := p.g.add(o.b.mul(dl.mul(p.ak, false), true), 1)
@@ -955,7 +970,11 @@ func (d *encData) sdirBounds(b encBounds, du, dl *mat.Dense, v float64) (*mat.De
 	f := 8 * v
 	mpsi := func(x *mat.Dense) *mat.Dense {
 		o := d.mul3T(b.ah, x, b.ah)
-		o.Add(o, d.mul3T(d.aE, x, d.aE))
+		if d.dd.eIdent {
+			o.Add(o, x)
+		} else {
+			o.Add(o, d.mul3T(d.aE, x, d.aE))
+		}
 		return o
 	}
 	pu, pl := mpsi(du), mpsi(dl)
