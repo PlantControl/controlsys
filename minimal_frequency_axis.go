@@ -858,23 +858,25 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 }
 
 // bandResponses returns the bounded responses of sys and red at pts. Where
-// a point of either leaves the double range, both are formed instead on
-// their balanced realizations with B̂ and Ĉ scaled by the same powers of
-// two, 2^−eB and 2^−eC with 2^eB, 2^eC the scales of sys's largest |B̂_ij|
-// and |Ĉ_ij|, when that is exact for both: every response, bound and term
-// a band judge reads is bilinear in B̂ and Ĉ and the judges compare them
-// only relative to one another, so the verdicts are those of the stored
-// data, computed with the overflow gone. A point that still leaves the
-// range is undetermined (classifyProbe).
+// a point of either leaves the double range (inRange; underflow only when
+// 2^(eB+eC) < 1 below), both are formed instead on their balanced
+// realizations with B̂ and Ĉ scaled by the same powers of two, 2^−eB and
+// 2^−eC with 2^eB, 2^eC the scales of sys's largest |B̂_ij| and |Ĉ_ij|,
+// when that is exact for both: every response, bound and term a band
+// judge reads is bilinear in B̂ and Ĉ and the judges compare them only
+// relative to one another, so the verdicts are those of the stored data,
+// computed with the overflow or underflow gone. A point that still
+// overflows is undetermined (classifyProbe).
 func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse) {
 	n, m, p := sys.Dims()
 	nr, _, _ := red.Dims()
 	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
 	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
-	if full.finite() && cut.finite() {
+	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
+	under := eB+eC < 0
+	if full.inRange(&rf, under) && cut.inRange(&rc, under) {
 		return full, cut
 	}
-	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
 	sf, okF := scaledIO(rf, eB, eC)
 	sc, okC := scaledIO(rc, eB, eC)
 	if eB == 0 && eC == 0 || !okF || !okC {
@@ -885,17 +887,34 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 	return boundedResponseOf(sf, pts), boundedResponseOf(sc, pts)
 }
 
-// finite reports whether every response and bound at the ok points of b
-// is finite.
-func (b *boundedResponse) finite() bool {
-	pm := b.p * b.m
+// inRange reports whether every response and bound at the ok points of b,
+// the response of rz, is finite and, with under, every entry that rz's B̂
+// and Ĉ do not zero structurally has terms of at least 2^−969, above which
+// their rounding is relative: below it a response and its bounds
+// underflow, to an exact zero that verifies any cut.
+func (b *boundedResponse) inRange(rz *balancedRealization, under bool) bool {
+	const tiny = 0x1p-969
+	n, m, p := rz.n, rz.m, rz.p
+	live := make([]bool, p*m)
+	for i := range p {
+		for j := range m {
+			var cz, bz bool
+			for l := range n {
+				cz = cz || rz.c[i*n+l] != 0
+				bz = bz || rz.b[l*m+j] != 0
+			}
+			live[i*m+j] = under && cz && bz
+		}
+	}
+	pm := p * m
 	for k, ok := range b.ok {
 		if !ok {
 			continue
 		}
-		for o := k * pm; o < (k+1)*pm; o++ {
+		for y := range pm {
+			o := k*pm + y
 			g := b.g[o]
-			if !finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o]) {
+			if !finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o]) || live[y] && b.terms[o] < tiny {
 				return false
 			}
 		}

@@ -62,3 +62,47 @@ func TestReduceOverflowScaledIOKeepsCut(t *testing.T) {
 		}
 	}
 }
+
+// Reduce under Equalize judged an underflow-scaled model (B·2^−531,
+// C·2^−589: |G| ≈ 2^−1076, below the double range) by responses, bounds
+// and terms that all underflow to exact zeros, so 0 ≤ tol·0 verified the
+// order-0 cut of a model whose exact response is nonzero. The band judges
+// it in exactly rescaled units (census row matched/8, unf scaling; QMVNHR).
+func TestReduceUnderflowScaledIONoZeroCut(t *testing.T) {
+	a := []float64{
+		0x1.fd0b31135a628p-01, 0x1.fd2e6d8452546p+00, 0x1.fcaee57366e44p+00, -0x1.62ff9e02622p-10, 0x1p+00, 0, 0,
+		0, 0x1.fa5cdb08a4a8bp-01, 0x1.fcaee57366e44p+00, -0x1.62ff9e02622p-10, 0x1p+00, 0, 0,
+		0, 0, 0x1.f95dcae6cdc89p-01, -0x1.62ff9e02622p-10, 0x1p+00, 0, 0,
+		0, 0, 0, 0x1.f7e8728e5a619p-01, 0x1p+00, 0, 0,
+		0, 0, 0, 0, 0x1.f6c955edc9022p-01, 0x1.3689cf2f46abfp+08, 0x1.fb164ee06b725p+01,
+		0, 0, 0, 0, 0, 0x1.f62c9dc0d6e4ap-01, 0x1.9e007c8ce8ea6p-07,
+		0, 0, 0, 0, 0, -0x1.9e007c8ce8ea6p-07, 0x1.f62c9dc0d6e4ap-01,
+	}
+	b := []float64{0, 0, 0, 0, 0x1p-531, 0, 0x1p-531}
+	c := []float64{0x1.f5af98510313dp-589, 0x1.f45e5dca9fd7dp-589, 0x1.f3e10ac98420cp-589, -0x1.5cdab40d7149p-599, 0x1.f7237328f0838p-590, 0, 0}
+	sys, err := New(mat.NewDense(7, 7, a), mat.NewDense(7, 1, b), mat.NewDense(1, 7, c), mat.NewDense(1, 1, nil), 0.01)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := func(m *mat.Dense, e int) *mat.Dense {
+		out := mat.DenseCopyOf(m)
+		out.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, e) }, out)
+		return out
+	}
+	ref, err := New(sys.A, up(sys.B, 531), up(sys.C, 589), sys.D, sys.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := &ReduceOpts{Equalize: true}
+	want, err := ref.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Order != want.Order {
+		t.Fatalf("underflow-scaled order %d, in-range %d", got.Order, want.Order)
+	}
+}
