@@ -862,7 +862,7 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 
 // bandResponses returns the bounded responses of sys and red at pts, and
 // whether the band may judge them. A response or bound that overflows, or
-// with 2^(eB+eC) < 1 an entry not zeroed by B̂ and Ĉ whose terms fall below
+// with 2^(eB+eC) < 1 an entry not structurally zero whose terms fall below
 // 2^−969, where rounding stops being relative (inRange), leaves the double
 // range; 2^eB and 2^eC are the scales of sys's largest |B̂_ij| and |Ĉ_ij|.
 // On overflow the band refuses the cut: the pole resolutions its windows
@@ -912,38 +912,73 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 
 // inRange reports whether every response and bound at the ok points of b,
 // the response of rz, is finite, and, with under, whether every entry that
-// rz's B̂ and Ĉ do not zero structurally has terms of at least 2^−969,
-// above which their rounding is relative: below it a response and its
-// bounds underflow, to an exact zero that verifies any cut.
+// is not structurally zero (no path from its input through the nonzeros of
+// Â to its output) has terms of at least 2^−969, above which their rounding
+// is relative, or exactly zero, and is not zero at every ok point: below
+// it a response and its bounds underflow, to an exact zero that verifies
+// any cut, while an isolated exact zero is the stored data's own.
 func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, big bool) {
 	const tiny = 0x1p-969
 	n, m, p := rz.n, rz.m, rz.p
 	var live []bool
 	if under {
 		live = make([]bool, p*m)
-		for i := range p {
-			for j := range m {
-				var cz, bz bool
-				for l := range n {
-					cz = cz || rz.c[i*n+l] != 0
-					bz = bz || rz.b[l*m+j] != 0
+		reach := make([]bool, n)
+		stack := make([]int, 0, n)
+		for j := range m {
+			clear(reach)
+			stack = stack[:0]
+			for l := range n {
+				if rz.b[l*m+j] != 0 {
+					reach[l] = true
+					stack = append(stack, l)
 				}
-				live[i*m+j] = cz && bz
+			}
+			for len(stack) > 0 {
+				l := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				for q := range n {
+					if !reach[q] && rz.a[q*n+l] != 0 {
+						reach[q] = true
+						stack = append(stack, q)
+					}
+				}
+			}
+			for i := range p {
+				for l := range n {
+					if reach[l] && rz.c[i*n+l] != 0 {
+						live[i*m+j] = true
+						break
+					}
+				}
 			}
 		}
 	}
 	pm := p * m
 	finite, big = true, true
+	var nonzero []bool
+	if under {
+		nonzero = make([]bool, pm)
+	}
+	seen := false
 	for k, ok := range b.ok {
 		if !ok {
 			continue
 		}
+		seen = true
 		for y := range pm {
 			o := k*pm + y
 			g := b.g[o]
 			finite = finite && finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o])
-			big = big && !(under && live[y] && b.terms[o] < tiny)
+			if under && live[y] {
+				t := b.terms[o]
+				big = big && !(t > 0 && t < tiny)
+				nonzero[y] = nonzero[y] || t != 0
+			}
 		}
+	}
+	for y := range nonzero {
+		big = big && !(seen && live[y] && !nonzero[y])
 	}
 	return finite, big
 }
