@@ -3972,7 +3972,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		if it == 0 {
 			if step <= newtonTol {
 				var delta []float64
-				if !continuous {
+				if !continuous && !problem.noDelta {
 					delta = slices.Clone(problem.lastDelta)
 				}
 				problem.closedLoopEig(eig)
@@ -3989,7 +3989,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 				if problem.xe == nil {
 					problem.certX1 = c1
 				}
-				if !continuous {
+				if !continuous && !problem.noDelta {
 					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 				}
 				return K, nil
@@ -4006,13 +4006,13 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			copy(xData, x1)
 			if K1, x2, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
 				var delta []float64
-				if !continuous {
+				if !continuous && !problem.noDelta {
 					delta = slices.Clone(problem.lastDelta)
 				}
 				if !problem.descriptorGainCertified(continuous, K1, xData, x2, eig) {
 					return nil, fail
 				}
-				if !continuous {
+				if !continuous && !problem.noDelta {
 					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 				}
 				return K1, nil
@@ -4022,13 +4022,13 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 				return nil, fail
 			}
 			var delta []float64
-			if !continuous {
+			if !continuous && !problem.noDelta {
 				delta = slices.Clone(problem.lastDelta)
 			}
 			if !problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
 				return nil, fail
 			}
-			if !continuous {
+			if !continuous && !problem.noDelta {
 				problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 			}
 			return K, nil
@@ -4129,7 +4129,7 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 		return nil, err
 	}
 	problem.newtonDelta(x1)
-	if !continuous {
+	if !continuous && !problem.noDelta {
 		problem.lastDelta = append(problem.lastDelta[:0], x1...)
 	}
 	for i, v := range xData {
