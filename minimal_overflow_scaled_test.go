@@ -123,3 +123,47 @@ func TestReduceUnderflowScaledIOKeepsCut(t *testing.T) {
 		t.Fatalf("underflow-scaled order %d, in-range %d", got.Order, want.Order)
 	}
 }
+
+// A model scaled with mixed signs into the band between the deep-underflow
+// up-front rescale (balanced 2^(eB+eC) < 2^−512) and the terms floor
+// 2^−969 (B·2^47, C·2^−816: balanced 2^(eB+eC) ≈ 2^−741) keeps the
+// in-range model's cut under Equalize (census row kalman-d0/4/2.2.0, band
+// scaling; QMVNHR ruling B′).
+func TestReduceMidUnderflowScaledIOKeepsCut(t *testing.T) {
+	a := []float64{
+		0x1.b2b1861ea1e46p-03, 0x1.253ed72421a5cp+00, -0x1.9294cc729af3ap+00, 0x1.e65fb65cdd09ap-01,
+		-0x1.caa6500e557d8p+01, 0x1.9afd0a464f6f4p+02, -0x1.20ec8b71119afp+02, 0x1.33b869f4ddf65p+01,
+		-0x1.5514709fc9108p-01, 0x1.10b9798e4009cp+01, -0x1.2ddbf46a4307bp+01, 0x1.28e0b8bc8be7ap+01,
+		-0x1.14fc681e0e86ap-02, 0x1.4622f8af7feafp-06, 0x1.f600d48281cfdp-02, -0x1.27536204e6a95p-01,
+	}
+	b := []float64{-0x1.70da589b34f9p+71, -0x1.4f7d09dbbdf8ep+71, 0x1.9beeb87cbb6a2p+72, -0x1.a5a98349a47f9p+72}
+	c := []float64{0x1.3e6e1a5ed18dep-816, 0x1.9332371b8b38dp-830, -0x1.4de6239cc2755p-817, -0x1.fe2ab9047227cp-820}
+	sys, err := New(mat.NewDense(4, 4, a), mat.NewDense(4, 1, b), mat.NewDense(1, 4, c), mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shift := func(m *mat.Dense, e int) *mat.Dense {
+		out := mat.DenseCopyOf(m)
+		out.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, e) }, out)
+		return out
+	}
+	ref, err := New(sys.A, shift(sys.B, -47), shift(sys.C, 816), sys.D, sys.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := &ReduceOpts{Equalize: true}
+	want, err := ref.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.Order >= 4 {
+		t.Fatalf("in-range model not reduced (order %d)", want.Order)
+	}
+	got, err := sys.Reduce(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Order != want.Order {
+		t.Fatalf("band-scaled order %d, in-range %d", got.Order, want.Order)
+	}
+}
