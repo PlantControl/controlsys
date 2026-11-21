@@ -19,22 +19,23 @@ const (
 )
 
 // lyapunovBandK is the band factor K = 4(n+5): an operator whose estimated
-// sep(L) is within K·ε·s of zero, s the scale of lyapunovScale, is singular
-// within the rounding of the stored A.
+// sep(L) is within K·ε·s of zero is singular
+// within the rounding of the stored A (ε·s is lyapunovUnit).
 func lyapunovBandK(n int) float64 { return 4 * float64(n+5) }
 
-// lyapunovScale returns s = 2‖A‖_F (continuous) or ‖A‖_F² + 1 (discrete),
-// the size of the Lyapunov (Stein) operator ‖L‖ is measured against.
-func lyapunovScale(A *mat.Dense, discrete bool) float64 {
+// lyapunovUnit returns ε·s, s = 2‖A‖_F (continuous) or ‖A‖_F² + 1
+// (discrete), the size of the Lyapunov (Stein) operator ‖L‖ is measured
+// against, multiplied by ε first so that it overflows only with ‖L‖.
+func lyapunovUnit(A *mat.Dense, discrete bool) float64 {
 	raw := A.RawMatrix()
 	f := 0.0
 	for i := range raw.Rows {
 		f = math.Hypot(f, scaledNorm2(raw.Data[i*raw.Stride:i*raw.Stride+raw.Cols]))
 	}
 	if discrete {
-		return f*f + 1
+		return eps()*f*f + eps()
 	}
-	return 2 * f
+	return 2 * eps() * f
 }
 
 // certifyLyapunov certifies, refines in place or rejects the X (in w, n×n
@@ -56,7 +57,7 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
 	if !finiteSlice(w[:n*n]) {
 		return nil
 	}
-	u := eps() * lyapunovScale(A, s.discrete)
+	u := lyapunovUnit(A, s.discrete)
 	k := lyapunovBandK(n)
 	banded := func(e float64) bool { return !(e*k*u < 1) }
 
