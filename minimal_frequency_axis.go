@@ -868,12 +868,14 @@ func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 // On overflow the band refuses the cut: the pole resolutions its windows
 // and probes read come from a balancing that saw the huge B̂ and Ĉ, so a
 // point rescaled into range may refute but must never verify, and a band
-// that cannot verify cannot certify. On underflow both responses are formed
-// instead on the realizations with B̂ and Ĉ scaled up by 2^−eB and 2^−eC,
-// exact for both or the cut is refused: every quantity a judge reads is
-// bilinear in B̂ and Ĉ and compared only relative to the others, and tiny
-// B̂ and Ĉ do not inflate those resolutions, so the rescaled points judge
-// as the stored data's would. With 2^(eB+eC) < 2^−512 they are scaled up
+// that cannot verify cannot certify. On underflow with eB ≤ 0 and eC ≤ 0
+// both responses are formed instead on the realizations with B̂ and Ĉ
+// scaled up by 2^−eB and 2^−eC, exact for both or the cut is refused:
+// every quantity a judge reads is bilinear in B̂ and Ĉ and compared only
+// relative to the others, and tiny B̂ and Ĉ do not inflate those
+// resolutions, so the rescaled points judge as the stored data's would.
+// Underflow with either exponent positive is refused as overflow is: the
+// larger of B̂ and Ĉ took part in the balancing. With 2^(eB+eC) < 2^−512 they are scaled up
 // before the first evaluation, which is then the only one.
 func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse, bool) {
 	n, m, p := sys.Dims()
@@ -881,7 +883,8 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
 	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
 	under, scaled := eB+eC < 0, false
-	if eB+eC < -512 {
+	up := under && eB <= 0 && eC <= 0
+	if up && eB+eC < -512 {
 		sf, okF := scaledIO(rf, eB, eC)
 		sc, okC := scaledIO(rc, eB, eC)
 		if okF && okC {
@@ -896,6 +899,9 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 	}
 	if bigF && bigC || scaled {
 		return full, cut, bigF && bigC
+	}
+	if !up {
+		return full, cut, false
 	}
 	sf, okF := scaledIO(rf, eB, eC)
 	sc, okC := scaledIO(rc, eB, eC)

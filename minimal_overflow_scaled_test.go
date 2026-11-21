@@ -197,3 +197,64 @@ func TestBandInRangeDetectsUnderflowedZero(t *testing.T) {
 		t.Fatalf("inRange = (%v, %v), want finite and out of range", finite, inRange)
 	}
 }
+
+// A mixed-scale model whose balanced B̂ stays above 1 (eB = 1) while
+// Ĉ ≈ 2^−1018 puts the band's terms below the floor 2^−969. The balancing
+// of state 0 is capped by a tiny a₀₁ = 2^−1010 and A is non-symmetric. The
+// band must not judge it on B̂ and Ĉ scaled up: a rescaled point of a model
+// whose larger exponent is positive may refute and never verify, so
+// bandResponses refuses (QMVNHR, mixed-scale ruling).
+func TestBandMixedScaleUnderflowRefuses(t *testing.T) {
+	a := []float64{-1, math.Ldexp(1, -1010), 0, 0.3, -2, 0, 0.5, 0.2, -3}
+	sys, err := New(mat.NewDense(3, 3, a),
+		mat.NewDense(3, 1, []float64{math.Ldexp(1.25, 1), 0, 0}),
+		mat.NewDense(1, 3, []float64{math.Ldexp(1, -1020), math.Ldexp(0.75, -1020), 0}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rz := newBalancedRealization(sys, 3, 1, 1)
+	if eB, eC := maxExponent(rz.b), maxExponent(rz.c); !(eB > 0 && eB+eC < -969) {
+		t.Fatalf("balanced eB=%d eC=%d, want eB > 0 and eB+eC < −969", eB, eC)
+	}
+	red, err := New(mat.NewDense(2, 2, []float64{-1, math.Ldexp(1, -1010), 0.3, -2}),
+		mat.NewDense(2, 1, []float64{math.Ldexp(1.25, 1), 0}),
+		mat.NewDense(1, 2, []float64{math.Ldexp(1, -1020), math.Ldexp(0.75, -1020)}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, cut, ok := bandResponses(sys, red, []complex128{0.5i, 2i, 10i})
+	defer full.release()
+	defer cut.release()
+	if ok {
+		t.Fatal("bandResponses judges a mixed-scale underflowed band on a rescaled realization")
+	}
+}
+
+// An in-range model with an entry that is structurally zero but whose
+// output row and input column are nonzero (input 1 drives state 1, which
+// reaches no output through Â) and balanced 2^(eB+eC) < 1: its exact zero
+// terms are the stored data's, so inRange keeps the band on the stored
+// realization instead of rescaling (QMVNHR).
+func TestBandInRangeStructuralZeroInRange(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 0, 0.5, -3}),
+		mat.NewDense(2, 2, []float64{0.25, 0, 0, 0.125}),
+		mat.NewDense(1, 2, []float64{0.375, 0}),
+		mat.NewDense(1, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rz := newBalancedRealization(sys, 2, 2, 1)
+	if e := maxExponent(rz.b) + maxExponent(rz.c); e >= 0 {
+		t.Fatalf("balanced eB+eC = %d, want < 0", e)
+	}
+	b := boundedResponseOf(rz, []complex128{0.5i, 2i})
+	defer b.release()
+	if b.terms[1] != 0 || b.terms[3] != 0 || b.terms[0] == 0 {
+		t.Fatalf("setup: terms %v, want entry 1 structurally zero", b.terms)
+	}
+	if finite, inRange := b.inRange(&rz, true); !finite || !inRange {
+		t.Fatalf("inRange = (%v, %v), want in range", finite, inRange)
+	}
+}
