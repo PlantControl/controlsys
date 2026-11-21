@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -10,11 +9,8 @@ import (
 // TestDLyap_NonNormalComplexBlock: A has the well-separated complex pair
 // 0.9 ± 0.1i (|λ|² = 0.82) in a 2×2 block with |t12/t21| = 1e10. The 3×3
 // system of the block's Stein equation was so badly scaled that Dgetc2's
-// perturbed-pivot test fired and the solve reported singular; the solve
-// must stay accurate. The oracle is the 320-bit Kronecker solve of
-// (I − A⊗A)·vec X = vec Q. Normwise the Stein operator is within
-// 0.003·ε·(‖A‖_F² + 1) of singular, far inside DLyap's band (ESR456), so
-// DLyap itself returns ErrSingularEquation.
+// perturbed-pivot test fired and DLyap returned ErrSingularEquation. The
+// oracle is the 320-bit Kronecker solve of (I − A⊗A)·vec X = vec Q.
 func TestDLyap_NonNormalComplexBlock(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{
 		0.9, 1e4, 0.3,
@@ -22,15 +18,12 @@ func TestDLyap_NonNormalComplexBlock(t *testing.T) {
 		0, 0, 0.5,
 	})
 	Q := mat.NewDense(3, 3, []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3})
-	X, err := dlyap(A, Q, nil)
+	X, err := DLyap(A, Q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if e := relErr(X, dlyapBig(A, Q)); !(e <= 1e-9) {
 		t.Errorf("X rel err %g against 320-bit Kronecker solve", e)
-	}
-	if X, err := DLyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
-		t.Errorf("DLyap = %v, %v; want nil, ErrSingularEquation", X, err)
 	}
 }
 
@@ -41,9 +34,7 @@ func TestDLyap_NonNormalComplexBlock(t *testing.T) {
 // solved unbalanced, its Kronecker pivot ((2δ)² + ε²)/t₁₂ below
 // eps·t₁₂, so DLyap returned ErrSingularEquation though the equation is
 // well posed (separation ~2δ once balanced). The oracle is the 320-bit
-// Kronecker solve. Normwise the operator is within ~1e-18·ε·‖L‖ of
-// singular, so DLyap returns ErrSingularEquation (ESR456) while the
-// solve itself stays accurate.
+// Kronecker solve.
 func TestDLyap_NonNormalKroneckerBlock(t *testing.T) {
 	const d, t12, eps2 = 1e-5, 1e4, 1e-10
 	cases := []struct {
@@ -73,15 +64,12 @@ func TestDLyap_NonNormalKroneckerBlock(t *testing.T) {
 				}
 				Q.Set(i, i, float64(1+i))
 			}
-			X, err := dlyap(A, Q, nil)
+			X, err := DLyap(A, Q, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if e := relErr(X, dlyapBig(A, Q)); !(e <= 1e-8) {
 				t.Errorf("X rel err %g against 320-bit Kronecker solve", e)
-			}
-			if X, err := DLyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
-				t.Errorf("DLyap = %v, %v; want nil, ErrSingularEquation", X, err)
 			}
 		})
 	}

@@ -232,7 +232,7 @@ func TestLyapRefinementStallUnverified(t *testing.T) {
 		s.t[i] *= 2.5
 	}
 	banded := func(float64) bool { return false }
-	err = refineLyapunov(&s, A, Q, x, banded, ErrSingularEquation)
+	err = refineLyapunov(&s, A, Q, x, nil, banded, ErrSingularEquation)
 	if !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatalf("err = %v, want ErrAccuracyUnverified", err)
 	}
@@ -253,12 +253,12 @@ func TestUnverifiedLyapunovSplit(t *testing.T) {
 	}
 }
 
-// TestGramSingularWithinRoundingErrors (ESR456): the stable model with the
-// non-normal block 0.9 ± 0.1i, |t12/t21| = 1e10, has a Stein operator
-// within 0.003·ε·‖L‖ of singular; the gramian consumers return
-// ErrSingularEquation, not a value.
+// TestGramSingularWithinRoundingErrors (ESR456, user decision U2): the
+// stable discrete model with a near-Jordan pair at 1 − 1e-7 has a Stein
+// operator within rounding of singular in its stored and balanced forms;
+// the gramian consumers return ErrSingularEquation, not a value.
 func TestGramSingularWithinRoundingErrors(t *testing.T) {
-	A := mat.NewDense(3, 3, []float64{0.9, 1e4, 0.3, -1e-6, 0.9, -0.2, 0, 0, 0.5})
+	A := lyapNearJordan(t, 1e-7, true)
 	B := mat.NewDense(3, 1, []float64{1, -1, 0.5})
 	C := mat.NewDense(1, 3, []float64{0.5, 1, -1})
 	sys, err := New(A, B, C, mat.NewDense(1, 1, nil), 0.1)
@@ -276,5 +276,51 @@ func TestGramSingularWithinRoundingErrors(t *testing.T) {
 	}
 	if _, err := Covar(sys, mat.NewDense(1, 1, []float64{1})); !errors.Is(err, ErrSingularEquation) {
 		t.Errorf("Covar: %v, want ErrSingularEquation", err)
+	}
+}
+
+// TestLyapBalancedRetryScaledEquation (ESR456): a well-posed equation under
+// the exact similarity diag(2³⁰, 1, 2⁻³⁰) is within ε·‖L‖ of singular in
+// the stored scaling; the balanced retry certifies X to the 320-bit
+// solution in the stored scaling.
+func TestLyapBalancedRetryScaledEquation(t *testing.T) {
+	d := []float64{0x1p30, 1, 0x1p-30}
+	for _, discrete := range []bool{false, true} {
+		a := []float64{-1.2, 0.4, 0.1, -0.3, -0.8, 0.5, 0.2, -0.1, -2}
+		if discrete {
+			a = []float64{0.3, 0.2, -0.1, -0.15, 0.5, 0.05, 0.1, 0.2, -0.4}
+		}
+		A := mat.NewDense(3, 3, nil)
+		Q := mat.NewDense(3, 3, nil)
+		q := []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3}
+		for i := range 3 {
+			for j := range 3 {
+				A.Set(i, j, d[i]*a[i*3+j]/d[j])
+				Q.Set(i, j, d[i]*q[i*3+j]*d[j])
+			}
+		}
+		raw, s, err := solveLyapunov("Lyap", A, Q, nil, discrete)
+		if err == nil {
+			err = certifyLyapunov(&s, A, Q, raw.RawMatrix().Data, nil)
+		}
+		if !errors.Is(err, ErrSingularEquation) {
+			t.Fatalf("discrete=%v: raw certificate %v, want the band", discrete, err)
+		}
+		X, err := lyapSolveFor(discrete)(A, Q, nil)
+		if err != nil {
+			t.Fatalf("discrete=%v: %v", discrete, err)
+		}
+		if e := relErr(X, lyapKronBig(A, Q, discrete)); !(e <= 1e-10) {
+			t.Errorf("discrete=%v: X rel err %g against 320-bit Kronecker solve", discrete, e)
+		}
+	}
+}
+
+// TestBalanceLyapunovIdentity (ESR456): a matrix already balanced, or one
+// whose balance is a multiple of I, gives no retry.
+func TestBalanceLyapunovIdentity(t *testing.T) {
+	a := []float64{-1, 0.5, 0.5, -2}
+	if d := balanceLyapunov(a, 2); d != nil {
+		t.Errorf("balanced 2×2: D = %v, want nil", d)
 	}
 }

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -54,6 +55,9 @@ type H2SynResult struct {
 // Care or Dare, with ErrNotStabilizable on the proved ErrNoStabilizing of
 // the state-feedback equation and ErrNotDetectable on that of the filter
 // equation; every error but ErrAccuracyUnverified comes with a nil result.
+// Gamma is H2Norm's: when that is uncertified, or its gramian equation is
+// within the singular band (then Gamma is from the uncertified gramian),
+// H2Syn returns the full result with ErrAccuracyUnverified.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	res, err := h2Syn(P, nmeas, ncont)
 	if err != nil {
@@ -62,7 +66,19 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	if res.CL, err = LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas}); err != nil {
 		return nil, fmt.Errorf("H2Syn: closing the loop: %w", err)
 	}
-	if res.Gamma, err = H2Norm(res.CL); err != nil {
+	res.Gamma, err = H2Norm(res.CL)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrAccuracyUnverified):
+		res.accuracy = 1
+		return res, fmt.Errorf("H2Syn: closed-loop H2 norm: %w", err)
+	case errors.Is(err, ErrSingularEquation):
+		if g, uerr := h2Norm(res.CL, true); uerr == nil && isFinite(g) {
+			res.Gamma, res.accuracy = g, 1
+			return res, fmt.Errorf("H2Syn: closed-loop H2 norm from an uncertified gramian (%v): %w", err, ErrAccuracyUnverified)
+		}
+		fallthrough
+	default:
 		if res.accuracy != 0 {
 			return nil, fmt.Errorf("H2Syn: closed loop of an uncertified Riccati solution: %w: %w", err, ErrNotConverged)
 		}

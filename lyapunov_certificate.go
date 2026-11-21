@@ -52,7 +52,14 @@ func lyapunovUnit(A *mat.Dense, discrete bool) float64 {
 // makes the estimator unnecessary when n·μ·ε·s ≤ 1/(2K); the Dlacn2 band
 // test; refinement with residuals of the stored A and Q in double-double.
 // A non-finite X is left to the caller's overflow check.
-func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
+//
+// With scale d (the diagonal of D, nil for I), A, Q and X are those of the
+// balanced equation Ã = D⁻¹·A·D, Q̃ = D⁻¹·Q·D⁻¹, X̃ = D⁻¹·X·D⁻¹, and the
+// accuracy is judged in the original norm of X = D·X̃·D: the comparison
+// bound by γ = max(d)²·‖X̃‖_F/‖X‖_F, refinement by ‖D·d̃·D‖_F/‖X‖_F. The
+// residuals of the balanced data are those of the stored data scaled
+// exactly; the growth witnesses stay in balanced coordinates.
+func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 	n := s.n
 	if !finiteSlice(w[:n*n]) {
 		return nil
@@ -72,8 +79,16 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
 		return singular
 	}
 	nf := float64(n)
+	gamma := 1.0
+	if d != nil && xn > 0 {
+		dmax := 0.0
+		for _, v := range d {
+			dmax = math.Max(dmax, v)
+		}
+		gamma = dmax * dmax * xn / weightedNorm(w, n, d)
+	}
 	mu := lyapunovComparisonBound(s.t, n, s.discrete, s.ws)
-	if 8*nf*mu*u <= lyapunovTau {
+	if 8*nf*mu*u*gamma <= lyapunovTau {
 		return nil
 	}
 	if !(nf*mu*u <= 1/(2*k)) {
@@ -81,7 +96,21 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
 			return singular
 		}
 	}
-	return refineLyapunov(s, A, Q, w, banded, singular)
+	return refineLyapunov(s, A, Q, w, d, banded, singular)
+}
+
+// weightedNorm returns ‖D·V·D‖_F of the n×n v, D = diag(d) (d nil for I).
+func weightedNorm(v []float64, n int, d []float64) float64 {
+	if d == nil {
+		return scaledNorm2(v[:n*n])
+	}
+	f := 0.0
+	for i := range n {
+		for j := range n {
+			f = math.Hypot(f, d[i]*v[i*n+j]*d[j])
+		}
+	}
+	return f
 }
 
 // lyapunovSingular is the band error, formed lazily so that certified
@@ -96,7 +125,7 @@ func (k lyapunovSingular) Unwrap() error { return ErrSingularEquation }
 
 // refineLyapunov refines X in w by corrections solved on the Schur form from
 // double-double residuals of the stored A and Q.
-func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64, banded func(float64) bool, singular error) error {
+func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, banded func(float64) bool, singular error) error {
 	n := s.n
 	nn := n * n
 	r, d := make([]float64, nn), make([]float64, nn)
@@ -121,6 +150,9 @@ func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64, banded func(
 			return singular
 		}
 		corr := dn / scaledNorm2(w[:nn])
+		if scale != nil {
+			corr = weightedNorm(d, n, scale) / weightedNorm(w, n, scale)
+		}
 		if corr <= lyapunovTau {
 			for i, v := range d {
 				w[i] += v
@@ -454,4 +486,120 @@ func unverifiedLyapunov(err error) (hard, unv error) {
 		return nil, err
 	}
 	return err, nil
+}
+
+// balanceLyapunov balances the n×n a in place by the classic Parlett–Reinsch
+// power-of-two diagonal similarity a ← D⁻¹·a·D (off-diagonal row and column
+// 1-norms within a factor of two, iterated to convergence; EISPACK BALANC)
+// and returns diag(D), or nil when D is a multiple of I.
+func balanceLyapunov(a []float64, n int) []float64 {
+	d := make([]float64, n)
+	for i := range d {
+		d[i] = 1
+	}
+	for range 200 {
+		done := true
+		for i := range n {
+			c, r := 0.0, 0.0
+			for j := range n {
+				if j != i {
+					c += math.Abs(a[j*n+i])
+					r += math.Abs(a[i*n+j])
+				}
+			}
+			if c == 0 || r == 0 || math.IsInf(c+r, 0) {
+				continue
+			}
+			f, sum := 1.0, c+r
+			for c < r/2 && f < 0x1p400 {
+				f *= 2
+				c *= 4
+			}
+			for c >= r*2 && f > 0x1p-400 {
+				f /= 2
+				c /= 4
+			}
+			if (c+r)/f >= 0.95*sum {
+				continue
+			}
+			if nd := d[i] * f; nd > 0x1p900 || nd < 0x1p-900 {
+				continue
+			}
+			d[i] *= f
+			for j := range n {
+				a[i*n+j] /= f
+				a[j*n+i] *= f
+			}
+			done = false
+		}
+		if done {
+			break
+		}
+	}
+	for _, v := range d[1:] {
+		if v != d[0] {
+			return d
+		}
+	}
+	return nil
+}
+
+// exactlyScaled reports whether v, a power-of-two multiple of the nonzero
+// or zero x, kept every bit: finite, and normal unless x is zero.
+func exactlyScaled(x, v float64) bool {
+	if x == 0 {
+		return true
+	}
+	return !math.IsInf(v, 0) && math.Abs(v) >= 0x1p-1022
+}
+
+// balancedLyapunov is the certified solve of the balanced equation,
+// Ã = D⁻¹·A·D and Q̃ = D⁻¹·Q·D⁻¹ for D = balanceLyapunov(A), returning
+// X = D·X̃·D. ok is false when D is a multiple of I or a scaling of A, Q or
+// X̃ overflows or underflows (the caller keeps its raw verdict).
+func balancedLyapunov(A, Q *mat.Dense, discrete bool) (X *mat.Dense, err error, ok bool) {
+	n, _ := A.Dims()
+	aRaw, qRaw := A.RawMatrix(), Q.RawMatrix()
+	a := make([]float64, n*n)
+	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
+	d := balanceLyapunov(a, n)
+	if d == nil {
+		return nil, nil, false
+	}
+	q := make([]float64, n*n)
+	for i := range n {
+		for j := range n {
+			x := aRaw.Data[i*aRaw.Stride+j]
+			if !exactlyScaled(x, a[i*n+j]) {
+				return nil, nil, false
+			}
+			x = qRaw.Data[i*qRaw.Stride+j]
+			q[i*n+j] = x / d[i] / d[j]
+			if !exactlyScaled(x, q[i*n+j]) {
+				return nil, nil, false
+			}
+		}
+	}
+	Ab, Qb := mat.NewDense(n, n, a), mat.NewDense(n, n, q)
+	s, err := newSchurLyapunov(Ab, n, discrete, nil)
+	if err != nil {
+		return nil, nil, false
+	}
+	w := make([]float64, n*n)
+	if err := s.solve(q, n, w); err != nil {
+		return nil, err, true
+	}
+	if err = certifyLyapunov(&s, Ab, Qb, w, d); err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+		return nil, err, true
+	}
+	x := make([]float64, n*n)
+	for i := range n {
+		for j := range n {
+			x[i*n+j] = d[i] * w[i*n+j] * d[j]
+			if !exactlyScaled(w[i*n+j], x[i*n+j]) {
+				return nil, nil, false
+			}
+		}
+	}
+	return mat.NewDense(n, n, x), err, true
 }

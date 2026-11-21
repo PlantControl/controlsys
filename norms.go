@@ -62,7 +62,18 @@ func Norm(sys *System, normType float64) (float64, error) {
 // exactly; continuous strictly proper internal-delay models return
 // ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
 // A norm beyond float64 range returns ErrOverflow.
+//
+// The observability gramian comes from Lyap or DLyap and carries their
+// certificate: a gramian equation within the singular band returns
+// ErrSingularEquation, an uncertified one the norm with
+// ErrAccuracyUnverified.
 func H2Norm(sys *System) (float64, error) {
+	return h2Norm(sys, false)
+}
+
+// h2Norm is H2Norm, with the gramian's Lyapunov certificate skipped when
+// uncertified is set (H2Syn's closed-loop Gamma when H2Norm bands).
+func h2Norm(sys *System, uncertified bool) (float64, error) {
 	if err := requireFiniteSystem("H2Norm", sys); err != nil {
 		return 0, err
 	}
@@ -79,6 +90,7 @@ func H2Norm(sys *System) (float64, error) {
 		return 0, err
 	}
 	policy := newEnergyAnalysisPolicy(sys)
+	policy.uncertified = uncertified
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 || m == 0 || p == 0 {

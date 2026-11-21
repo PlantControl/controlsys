@@ -87,10 +87,13 @@ func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 // 1e-10. As MATLAB lyap errors when the solution does not exist or is not
 // unique, Lyap returns ErrSingularEquation when the operator X ↦ A·X + X·Aᵀ
 // is singular or within K·ε·2‖A‖_F of singular (K = 4(n+5)), the rounding
-// of the stored A: its eigenvalues λᵢ + λⱼ = 0 for some pair, or nearly so
-// in a sense rounding can reach. A nonsingular but ill-conditioned equation
-// is refined from double-double residuals; when refinement stalls above
-// 1e-10, Lyap returns its best X with ErrAccuracyUnverified.
+// of the stored A, both in the stored scaling and in its diagonally
+// balanced form D⁻¹·A·D (power-of-two D; the balanced equation is tried
+// only when the stored one fails): its eigenvalues λᵢ + λⱼ = 0 for some
+// pair, or nearly so in a sense rounding can reach. A nonsingular but
+// ill-conditioned equation is refined from double-double residuals; when
+// refinement stalls above 1e-10, Lyap returns its best X with
+// ErrAccuracyUnverified.
 func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	return lyapunovExported("Lyap", A, Q, opts, false)
 }
@@ -119,16 +122,27 @@ func lyapunovChecked(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bo
 		return nil, err
 	}
 	X, s, err := solveLyapunov(op, A, Q, opts, discrete)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-	if err := certifyLyapunov(&s, A, Q, X.RawMatrix().Data); err != nil {
-		if errors.Is(err, ErrAccuracyUnverified) {
-			return X, fmt.Errorf("%s: %w", op, err)
+	if err == nil {
+		if err = certifyLyapunov(&s, A, Q, X.RawMatrix().Data, nil); err == nil {
+			return X, nil
 		}
+	}
+	unv := errors.Is(err, ErrAccuracyUnverified)
+	if !unv && !errors.Is(err, ErrSingularEquation) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return X, nil
+	if Xb, errb, ok := balancedLyapunov(A, Q, discrete); ok {
+		if errb == nil || (!unv && errors.Is(errb, ErrAccuracyUnverified)) {
+			X, err, unv = Xb, errb, errb != nil
+		}
+	}
+	if err == nil {
+		return X, nil
+	}
+	if unv {
+		return X, fmt.Errorf("%s: %w", op, err)
+	}
+	return nil, fmt.Errorf("%s: %w", op, err)
 }
 
 // lyapChecked is Lyap without the result check (see lyapunovChecked).
