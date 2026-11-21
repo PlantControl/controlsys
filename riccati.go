@@ -68,6 +68,7 @@ type RiccatiWorkspace struct {
 	gainStep    []float64
 	refine      []float64
 	lyap        *LyapunovWorkspace
+	enc         *encWS
 }
 
 // NewRiccatiWorkspace returns a workspace for problems with up to n states
@@ -246,6 +247,13 @@ type RiccatiResult struct {
 	// eps perturbations of the data move it by at most newtonTol.
 	kw          *mat.Dense
 	kwCertified bool
+	// confirmedX is X when an extended-precision solve returned or
+	// confirmed it (confirm); dareGate exempts X while it is unchanged.
+	confirmedX *mat.Dense
+	// newtonDelta is the Stein step Δ of the Newton step from newtonX,
+	// the X verifyRiccati certified (Dare): dareGate's centre X ⊕ Δ while
+	// X is newtonX.
+	newtonDelta, newtonX *mat.Dense
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -1060,6 +1068,17 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // A descriptor X certified on its K alone whose EᵀXE step fails
 // (descriptorGainCertified) is returned unchanged with
 // ErrAccuracyUnverified.
+//
+// A nil error certifies X within about 1e-8 of the stabilizing solution
+// of the stored data. A float64 Newton step alone cannot certify it where
+// the Stein operator of A − BK maps rounding beyond that (‖E⁻¹(A − BK)‖
+// ≈ 1e6 left X 1.4e-8 to 5e-8 off with steps of 3e-11): an X of float64
+// provenance is held to a two-sided Loewner enclosure of the stabilizing
+// solution measured on the stored data (dareGate), X itself or the
+// enclosure's centre rounded within the budget, else to the extended-
+// precision Hewer fixed point, else to the extended-precision solve, each
+// at its own certificate, else returned with ErrAccuracyUnverified. How
+// far eps perturbations of the data move X is not reported.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)
@@ -1075,8 +1094,12 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, res, err); ok {
+		r.confirm()
 		res, err = r, nil
 	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err, explicit); ok {
+		if r != res {
+			r.confirm()
+		}
 		res, err = r, nil
 	} else if errors.As(err, new(unscaledBoundaryError)) {
 		var o RiccatiOpts
@@ -1088,6 +1111,7 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 			res, err = r, nil
 		}
 	} else if r, ok := lostCandidateDare(A, B, Q, R, opts, err); ok {
+		r.confirm()
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
@@ -1096,6 +1120,9 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 	}
 	if err == nil {
 		undetectableBoundary(false, A, B, Q, R, opts, res)
+	}
+	if err == nil && res.accuracy == 0 {
+		res = dareGate(A, B, Q, R, opts, res)
 	}
 	return res, err
 }
@@ -3898,6 +3925,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		fail = errNoCandidate
 	}
 	xData := X.RawMatrix().Data
+	problem.certDelta, problem.certDeltaX = nil, nil
 	bestStep, stalls := math.Inf(1), 0
 	kept, prevPoor := false, (*riccatiPoor)(nil)
 	defer func() {
@@ -3929,6 +3957,10 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		step := problem.newtonStep(x1, xData)
 		if it == 0 {
 			if step <= newtonTol {
+				var delta []float64
+				if !continuous {
+					delta = slices.Clone(problem.lastDelta)
+				}
 				problem.closedLoopEig(eig)
 				var c1 []float64
 				if !continuous && step > eps() {
@@ -3943,6 +3975,9 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 				if problem.xe == nil {
 					problem.certX1 = c1
 				}
+				if !continuous {
+					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
+				}
 				return K, nil
 			}
 			if p := problem.poor; p != nil && step < p.step {
@@ -3956,15 +3991,31 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, x2, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
+				var delta []float64
+				if !continuous {
+					delta = slices.Clone(problem.lastDelta)
+				}
 				if !problem.descriptorGainCertified(continuous, K1, xData, x2, eig) {
 					return nil, fail
+				}
+				if !continuous {
+					problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 				}
 				return K1, nil
 			}
 			copy(xData, prev)
-			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil ||
-				!problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
+			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil {
 				return nil, fail
+			}
+			var delta []float64
+			if !continuous {
+				delta = slices.Clone(problem.lastDelta)
+			}
+			if !problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
+				return nil, fail
+			}
+			if !continuous {
+				problem.certDelta, problem.certDeltaX = delta, slices.Clone(xData)
 			}
 			return K, nil
 		}
@@ -4064,6 +4115,9 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 		return nil, err
 	}
 	problem.newtonDelta(x1)
+	if !continuous {
+		problem.lastDelta = append(problem.lastDelta[:0], x1...)
+	}
 	for i, v := range xData {
 		x1[i] += v
 	}

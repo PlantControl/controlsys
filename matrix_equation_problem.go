@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -50,6 +51,10 @@ type riccatiProblem struct {
 	// certified, and certX1 (Dare, step above eps) the iterate it reached.
 	certStep float64
 	certX1   []float64
+	// lastDelta is the Stein step Δ of the last newtonCost, before X + Δ
+	// rounded; certDelta that of the Newton step from the X verifyRiccati
+	// last certified (Dare), for dareGate's centre X ⊕ Δ.
+	lastDelta, certDelta, certDeltaX []float64
 	// xe is EᵀXE of the X verifyRiccati last certified when
 	// refineDescriptorGain or refineDescriptorDare formed it, else nil,
 	// and xeStep the Newton step ‖EᵀΔE‖/‖EᵀXE‖ of that X.
@@ -286,6 +291,7 @@ func (problem *riccatiProblem) scale(opts *RiccatiOpts, costProxy bool) {
 
 // result maps the scaled solution back: X = T·X̂·T, K = K̂·T.
 func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd float64, accuracy int) *RiccatiResult {
+	certDelta := problem.certDelta != nil && denseDataEqual(X, problem.certDeltaX)
 	if t := problem.t; t != nil {
 		n, m := problem.n, problem.m
 		x, k := X.RawMatrix(), K.RawMatrix()
@@ -315,6 +321,19 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			res.x1 = mat.NewDense(n, n, x1)
 			problem.certX1 = nil
 		}
+		if d := problem.certDelta; certDelta {
+			n, t := problem.n, problem.t
+			d = slices.Clone(d)
+			if t != nil {
+				for i := range n {
+					for j := range n {
+						d[i*n+j] *= t[i] * t[j]
+					}
+				}
+			}
+			res.newtonDelta, res.newtonX = mat.NewDense(n, n, d), mat.DenseCopyOf(X)
+		}
+		problem.certDelta, problem.certDeltaX = nil, nil
 		if xe := problem.xe; xe != nil {
 			n, t := problem.n, problem.t
 			if t != nil {
@@ -331,4 +350,19 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 		res.step = problem.poor.step
 	}
 	return res
+}
+
+// denseDataEqual reports whether X's entries, row-major, are d.
+func denseDataEqual(X *mat.Dense, d []float64) bool {
+	r, c := X.Dims()
+	if len(d) != r*c {
+		return false
+	}
+	x := X.RawMatrix()
+	for i := range r {
+		if !slices.Equal(x.Data[i*x.Stride:i*x.Stride+c], d[i*c:(i+1)*c]) {
+			return false
+		}
+	}
+	return true
 }

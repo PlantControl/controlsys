@@ -1267,6 +1267,32 @@ func BenchmarkDare_N10_M2(b *testing.B)  { benchDare(b, 10, 2) }
 func BenchmarkDare_N50_M5(b *testing.B)  { benchDare(b, 50, 5) }
 func BenchmarkDare_N100_M5(b *testing.B) { benchDare(b, 100, 5) }
 
+// benchDareWarm times Dare with a RiccatiWorkspace already used once, so
+// that B/op is the steady state of a caller reusing it.
+func benchDareWarm(b *testing.B, n, m int) {
+	A := benchDiscreteA(n)
+	B := benchB(n, m)
+	Q := benchSymPD(n)
+	R := mat.NewDense(m, m, nil)
+	for i := range m {
+		R.Set(i, i, 1)
+	}
+	opts := &RiccatiOpts{Workspace: NewRiccatiWorkspace(n, m)}
+	if _, err := Dare(A, B, Q, R, opts); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := Dare(A, B, Q, R, opts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDareWarmWorkspace_N10_M2(b *testing.B)  { benchDareWarm(b, 10, 2) }
+func BenchmarkDareWarmWorkspace_N50_M5(b *testing.B)  { benchDareWarm(b, 50, 5) }
+func BenchmarkDareWarmWorkspace_N100_M5(b *testing.B) { benchDareWarm(b, 100, 5) }
+
 func BenchmarkGram(b *testing.B) {
 	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
