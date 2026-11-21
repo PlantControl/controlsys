@@ -1661,6 +1661,10 @@ func (r *RiccatiResult) xConfirmed() bool {
 	return true
 }
 
+// dareGateHook, set by tests, receives the result dareGate is about to
+// certify, before any of its work.
+var dareGateHook func(res *RiccatiResult)
+
 // dareGate holds a Dare result at Accuracy 0 whose X is of float64
 // provenance to the enclosure of encloseDare on the stored data. A
 // certified X is kept; a corrected one is replaced by fl(X_c) and its
@@ -1673,11 +1677,19 @@ func (r *RiccatiResult) xConfirmed() bool {
 // enclosure, tier 2: hewerSolution, then the extended solve as
 // lostCandidateDare runs it, each accepted only at Accuracy 0 (the
 // extended pair replacing X and K unless X is within newtonTol and K
-// within gainFloor of it), else Accuracy 1.
+// within gainFloor of it), else Accuracy 1. With opts.NoCertificate it
+// does none of this and returns the result at Accuracy 1.
 func dareGate(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *RiccatiResult {
 	n, m := B.Dims()
 	if n == 0 || m == 0 || res.xConfirmed() {
 		return res
+	}
+	if opts != nil && opts.NoCertificate {
+		res.accuracy, res.xeCertified = 1, false
+		return res
+	}
+	if dareGateHook != nil {
+		dareGateHook(res)
 	}
 	var S, E *mat.Dense
 	if opts != nil {

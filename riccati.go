@@ -139,6 +139,17 @@ type RiccatiOpts struct {
 	// Newton step certifies (ErrAccuracyUnverified), is retried once in
 	// the other, and Care's then state-scaled ignoring R.
 	NoScaling bool
+	// NoCertificate skips Dare's certificate of an X of float64
+	// provenance (the Loewner enclosure of the stabilizing solution on the
+	// stored data and its extended-precision fallbacks; see Dare): such an
+	// X, which the float64 Newton step accepted and is typically accurate
+	// but not proved, is returned unchanged with ErrAccuracyUnverified. A
+	// result Dare certifies without that stage (an X confirmed in extended
+	// precision, no states or inputs) keeps its nil error: under
+	// NoCertificate a nil error still means X is certified. Dare and the discrete solves built on it (Dlqr, Lqi,
+	// Lqrd, Kalman, Kalmd) honour it; Care, Lqr, Lqe and the continuous
+	// solves ignore it.
+	NoCertificate bool
 	// plainScaling balances Care's state scaling with B in place of its
 	// cost proxy (scale): otherScaling's last resort.
 	plainScaling bool
@@ -173,7 +184,8 @@ type RiccatiOpts struct {
 //     within rounding of the boundary at which a mode of A is unobservable
 //     to the cost Q and cross term Sᵀ (Kalman: unreachable from the noise):
 //     the data cannot tell such a mode just inside the boundary, with a
-//     stabilizing solution, from one on it, with none.
+//     stabilizing solution, from one on it, with none. So is, under
+//     opts.NoCertificate, a Dare X of float64 provenance left unproved.
 //   - ErrNoStabilizing, with ErrNotStabilizable (ErrNotDetectable for
 //     Kalman, Lqe and Kalmd): a mode of (A, B) on or beyond the boundary,
 //     within a first-order band of the data, fails the PBH rank test, so
@@ -1079,6 +1091,8 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // precision Hewer fixed point, else to the extended-precision solve, each
 // at its own certificate, else returned with ErrAccuracyUnverified. How
 // far eps perturbations of the data move X is not reported.
+// opts.NoCertificate skips that enclosure and its fallbacks, returning
+// such an X with ErrAccuracyUnverified at the cost of the float64 solve.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
 	descriptorClosedLoopEig(false, A, B, opts, res, err)

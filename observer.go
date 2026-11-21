@@ -13,8 +13,9 @@ import (
 // L (n×p) such that eig(A - L*C) is stable.
 //
 // A is n×n, G is n×g (noise input), C is p×n, Qn is g×g, Rn is p×p and Nn,
-// the g×p noise cross-covariance E{w v'}, may be nil for 0. opts carries only
-// the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
+// the g×p noise cross-covariance E{w v'}, may be nil for 0. opts carries the
+// Workspace (sized NewRiccatiWorkspace(n, p)) and NoScaling (NoCertificate
+// is ignored, as by Care); opts.S and opts.E return
 // ErrOptionUnsupported. Errors are those of the dual Care (RiccatiResult):
 // an uncertified solution comes with ErrAccuracyUnverified, a boundary
 // mode the PBH test finds undetectable is ErrNoStabilizing with
@@ -93,8 +94,9 @@ func rejectKalmanOpts(op string, opts *RiccatiOpts) error {
 // The arguments follow MATLAB kalman(sys,Qn,Rn,Nn)
 // (https://www.mathworks.com/help/control/ref/ss.kalman.html): Qn is m×m
 // (process noise covariance), Rn is p×p (measurement noise covariance) and
-// Nn, the m×p cross-covariance E{w v'}, may be nil for 0. opts carries only
-// the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
+// Nn, the m×p cross-covariance E{w v'}, may be nil for 0. opts carries the
+// Workspace (sized NewRiccatiWorkspace(n, p)), NoScaling and, for a discrete
+// plant, NoCertificate, as for Dare; opts.S and opts.E return
 // ErrOptionUnsupported. Plants with delays are rejected with
 // ErrDelayUnsupported, as MATLAB requires a delay-free (Padé/absorbDelay)
 // model.
@@ -200,7 +202,7 @@ func newEstimatorDual(A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) e
 		ropts.E, ropts.plantE = mat.DenseCopyOf(E.T()), E
 	}
 	if opts != nil {
-		ropts.Workspace, ropts.NoScaling = opts.Workspace, opts.NoScaling
+		ropts.Workspace, ropts.NoScaling, ropts.NoCertificate = opts.Workspace, opts.NoScaling, opts.NoCertificate
 	}
 	return estimatorDual{At: At, Ct: Ct, Qbar: Qbar, Rbar: Rbar, opts: ropts}
 }
@@ -241,7 +243,8 @@ func (d estimatorDual) certify(op string, continuous bool, res *RiccatiResult, e
 // ErrDelayUnsupported. Qn is m×m, Rn is p×p, dt > 0; Qd is discretized with
 // Van Loan's method and Rd = Rn/dt.
 // opts.S and opts.E are rejected with ErrOptionUnsupported; opts.Workspace is
-// used for the discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p).
+// used for the discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p);
+// opts.NoScaling and opts.NoCertificate apply to it as for Dare.
 // A descriptor plant with nonsingular E is discretized as its explicit model
 // x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
 // singular E returns ErrDescriptorSingular. The Riccati errors are as for
