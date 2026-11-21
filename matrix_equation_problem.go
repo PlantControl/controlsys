@@ -55,6 +55,8 @@ type riccatiProblem struct {
 	// rounded; certDelta that of the Newton step from the X verifyRiccati
 	// last certified (Dare), for dareGate's centre X ⊕ Δ.
 	lastDelta, certDelta, certDeltaX []float64
+	// noDelta (opts.NoCertificate) keeps none of them: no dareGate runs.
+	noDelta bool
 	// xe is EᵀXE of the X verifyRiccati last certified when
 	// refineDescriptorGain or refineDescriptorDare formed it, else nil,
 	// and xeStep the Newton step ‖EᵀΔE‖/‖EᵀXE‖ of that X.
@@ -125,7 +127,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		ws = NewRiccatiWorkspace(na, m)
 	}
 
-	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, n: na, m: m, sigma: 1}, nil
+	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, n: na, m: m, sigma: 1, noDelta: opts != nil && opts.NoCertificate}, nil
 }
 
 // riccatiDescriptor returns opts.E, or nil when it is absent or the identity.

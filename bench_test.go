@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -1245,7 +1246,10 @@ func BenchmarkCare_N10_M2(b *testing.B)  { benchCare(b, 10, 2) }
 func BenchmarkCare_N50_M5(b *testing.B)  { benchCare(b, 50, 5) }
 func BenchmarkCare_N100_M5(b *testing.B) { benchCare(b, 100, 5) }
 
-func benchDare(b *testing.B, n, m int) {
+func benchDare(b *testing.B, n, m int) { benchDareCert(b, n, m, false) }
+
+// benchDareCert times Dare, with opts.NoCertificate when noCert is set.
+func benchDareCert(b *testing.B, n, m int, noCert bool) {
 	A := benchDiscreteA(n)
 	B := benchB(n, m)
 	Q := benchSymPD(n)
@@ -1254,10 +1258,10 @@ func benchDare(b *testing.B, n, m int) {
 		R.Set(i, i, 1)
 	}
 	ws := NewRiccatiWorkspace(n, m)
-	opts := &RiccatiOpts{Workspace: ws}
+	opts := &RiccatiOpts{Workspace: ws, NoCertificate: noCert}
 	b.ResetTimer()
 	for range b.N {
-		if _, err := Dare(A, B, Q, R, opts); err != nil {
+		if _, err := Dare(A, B, Q, R, opts); err != nil && !(noCert && errors.Is(err, ErrAccuracyUnverified)) {
 			b.Fatal(err)
 		}
 	}
@@ -1266,6 +1270,10 @@ func benchDare(b *testing.B, n, m int) {
 func BenchmarkDare_N10_M2(b *testing.B)  { benchDare(b, 10, 2) }
 func BenchmarkDare_N50_M5(b *testing.B)  { benchDare(b, 50, 5) }
 func BenchmarkDare_N100_M5(b *testing.B) { benchDare(b, 100, 5) }
+
+func BenchmarkDareNoCertificate_N10_M2(b *testing.B)  { benchDareCert(b, 10, 2, true) }
+func BenchmarkDareNoCertificate_N50_M5(b *testing.B)  { benchDareCert(b, 50, 5, true) }
+func BenchmarkDareNoCertificate_N100_M5(b *testing.B) { benchDareCert(b, 100, 5, true) }
 
 // benchDareWarm times Dare with a RiccatiWorkspace already used once, so
 // that B/op is the steady state of a caller reusing it.

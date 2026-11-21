@@ -52,7 +52,8 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // (near-singular E), X and K are those of that solve, certified when eps
 // perturbations of the data move neither beyond 1e-8, whether or not
 // Dare's X is. Errors are otherwise those of Dare, as for Lqr (a symplectic
-// pencil eigenvalue proved exactly on the unit circle included).
+// pencil eigenvalue proved exactly on the unit circle included), and
+// opts.NoCertificate applies as for Dare.
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, true)
 	res, err = explicitRiccatiSolution(res, opts, err)
@@ -118,7 +119,7 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // asymmetric Q or R ErrNotSymmetric, singular E ErrDescriptorSingular,
 // opts.E ErrOptionUnsupported and plants with delays ErrDelayUnsupported.
 // The Riccati errors, ErrAccuracyUnverified with its result included, are
-// those of Lqr or Dlqr.
+// those of Lqr or Dlqr; opts.NoCertificate applies to a discrete plant only.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Lqi", sys); err != nil {
 		return nil, err
@@ -157,7 +158,7 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		scaleLqiPlantRows(sys.E, n, Ea, Aa, Ba)
 		o := RiccatiOpts{E: Ea, plantE: sys.E, augmentedE: true}
 		if opts != nil {
-			o.S, o.Workspace, o.NoScaling = opts.S, opts.Workspace, opts.NoScaling
+			o.S, o.Workspace, o.NoScaling, o.NoCertificate = opts.S, opts.Workspace, opts.NoScaling, opts.NoCertificate
 		}
 		opts = &o
 	}
@@ -218,8 +219,8 @@ func scaleLqiPlantRows(E *mat.Dense, n int, Ea, Aa, Ba *mat.Dense) {
 // (Van Loan's method), then solves the discrete LQR problem with cross term Nd.
 //
 // A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0. opts.S, when set, is the
-// continuous cross weight N (n×m); opts.Workspace is used for the discrete
-// Riccati solve. opts.E is rejected with ErrOptionUnsupported. The Riccati
+// continuous cross weight N (n×m); opts.Workspace, opts.NoScaling and
+// opts.NoCertificate apply to the discrete Riccati solve. opts.E is rejected with ErrOptionUnsupported. The Riccati
 // errors, ErrAccuracyUnverified with its result included, are those of Dlqr.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if opts != nil && opts.E != nil {
@@ -332,7 +333,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 
 	dopts := &RiccatiOpts{S: mat.NewDense(n, m, ndData)}
 	if opts != nil {
-		dopts.Workspace, dopts.NoScaling = opts.Workspace, opts.NoScaling
+		dopts.Workspace, dopts.NoScaling, dopts.NoCertificate = opts.Workspace, opts.NoScaling, opts.NoCertificate
 	}
 	return Dlqr(mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData), mat.NewDense(n, n, qdData), mat.NewDense(m, m, rdData), dopts)
 }
