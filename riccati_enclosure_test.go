@@ -140,6 +140,7 @@ func (c dareFloorCase) dense() (A, B, Q, R, S, E *mat.Dense) {
 // solution of the stored data, or ErrAccuracyUnverified; never a wrong X
 // with a nil error.
 func TestDareNoiseFloorEnclosure(t *testing.T) {
+	defer encSymSites(t)()
 	for _, c := range dareNoiseFloorCases {
 		A, B, Q, R, S, E := c.dense()
 		ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
@@ -239,6 +240,7 @@ var dareEnclosureWCase = dareFloorCase{name: "rv48:219", n: 4, m: 6,
 // row fails the enclosure and Dare returns X through tier 2, within
 // newtonTol, not demoted.
 func TestDareEnclosureTiers(t *testing.T) {
+	defer encSymSites(t)()
 	for _, tc := range []struct {
 		c    dareFloorCase
 		want encResult

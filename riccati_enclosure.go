@@ -41,6 +41,7 @@ const encPrec = 256
 type encNum[M any] interface {
 	mul(b M, ta bool) M
 	symT(b M) M
+	bitSym() bool
 	add(b M, s float64) M
 	scale(s float64) M
 	t() M
@@ -202,6 +203,50 @@ func matOf(ws *encWS, r, c int) *mat.Dense {
 		return ws.mat(r, c)
 	}
 	return mat.NewDense(r, c, nil)
+}
+
+// encSymCheck, set by tests, receives at each symT call site whether the
+// middle factor D of AᵀDA is bitwise symmetric, which makes AᵀDA's exact
+// value symmetric. The factors are made so where they are formed: the
+// centre X by symmetrize, the Newton and refinement centres and the
+// encPrec Stein radii by encSym, the identity-E Stein radii by
+// symmetrize, the zero radius, and power-of-two scalings of these.
+var encSymCheck func(sym bool)
+
+func encNoteSym[M encNum[M]](d M) {
+	if encSymCheck != nil {
+		encSymCheck(d.bitSym())
+	}
+}
+
+func (a encDD) bitSym() bool {
+	if a.r != a.c {
+		return false
+	}
+	for i := range a.r {
+		for j := i + 1; j < a.c; j++ {
+			p, q := i*a.c+j, j*a.c+i
+			if math.Float64bits(a.h[p]) != math.Float64bits(a.h[q]) || math.Float64bits(a.l[p]) != math.Float64bits(a.l[q]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (a encBig) bitSym() bool {
+	if a.r != a.c {
+		return false
+	}
+	for i := range a.r {
+		for j := i + 1; j < a.c; j++ {
+			x, y := a.d[i*a.c+j], a.d[j*a.c+i]
+			if x.Cmp(y) != 0 || x.Signbit() != y.Signbit() {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // symT is aᵀb for a symmetric exact product: the upper triangle, each
@@ -529,6 +574,7 @@ func (o *encOps[M]) ete(x M) M {
 	if o.eIdent {
 		return x
 	}
+	encNoteSym(x)
 	return o.e.symT(x.mul(o.e, false))
 }
 
@@ -927,6 +973,7 @@ func encPiecesOf[M encNum[M]](o *encOps[M], c, k M) encPieces[M] {
 		p.rks = p.rks.add(o.s.t(), -1)
 	}
 	cak := c.mul(p.ak, false)
+	encNoteSym(c)
 	p.r = encSym(p.ak.symT(cak).add(o.ete(c), -1).add(p.qk, 1))
 	p.g = p.rks.add(o.b.mul(cak, true), -1)
 	p.w = encSym(o.r.add(o.b.mul(c.mul(o.b, false), true), 1))
@@ -948,7 +995,10 @@ func encXDir[M encNum[M]](o *encOps[M], p encPieces[M], s float64, cat func(a, b
 // N_K(c − D_L) = [[r − A_KᵀD_LA_K + EᵀD_LE, −(g + BᵀD_LA_K)ᵀ], [·,
 // W(c) − BᵀD_LB]].
 func encSDir[M encNum[M]](o *encOps[M], p encPieces[M], du, dl M, cat func(a, b, c M) M) (M, M) {
-	md := func(d M) M { return p.ak.symT(d.mul(p.ak, false)).add(o.ete(d), -1) }
+	md := func(d M) M {
+		encNoteSym(d)
+		return p.ak.symT(d.mul(p.ak, false)).add(o.ete(d), -1)
+	}
 	zu := encSym(p.r.add(md(du), 1).scale(-1))
 	z11 := encSym(p.r.add(md(dl), -1))
 	g := p.g.add(o.b.mul(dl.mul(p.ak, false), true), 1)
@@ -1157,7 +1207,7 @@ func (e *encCentre) zeroExact(Q, S, X, K *mat.Dense) (encTier, bool) {
 	}
 	zero := newEncDD(d.ws, d.n, d.n)
 	adu := zero.abs()
-	for k := 0; k <= 52; k += 4 {
+	for k := 0; k <= 600; k += 4 {
 		dk := dl.scale(math.Ldexp(1, -k))
 		adl := dk.abs()
 		_, zl := encSDir(&d.dd, e.p, zero, dk, catDD)
