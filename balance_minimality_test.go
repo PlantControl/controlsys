@@ -161,6 +161,8 @@ var balrealCensusRows = []struct {
 	ref        []float64
 	tol        float64
 	want       error
+	// balrealWant is Balreal's error when only Balred certifies (JV4E3K).
+	balrealWant error
 }{
 	{
 		name: "lightly damped pairs on the transposed Schur form", n: 6, m: 1, p: 1,
@@ -221,11 +223,12 @@ var balrealCensusRows = []struct {
 	},
 	{
 		name: "rotated minimal with HSV rounding to zero", n: 2, m: 2, p: 2,
-		a:   []float64{-1.0000000000000002, 1.071516862846046e-16, 1.071516862846046e-16, -1},
-		b:   []float64{0, 0, -1, 1},
-		c:   []float64{1, -1, 0.5, 2},
-		d:   []float64{-1, -1, -1, 1},
-		ref: []float64{1.5811388300841898, 4.2355422973396943e-17},
+		a:           []float64{-1.0000000000000002, 1.071516862846046e-16, 1.071516862846046e-16, -1},
+		b:           []float64{0, 0, -1, 1},
+		c:           []float64{1, -1, 0.5, 2},
+		d:           []float64{-1, -1, -1, 1},
+		ref:         []float64{1.5811388300841898, 4.2355422973396943e-17},
+		balrealWant: ErrSingularTransform,
 	},
 }
 
@@ -240,6 +243,17 @@ func TestBalrealCensusRows(t *testing.T) {
 				t.Fatalf("fixture exactly minimal = %v", minimal)
 			}
 			br, err := Balreal(sys)
+			if tc.balrealWant != nil {
+				if !errors.Is(err, tc.balrealWant) || br != nil {
+					t.Fatalf("Balreal = %v, %v; want %v", br, err, tc.balrealWant)
+				}
+				red, hsv, err := Balred(sys, (tc.n+1)/2, BalredOptions{})
+				if err != nil || red == nil {
+					t.Fatalf("Balred: %v", err)
+				}
+				balrealHSVWithin(t, hsv, tc.ref, 1e-8)
+				return
+			}
 			if tc.want != nil {
 				if !errors.Is(err, tc.want) || br != nil {
 					t.Fatalf("Balreal = %v, %v; want %v", br, err, tc.want)

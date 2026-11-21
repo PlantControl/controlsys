@@ -37,9 +37,9 @@ type BalredOptions struct {
 }
 
 // BalrealResult holds the outputs of MATLAB [sysb,g,TL,TR] = balreal(sys):
-// Sys.A = TL·A·TR, Sys.B = TL·B, Sys.C = C·TR, TL·TR = I, so the balanced
-// state is x̄ = TL·x and x = TR·x̄. HSV holds the Hankel singular values in
-// decreasing order.
+// Sys.A = TL·A·TR, Sys.B = TL·B, Sys.C = C·TR, and TL·TR = I to the
+// tolerance Balreal certifies, so the balanced state is x̄ = TL·x and
+// x = TR·x̄. HSV holds the Hankel singular values in decreasing order.
 type BalrealResult struct {
 	Sys *System
 	HSV []float64
@@ -58,14 +58,30 @@ type BalrealResult struct {
 // exactly on the stored data: a model whose controllability or
 // observability matrix is rank deficient over the rationals returns
 // ErrNotMinimal, and ErrMinimalityUndetermined when the exact test exceeds
-// its work bound. A minimal model can still have Hankel singular values
-// below the float64 rounding of σ₁, even 0; they are accurate relative to
-// σ₁ and the balancing scales their directions at 2⁻¹⁰⁶·σ₁. Gramians are
+// its work bound. The Hankel singular values are accurate relative to σ₁;
+// a minimal model can still have some below the float64 rounding of σ₁,
+// whose singular directions are known only to that rounding. Balreal
+// certifies the transformation: with E = TL·TR − I evaluated exactly,
+// ‖E‖_F ≤ min(2⁻¹⁰, max(10⁻⁸, 4·n·ε·σ₁/σₙ)). A model whose transformation
+// fails this, being numerically non-minimal, returns ErrSingularTransform;
+// Balred can still reduce it to a certified order. Gramians are
 // refined against the stored data; when the Lyapunov equations are too
 // ill-conditioned for that, Balreal returns ErrSingularEquation. A model
 // with no states returns ErrDimensionMismatch, since TL and TR cannot be
 // formed. A result entry beyond float64 range returns ErrOverflow.
 func Balreal(sys *System) (*BalrealResult, error) {
+	br, err := balanceUncertified(sys)
+	if err != nil {
+		return nil, err
+	}
+	if !newBalanceCert(br).full() {
+		return nil, fmt.Errorf("Balreal: balancing transformation numerically singular, TL·TR − I above tolerance (model numerically non-minimal): %w", ErrSingularTransform)
+	}
+	return br, nil
+}
+
+// balanceUncertified is Balreal without the certificate of TL·TR = I.
+func balanceUncertified(sys *System) (*BalrealResult, error) {
 	if err := requireFiniteSystem("Balreal", sys); err != nil {
 		return nil, err
 	}
@@ -202,9 +218,7 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	if !(s[0] > 0) {
 		return nil, fmt.Errorf("Balreal: Hankel singular values of the minimal model underflow to zero: %w", ErrSingularTransform)
 	}
-	// A minimal model can have Hankel singular values below the float64
-	// rounding of σ₁, even 0; the balancing scales those directions by the
-	// floor instead, as they are only defined to that rounding.
+	// Guards the division for Hankel singular values that round to 0.
 	sFloor := math.Ldexp(s[0], -106)
 
 	// V = Vt' — scale columns of Vt' by 1/sqrt(σ) → vScaled
@@ -333,9 +347,17 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // [rsys,info] = balred(sys,order,opts); see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.balred.html.
 // hsv holds the Hankel singular values (MATLAB info.HSV). order must be in
-// [0, n]; order n returns the balanced realization and order 0 a static gain.
-// opts.StateProjection selects MatchDC (the zero value, MATLAB default) or
-// Truncate. sys must satisfy the requirements of Balreal.
+// [0, n]; order n returns the balanced realization of Balreal and order 0 a
+// static gain. opts.StateProjection selects MatchDC (the zero value, MATLAB
+// default) or Truncate. sys must satisfy the requirements of Balreal, except
+// its certificate of TL·TR = I: when the whole transformation is not
+// certified, Balred reduces the leading balanced states it does certify,
+// after truncating the directions whose Hankel singular values are at most
+// n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁ (SLICOT AB09AD and
+// AB09BD likewise cap the order at the numerically minimal one). MatchDC
+// then keeps the DC gain to within twice the sum of the truncated Hankel
+// singular values. An order above the certified one returns
+// ErrSingularTransform naming it.
 func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, error) {
 	if err := requireFiniteSystem("Balred", sys); err != nil {
 		return nil, nil, err
@@ -343,7 +365,7 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	if err := opts.StateProjection.validate("Balred"); err != nil {
 		return nil, nil, err
 	}
-	br, err := Balreal(sys)
+	br, err := balanceUncertified(sys)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -351,14 +373,33 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	if order < 0 || order > n {
 		return nil, nil, fmt.Errorf("Balred: order %d outside [0,%d]: %w", order, n, ErrInvalidOrder)
 	}
+	cert := newBalanceCert(br)
+	full := cert.full()
 	if order == n {
+		if !full {
+			return nil, nil, fmt.Errorf("Balred: balancing transformation numerically singular, TL·TR − I above tolerance (model numerically non-minimal): %w", ErrSingularTransform)
+		}
 		return br.Sys, br.HSV, nil
 	}
-	elim := make([]int, 0, n-order)
-	for i := order; i < n; i++ {
+	src := br.Sys
+	h := n
+	if !full || br.HSV[n-1] <= cert.floor() {
+		var ok bool
+		if h, ok = cert.certifiedOrder(); !ok {
+			return nil, nil, fmt.Errorf("Balred: balancing transformation numerically singular above the rounding of σ₁: %w", ErrSingularTransform)
+		}
+		if order > h {
+			return nil, nil, fmt.Errorf("Balred: order %d exceeds certified order %d of the balancing transformation (model numerically non-minimal): %w", order, h, ErrSingularTransform)
+		}
+		if src, err = balancedHead(sys, br, h); err != nil {
+			return nil, nil, err
+		}
+	}
+	elim := make([]int, 0, h-order)
+	for i := order; i < h; i++ {
 		elim = append(elim, i)
 	}
-	red, err := modred(br.Sys, elim, opts.StateProjection)
+	red, err := modred(src, elim, opts.StateProjection)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Balred: %w", err)
 	}
@@ -367,6 +408,35 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 		return nil, nil, err
 	}
 	return red, br.HSV, nil
+}
+
+// balancedHead returns the leading h states of the balanced realization,
+// (TL₁·A·TR₁, TL₁·B, C·TR₁, D) with TL₁ the first h rows of TL and TR₁ the
+// first h columns of TR.
+func balancedHead(sys *System, br *BalrealResult, h int) (*System, error) {
+	policy := newRealizationTransformPolicy(sys)
+	n, m, p := policy.n, policy.m, policy.p
+	tl, tr := br.TL.RawMatrix(), br.TR.RawMatrix()
+	tl1 := blas64.General{Rows: h, Cols: n, Stride: tl.Stride, Data: tl.Data}
+	tr1 := blas64.General{Rows: n, Cols: h, Stride: tr.Stride, Data: tr.Data}
+	aRaw, bRaw, cRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	buf := make([]float64, n*h+h*h+h*m+p*h)
+	at, ah, bh, ch := buf[:n*h], buf[n*h:n*h+h*h], buf[n*h+h*h:n*h+h*h+h*m], buf[n*h+h*h+h*m:]
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, aRaw, tr1, 0, blas64.General{Rows: n, Cols: h, Stride: h, Data: at})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tl1, blas64.General{Rows: n, Cols: h, Stride: h, Data: at},
+		0, blas64.General{Rows: h, Cols: h, Stride: h, Data: ah})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tl1, bRaw, 0, blas64.General{Rows: h, Cols: m, Stride: m, Data: bh})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, cRaw, tr1, 0, blas64.General{Rows: p, Cols: h, Stride: h, Data: ch})
+	Ah, Bh, Ch := mat.NewDense(h, h, ah), mat.NewDense(h, m, bh), mat.NewDense(p, h, ch)
+	for _, out := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", Ah}, {"B", Bh}, {"C", Ch}} {
+		if err := finiteDense("Balred", out.name, out.m, ErrOverflow); err != nil {
+			return nil, err
+		}
+	}
+	return policy.result(Ah, Bh, Ch, denseCopy(sys.D))
 }
 
 // Modred eliminates the states with 0-based indices elim, as MATLAB
