@@ -33,7 +33,9 @@ import (
 // classifyProbe sharpens only the points the plain bound does not verify.
 // Responses and bounds are invariant under the exact power-of-two
 // balancing the solve uses. ok is false at points where GEPP meets an
-// exactly zero pivot.
+// exactly zero pivot. Where ok, a response or bound that leaves the double
+// range is non-finite, and every judge takes its entry as undetermined:
+// it neither verifies nor refutes (classifyProbe, zpkJudgeEntries).
 type boundedResponse struct {
 	p, m  int
 	g     []complex128

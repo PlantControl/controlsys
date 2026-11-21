@@ -106,9 +106,12 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 		return false
 	}
 	sided := sys.Dt == 0 && cutoff > 0
-	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
+	full, cut, inRange := bandResponses(sys, red, pts)
 	defer full.release()
 	defer cut.release()
+	if !inRange {
+		return false
+	}
 	var slow, fast int
 	verified := 0
 	isVerified := make([]bool, len(pts))
@@ -352,7 +355,7 @@ func (d *ddJudge) verifies(full, cut, cb *boundedResponse, k int, s complex128) 
 }
 
 // cutCannotRefute is refutes' test with cb's bounds at k, sharpened first
-// with sharpen.
+// with sharpen; a non-finite quantity fails the test.
 func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool {
 	if !cb.ok[k] || sharpen && cb.sharp[k] {
 		return false
@@ -368,7 +371,8 @@ func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool
 	}
 	for i := range g {
 		up := (cmplx.Abs(g[i].g-cb.g[o+i])+cb.ver[o+i])*(1+8*eps()) - g[i].comp
-		if !(up <= d.tol*math.Max(sg, g[i].hi)*(1-8*eps())) {
+		thr := d.tol * math.Max(sg, g[i].hi) * (1 - 8*eps())
+		if !finiteAll(up, thr) || !(up <= thr) {
 			return false
 		}
 	}
@@ -376,7 +380,8 @@ func (d *ddJudge) cutCannotRefute(cb *boundedResponse, k int, sharpen bool) bool
 }
 
 // cutVerifies is verdict's verification with cb's response and ver bounds
-// at k for the cut's, sharpened first with sharpen.
+// at k for the cut's, sharpened first with sharpen; a non-finite quantity
+// does not verify.
 func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
 	if !cb.ok[k] || sharpen && cb.sharp[k] {
 		return false
@@ -390,26 +395,37 @@ func (d *ddJudge) cutVerifies(cb *boundedResponse, k int, sharpen bool) bool {
 	for i := range g {
 		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(cb.g[o+i])))
 	}
+	if !isFinite(tol * scale) {
+		return false
+	}
 	for i := range g {
 		lhs := cmplx.Abs(g[i].g-cb.g[o+i]) + g[i].ver + cb.ver[o+i]
-		if !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
+		if !finiteAll(lhs, g[i].lo) || !(lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo)) {
 			return false
 		}
 	}
 	return true
 }
 
-// verdict judges the bounds judge formed.
+// verdict judges the bounds judge formed, an entry or scale with a
+// non-finite quantity as classifyProbe does.
 func (d *ddJudge) verdict() probeVerdict {
 	g, r, tol := d.g, d.r, d.tol
 	scale := 0.0
 	for i := range g {
 		scale = math.Max(scale, math.Max(cmplx.Abs(g[i].g), cmplx.Abs(r[i].g)))
 	}
+	if !isFinite(tol * scale) {
+		return probeUninformative
+	}
 	v := probeVerified
 	for i := range g {
 		diff := cmplx.Abs(g[i].g - r[i].g)
 		lhs := diff + g[i].ver + r[i].ver
+		if !finiteAll(lhs, g[i].comp, r[i].comp, g[i].lo, g[i].hi) {
+			v = probeUninformative
+			continue
+		}
 		if lhs <= tol*scale || g[i].determined && g[i].lo > 0 && lhs <= tol*math.Max(scale, g[i].lo) {
 			continue
 		}
@@ -742,7 +758,12 @@ const (
 // otherwise both responses are sharpened there before the judgement.
 //
 // A point where GEPP meets an exactly singular model is uninformative, one
-// with a singular cut rejects.
+// with a singular cut rejects. An entry with a non-finite quantity
+// (probeEntryFinite) is undetermined: it neither verifies nor refutes and
+// its point does not verify, while the point's finite entries are judged
+// as before; a point whose tol·scale is not finite is uninformative, as
+// its true scale is unknown. The other judges of the band follow the
+// same rule.
 func classifyProbe(full, cut *boundedResponse, k int, tol float64, inShared bool) probeVerdict {
 	if !full.ok[k] {
 		return probeUninformative
@@ -764,10 +785,17 @@ func classifyProbe(full, cut *boundedResponse, k int, tol float64, inShared bool
 	}
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	scale := probeScale(g, r)
+	if !isFinite(tol * scale) {
+		return probeUninformative
+	}
 	verdict := probeVerified
 	for i, v := range g {
 		gc, rc := full.comp[o+i], cut.comp[o+i]
 		diff := cmplx.Abs(v - r[i])
+		if !probeEntryFinite(full, cut, o+i, diff) {
+			verdict = probeUninformative
+			continue
+		}
 		if diff+full.ver[o+i]+cut.ver[o+i] <= tol*scale {
 			continue
 		}
@@ -790,8 +818,15 @@ func probeRefuted(full, cut *boundedResponse, k int, tol float64, inShared bool)
 	o := k * pm
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	scale := probeScale(g, r)
+	if !isFinite(tol * scale) {
+		return false
+	}
 	for i, v := range g {
-		d := cmplx.Abs(v-r[i]) - full.comp[o+i] - cut.comp[o+i]
+		diff := cmplx.Abs(v - r[i])
+		if !probeEntryFinite(full, cut, o+i, diff) {
+			continue
+		}
+		d := diff - full.comp[o+i] - cut.comp[o+i]
 		if inShared {
 			if d-full.data[o+i]-cut.data[o+i] > tol*scale {
 				return true
@@ -810,12 +845,214 @@ func probeRefuted(full, cut *boundedResponse, k int, tol float64, inShared bool)
 // uninformative.
 func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
 	ts := tol * probeScale(g, r)
+	if !isFinite(ts) {
+		return false
+	}
 	for i, v := range g {
-		if cmplx.Abs(v-r[i])-gc[i]-rc[i] > ts {
+		d := cmplx.Abs(v - r[i])
+		if !finiteAll(d, gc[i], rc[i]) {
+			continue
+		}
+		if d-gc[i]-rc[i] > ts {
 			return true
 		}
 	}
 	return false
+}
+
+// bandResponses returns the bounded responses of sys and red at pts, and
+// whether the band may judge them. A response or bound that overflows, or
+// with 2^(eB+eC) < 1 an entry not structurally zero whose terms fall below
+// 2^−969, where rounding stops being relative (inRange), leaves the double
+// range; 2^eB and 2^eC are the scales of sys's largest |B̂_ij| and |Ĉ_ij|.
+// On overflow the band refuses the cut: the pole resolutions its windows
+// and probes read come from a balancing that saw the huge B̂ and Ĉ, so a
+// point rescaled into range may refute but must never verify, and a band
+// that cannot verify cannot certify. On underflow with eB ≤ 0 and eC ≤ 0
+// both responses are formed instead on the realizations with B̂ and Ĉ
+// scaled up by 2^−eB and 2^−eC, exact for both or the cut is refused:
+// every quantity a judge reads is bilinear in B̂ and Ĉ and compared only
+// relative to the others, and tiny B̂ and Ĉ do not inflate those
+// resolutions, so the rescaled points judge as the stored data's would.
+// Underflow with either exponent positive is refused as overflow is: the
+// larger of B̂ and Ĉ took part in the balancing. With 2^(eB+eC) < 2^−512 they are scaled up
+// before the first evaluation, which is then the only one.
+func bandResponses(sys, red *System, pts []complex128) (boundedResponse, boundedResponse, bool) {
+	n, m, p := sys.Dims()
+	nr, _, _ := red.Dims()
+	rf, rc := newBalancedRealization(sys, n, m, p), newBalancedRealization(red, nr, m, p)
+	eB, eC := maxExponent(rf.b), maxExponent(rf.c)
+	under, scaled := eB+eC < 0, false
+	up := under && eB <= 0 && eC <= 0
+	if up && eB+eC < -512 {
+		sf, okF := scaledIO(rf, eB, eC)
+		sc, okC := scaledIO(rc, eB, eC)
+		if okF && okC {
+			rf, rc, scaled = sf, sc, true
+		}
+	}
+	full, cut := boundedResponseOf(rf, pts), boundedResponseOf(rc, pts)
+	finF, bigF := full.inRange(&rf, under)
+	finC, bigC := cut.inRange(&rc, under)
+	if !finF || !finC {
+		return full, cut, false
+	}
+	if bigF && bigC || scaled {
+		return full, cut, bigF && bigC
+	}
+	if !up {
+		return full, cut, false
+	}
+	sf, okF := scaledIO(rf, eB, eC)
+	sc, okC := scaledIO(rc, eB, eC)
+	if !okF || !okC {
+		return full, cut, false
+	}
+	full.release()
+	cut.release()
+	full, cut = boundedResponseOf(sf, pts), boundedResponseOf(sc, pts)
+	finF, bigF = full.inRange(&sf, under)
+	finC, bigC = cut.inRange(&sc, under)
+	return full, cut, finF && finC && bigF && bigC
+}
+
+// inRange reports whether every response and bound at the ok points of b,
+// the response of rz, is finite, and, with under, whether every entry that
+// is not structurally zero (no path from its input through the nonzeros of
+// Â to its output) has terms of at least 2^−969, above which their rounding
+// is relative, or exactly zero and still zero on B̂ and Ĉ scaled up
+// (zerosExact): below the floor a response and its bounds underflow, to an
+// exact zero that verifies any cut.
+func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, big bool) {
+	const tiny = 0x1p-969
+	n, m, p := rz.n, rz.m, rz.p
+	var live []bool
+	if under {
+		live = make([]bool, p*m)
+		reach := make([]bool, n)
+		stack := make([]int, 0, n)
+		for j := range m {
+			clear(reach)
+			stack = stack[:0]
+			for l := range n {
+				if rz.b[l*m+j] != 0 {
+					reach[l] = true
+					stack = append(stack, l)
+				}
+			}
+			for len(stack) > 0 {
+				l := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				for q := range n {
+					if !reach[q] && rz.a[q*n+l] != 0 {
+						reach[q] = true
+						stack = append(stack, q)
+					}
+				}
+			}
+			for i := range p {
+				for l := range n {
+					if reach[l] && rz.c[i*n+l] != 0 {
+						live[i*m+j] = true
+						break
+					}
+				}
+			}
+		}
+	}
+	pm := p * m
+	finite, big = true, true
+	var zs []int
+	for k, ok := range b.ok {
+		if !ok {
+			continue
+		}
+		zero := false
+		for y := range pm {
+			o := k*pm + y
+			g := b.g[o]
+			finite = finite && finiteAll(real(g), imag(g), b.comp[o], b.ver[o], b.data[o], b.terms[o])
+			if under && live[y] {
+				t := b.terms[o]
+				big = big && !(t > 0 && t < tiny)
+				zero = zero || t == 0
+			}
+		}
+		if zero {
+			zs = append(zs, k)
+		}
+	}
+	if finite && big && len(zs) > 0 {
+		big = b.zerosExact(rz, zs, live)
+	}
+	return finite, big
+}
+
+// zerosExact reports whether the live entries with zero terms at the
+// points zs of b, the response of rz, stay exactly zero with B̂ and Ĉ
+// scaled up by powers of two to largest magnitudes 2^400: a zero that
+// does is the stored data's own, a zero that does not had underflowed.
+func (b *boundedResponse) zerosExact(rz *balancedRealization, zs []int, live []bool) bool {
+	sz, ok := scaledIO(*rz, maxExponent(rz.b)-400, maxExponent(rz.c)-400)
+	if !ok {
+		return false
+	}
+	pts := make([]complex128, len(zs))
+	for i, k := range zs {
+		pts[i] = b.ev.pts[k]
+	}
+	z := boundedResponseOf(sz, pts)
+	defer z.release()
+	pm := b.p * b.m
+	for i, k := range zs {
+		for y := range pm {
+			if live[y] && b.terms[k*pm+y] == 0 && (!z.ok[i] || z.terms[i*pm+y] != 0) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// maxExponent is the binary exponent e of the largest |v_i|, 2^(e−1) ≤
+// |v_i| < 2^e, 0 for a zero or empty v.
+func maxExponent(v []float64) int {
+	mx := 0.0
+	for _, x := range v {
+		mx = math.Max(mx, math.Abs(x))
+	}
+	if mx == 0 || !isFinite(mx) {
+		return 0
+	}
+	_, e := math.Frexp(mx)
+	return e
+}
+
+// scaledIO is rz with B̂ scaled by 2^−eB and Ĉ by 2^−eC, ok when every
+// entry scales exactly.
+func scaledIO(rz balancedRealization, eB, eC int) (balancedRealization, bool) {
+	scale := func(v []float64, e int) ([]float64, bool) {
+		out := make([]float64, len(v))
+		for i, x := range v {
+			out[i] = math.Ldexp(x, -e)
+			if math.Ldexp(out[i], e) != x {
+				return nil, false
+			}
+		}
+		return out, true
+	}
+	out := rz
+	var okB, okC bool
+	out.b, okB = scale(rz.b, eB)
+	out.c, okC = scale(rz.c, eC)
+	return out, okB && okC
+}
+
+// probeEntryFinite reports whether entry o of full and cut, with deviation
+// diff = |Ĝ−R̂|, has finite responses, bounds, terms and deviation.
+func probeEntryFinite(full, cut *boundedResponse, o int, diff float64) bool {
+	return finiteAll(diff, full.comp[o], full.ver[o], full.data[o], full.terms[o],
+		cut.comp[o], cut.ver[o], cut.data[o], cut.terms[o])
 }
 
 // probeScale is the largest |Ĝ|, |R̂| of a point's entries.
@@ -867,9 +1104,16 @@ func probeMargin(full, cut *boundedResponse, k int, tol float64) (bool, float64)
 	o := k * pm
 	g, r := full.g[o:o+pm], cut.g[o:o+pm]
 	ts := tol * probeScale(g, r)
+	if !isFinite(ts) {
+		return false, math.Inf(-1)
+	}
 	ok, dev := true, math.Inf(-1)
 	for i, v := range g {
 		d, b := cmplx.Abs(v-r[i]), full.ver[o+i]+cut.ver[o+i]
+		if !probeEntryFinite(full, cut, o+i, d) {
+			ok = false
+			continue
+		}
 		ok = ok && d+b <= ts
 		dev = math.Max(dev, d-b)
 	}

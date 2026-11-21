@@ -422,18 +422,29 @@ type zpkEntryBounds struct {
 }
 
 // zpkJudgeEntries classifies a point from its entry bounds e and the
-// candidate's values zv with their bounds zb (check).
+// candidate's values zv with their bounds zb (check). An entry with a
+// non-finite quantity is undetermined, neither verifying nor refuting, and
+// a point whose tol·scale is not finite is undetermined.
 func (c *zpkRowCheck) zpkJudgeEntries(cand *zpkCandidate, s complex128, e []zpkEntryBounds, zv []complex128, zb []float64) zpkPointVerdict {
 	scale := 0.0
 	for j := range e {
 		scale = math.Max(scale, math.Max(cmplx.Abs(e[j].g), cmplx.Abs(zv[j])))
 	}
 	ts := c.tol * scale
+	if !isFinite(ts) {
+		return zpkPointUndetermined
+	}
 	v := zpkPointVerified
 	for j, x := range e {
 		gr := cmplx.Abs(x.g) * gammaN(1)
 		diff := cmplx.Abs(x.g - zv[j])
 		lhs := diff + x.ver + gr + zb[j]
+		if !finiteAll(lhs, x.comp, x.lo, x.hi) {
+			if v == zpkPointVerified {
+				v = zpkPointUndetermined
+			}
+			continue
+		}
 		if lhs <= ts {
 			continue
 		}
