@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -231,8 +232,7 @@ func TestLyapRefinementStallUnverified(t *testing.T) {
 	for i := range s.t {
 		s.t[i] *= 2.5
 	}
-	banded := func(float64) bool { return false }
-	err = refineLyapunov(&s, A, Q, x, nil, banded, ErrSingularEquation)
+	err = refineLyapunov(&s, A, Q, x, nil, math.Inf(1), ErrSingularEquation)
 	if !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatalf("err = %v, want ErrAccuracyUnverified", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -28,14 +29,30 @@ func lyapunovBandK(n int) float64 { return 4 * float64(n+5) }
 // against, multiplied by ε first so that it overflows only with ‖L‖.
 func lyapunovUnit(A *mat.Dense, discrete bool) float64 {
 	raw := A.RawMatrix()
-	f := 0.0
-	for i := range raw.Rows {
-		f = math.Hypot(f, scaledNorm2(raw.Data[i*raw.Stride:i*raw.Stride+raw.Cols]))
-	}
+	f := lyapFrobenius(raw.Data, raw.Rows, raw.Cols, raw.Stride)
 	if discrete {
 		return eps()*f*f + eps()
 	}
 	return 2 * eps() * f
+}
+
+// lyapFrobenius returns the Frobenius norm of the rows×cols matrix in data (row
+// stride ld): a plain sum of squares, rescaled only when that leaves the
+// safe range. Inf or NaN when an entry is.
+func lyapFrobenius(data []float64, rows, cols, ld int) float64 {
+	sum := 0.0
+	for i := range rows {
+		for _, x := range data[i*ld : i*ld+cols] {
+			sum += x * x
+		}
+	}
+	if sum > 0x1p-900 && sum < 0x1p900 {
+		return math.Sqrt(sum)
+	}
+	if math.IsNaN(sum) {
+		return sum
+	}
+	return denseNormScaled(blas64.General{Rows: rows, Cols: cols, Stride: ld, Data: data})
 }
 
 // certifyLyapunov certifies, refines in place or rejects the X (in w, n×n
@@ -61,21 +78,22 @@ func lyapunovUnit(A *mat.Dense, discrete bool) float64 {
 // exactly; the growth witnesses stay in balanced coordinates.
 func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 	n := s.n
-	if !finiteSlice(w[:n*n]) {
+	xn := lyapFrobenius(w, n, n, n)
+	if !(xn <= math.MaxFloat64) {
 		return nil
 	}
 	u := lyapunovUnit(A, s.discrete)
 	k := lyapunovBandK(n)
-	banded := func(e float64) bool { return !(e*k*u < 1) }
+	band := 1 / (k * u)
 
 	singular := lyapunovSingular(k)
-	qn := denseNormScaled(Q.RawMatrix())
-	xn := scaledNorm2(w[:n*n])
+	qRaw := Q.RawMatrix()
+	qn := lyapFrobenius(qRaw.Data, n, n, qRaw.Stride)
 	growth := 0.0
 	if qn > 0 {
 		growth = xn / qn
 	}
-	if banded(growth) {
+	if !(growth < band) {
 		return singular
 	}
 	nf := float64(n)
@@ -92,11 +110,11 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 		return nil
 	}
 	if !(nf*mu*u <= 1/(2*k)) {
-		if banded(math.Max(growth, newLyapunovOperator(s).inverseNormEstimate())) {
+		if !(math.Max(growth, newLyapunovOperator(s).inverseNormEstimate()) < band) {
 			return singular
 		}
 	}
-	return refineLyapunov(s, A, Q, w, d, banded, singular)
+	return refineLyapunov(s, A, Q, w, d, band, singular)
 }
 
 // weightedNorm returns ‖D·V·D‖_F of the n×n v, D = diag(d) (d nil for I).
@@ -125,7 +143,8 @@ func (k lyapunovSingular) Unwrap() error { return ErrSingularEquation }
 
 // refineLyapunov refines X in w by corrections solved on the Schur form from
 // double-double residuals of the stored A and Q.
-func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, banded func(float64) bool, singular error) error {
+// A correction growth ‖d‖/‖r‖ of band or more returns singular.
+func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, band float64, singular error) error {
 	n := s.n
 	nn := n * n
 	r, d := make([]float64, nn), make([]float64, nn)
@@ -146,7 +165,7 @@ func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, bande
 		if dn == 0 {
 			return nil
 		}
-		if banded(dn / scaledNorm2(r)) {
+		if !(dn/scaledNorm2(r) < band) {
 			return singular
 		}
 		corr := dn / scaledNorm2(w[:nn])
@@ -181,24 +200,6 @@ func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, bande
 	return fmt.Errorf("refinement stopped at relative correction %.2g: %w", bestCorr, ErrAccuracyUnverified)
 }
 
-// lyapunovBlocks returns the starts and sizes of the diagonal blocks of the
-// quasi-triangular t.
-func lyapunovBlocks(t []float64, n int, ws *LyapunovWorkspace) (start, size []int) {
-	start = reuseIntSlice(ws, n, func(w *LyapunovWorkspace) *[]int { return &w.blockStart })
-	size = reuseIntSlice(ws, n, func(w *LyapunovWorkspace) *[]int { return &w.blocks })
-	for i := 0; i < n; {
-		start = append(start, i)
-		if i+1 < n && t[(i+1)*n+i] != 0 {
-			size = append(size, 2)
-			i += 2
-		} else {
-			size = append(size, 1)
-			i++
-		}
-	}
-	return start, size
-}
-
 // lyapunovComparisonBound returns μ ≥ ‖L_T⁻¹‖ in the max-entry norm, L_T the
 // operator X ↦ T·X + X·Tᵀ (or T·X·Tᵀ − X) of the quasi-triangular t: the
 // solution, with every right-hand block bounded by 1, of the block
@@ -207,19 +208,56 @@ func lyapunovBlocks(t []float64, n int, ws *LyapunovWorkspace) (start, size []in
 // off-diagonal blocks of t (Higham, Accuracy and Stability of Numerical
 // Algorithms, §8.3). +Inf when a diagonal block-pair operator is singular.
 func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWorkspace) float64 {
-	start, size := lyapunovBlocks(t, n, ws)
+	const small = 6
+	var startBuf [16]int
+	var smallBuf [4 * small * small]float64
+	start := startBuf[:0]
+	if n > len(startBuf) {
+		start = make([]int, 0, n)
+	}
+	for i := 0; i < n; {
+		start = append(start, i)
+		if i+1 < n && t[(i+1)*n+i] != 0 {
+			i += 2
+		} else {
+			i++
+		}
+	}
 	nb := len(start)
-	buf := reuseSlice(&ws, 3*nb*nb, func(w *LyapunovWorkspace) *[]float64 { return &w.cmp })
-	nrm, y, z := buf[:nb*nb], buf[nb*nb:2*nb*nb], buf[2*nb*nb:]
+	size := func(k int) int {
+		if k+1 < nb {
+			return start[k+1] - start[k]
+		}
+		return n - start[k]
+	}
+	var buf []float64
+	if nb <= small {
+		buf = smallBuf[:4*nb*nb]
+	} else {
+		buf = reuseSlice(&ws, 4*nb*nb, func(w *LyapunovWorkspace) *[]float64 { return &w.cmp })
+	}
+	nrm, y, z, dinv := buf[:nb*nb], buf[nb*nb:2*nb*nb], buf[2*nb*nb:3*nb*nb], buf[3*nb*nb:]
+	// The block-pair operators of (k,l) and (l,k) are similar under
+	// X ↦ Xᵀ, a permutation, so their inverse ∞-norms agree.
 	for k := range nb {
+		for l := k; l < nb; l++ {
+			v := blockPairInverseNorm(t, n, start[k], size(k), start[l], size(l), discrete)
+			dinv[k*nb+l], dinv[l*nb+k] = v, v
+		}
+	}
+	for k := range nb {
+		k0, k1 := start[k], start[k]+size(k)
 		for m := k; m < nb; m++ {
+			m0, m1 := start[m], start[m]+size(m)
 			v := 0.0
-			for i := start[k]; i < start[k]+size[k]; i++ {
+			for i := k0; i < k1; i++ {
 				row := 0.0
-				for j := start[m]; j < start[m]+size[m]; j++ {
-					row += math.Abs(t[i*n+j])
+				for _, x := range t[i*n+m0 : i*n+m1] {
+					row += math.Abs(x)
 				}
-				v = math.Max(v, row)
+				if row > v {
+					v = row
+				}
 			}
 			nrm[k*nb+m] = v
 		}
@@ -250,15 +288,17 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 					sum += nrm[l*nb+m] * y[k*nb+m]
 				}
 			}
-			v := blockPairInverseNorm(t, n, start[k], size[k], start[l], size[l], discrete) * sum
-			if math.IsInf(v, 0) || math.IsNaN(v) {
+			v := dinv[k*nb+l] * sum
+			if !(v <= math.MaxFloat64) {
 				return math.Inf(1)
 			}
 			y[k*nb+l] = v
 			if discrete {
 				z[k*nb+l] += nrm[l*nb+l] * v
 			}
-			mu = math.Max(mu, v)
+			if v > mu {
+				mu = v
+			}
 		}
 	}
 	return mu
@@ -276,32 +316,17 @@ func blockPairInverseNorm(t []float64, n, ka, da, la, db int, discrete bool) flo
 		return 1 / math.Abs(den)
 	}
 	N := da * db
-	var m, inv [16]float64
-	for i := range da {
-		for j := range db {
-			row := i*db + j
-			for p := range da {
-				for q := range db {
-					a, b := t[(ka+i)*n+ka+p], t[(la+j)*n+la+q]
-					var v float64
-					if discrete {
-						v = a * b
-						if row == p*db+q {
-							v--
-						}
-					} else {
-						if j == q {
-							v += a
-						}
-						if i == p {
-							v += b
-						}
-					}
-					m[row*N+p*db+q] = v
-				}
-			}
+	if N == 2 {
+		var m [4]float64
+		blockPairMatrix(m[:], t, n, ka, da, la, db, discrete)
+		det := m[0]*m[3] - m[1]*m[2]
+		if det == 0 {
+			return math.Inf(1)
 		}
+		return math.Max(math.Abs(m[3])+math.Abs(m[1]), math.Abs(m[2])+math.Abs(m[0])) / math.Abs(det)
 	}
+	var m, inv [16]float64
+	blockPairMatrix(m[:], t, n, ka, da, la, db, discrete)
 	for i := range N {
 		inv[i*N+i] = 1
 	}
@@ -346,6 +371,37 @@ func blockPairInverseNorm(t []float64, n, ka, da, la, db int, discrete bool) flo
 		norm = math.Max(norm, s)
 	}
 	return norm
+}
+
+// blockPairMatrix writes into m the (da·db)² row-major matrix of
+// X ↦ T_kk·X + X·T_llᵀ (or T_kk·X·T_llᵀ − X) on the da×db block X.
+func blockPairMatrix(m []float64, t []float64, n, ka, da, la, db int, discrete bool) {
+	N := da * db
+	for i := range da {
+		for j := range db {
+			row := i*db + j
+			for p := range da {
+				for q := range db {
+					a, b := t[(ka+i)*n+ka+p], t[(la+j)*n+la+q]
+					var v float64
+					if discrete {
+						v = a * b
+						if row == p*db+q {
+							v--
+						}
+					} else {
+						if j == q {
+							v += a
+						}
+						if i == p {
+							v += b
+						}
+					}
+					m[row*N+p*db+q] = v
+				}
+			}
+		}
+	}
 }
 
 // lyapunovOperator is L_T restricted to symmetric matrices in scaled-packed
