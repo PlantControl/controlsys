@@ -55,16 +55,17 @@ func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, e
 }
 
 // scaledGramian returns X and e with the typ gramian of sys equal to X·4ᵉ.
+// An error wrapping ErrAccuracyUnverified comes with X (see Lyap).
 func (p energyAnalysisPolicy) scaledGramian(typ GramType) (*mat.Dense, int, error) {
 	Aarg, Q, e, err := p.gramianInputs(typ)
 	if err != nil {
 		return nil, 0, err
 	}
 	X, err := p.solveLyapunov(Aarg, Q)
-	if err != nil {
+	if X == nil {
 		return nil, 0, err
 	}
-	return X, e, nil
+	return X, e, err
 }
 
 func (p energyAnalysisPolicy) controllabilityEnergy() (*mat.Dense, int) {

@@ -102,6 +102,7 @@ func H2Norm(sys *System) (float64, error) {
 
 	B, eB := pow2Scaled(sys.B)
 	X, eC, err := policy.scaledGramian(GramObservability)
+	err, unv := unverifiedLyapunov(err)
 	if err != nil {
 		return 0, err
 	}
@@ -129,6 +130,9 @@ func H2Norm(sys *System) (float64, error) {
 	}
 	if math.IsInf(norm, 0) || math.IsNaN(norm) {
 		return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+	}
+	if unv != nil {
+		return norm, fmt.Errorf("H2Norm: %w", unv)
 	}
 	return norm, nil
 }
@@ -181,10 +185,12 @@ func HSV(sys *System) ([]float64, error) {
 	}
 
 	Wc, eB, err := policy.scaledGramian(GramControllability)
+	err, unvC := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, err
 	}
 	Wo, eC, err := policy.scaledGramian(GramObservability)
+	err, unvO := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +203,9 @@ func HSV(sys *System) ([]float64, error) {
 		if !isFinite(s) {
 			return nil, fmt.Errorf("HSV: Hankel singular value exceeds float64 range: %w", ErrOverflow)
 		}
+	}
+	if unv := cmp.Or(unvC, unvO); unv != nil {
+		return hsv, fmt.Errorf("HSV: %w", unv)
 	}
 	return hsv, nil
 }

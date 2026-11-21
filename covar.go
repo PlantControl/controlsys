@@ -62,8 +62,10 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	}
 
 	P := mat.NewDense(p, p, nil)
+	var unv error
 	if n > 0 {
-		if err := covarStateTerm(P, sys, W, covarNeedsScaling(sys.B, sys.C, W)); err != nil {
+		var err error
+		if err, unv = unverifiedLyapunov(covarStateTerm(P, sys, W, covarNeedsScaling(sys.B, sys.C, W))); err != nil {
 			return nil, err
 		}
 	}
@@ -76,7 +78,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		if err := finiteDense("Covar", "P", P, ErrOverflow); err != nil {
 			return nil, err
 		}
-		return P, nil
+		return P, covarUnverified(unv)
 	}
 	for i := range p {
 		for j := range p {
@@ -85,7 +87,15 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 			}
 		}
 	}
-	return P, nil
+	return P, covarUnverified(unv)
+}
+
+// covarUnverified wraps an uncertified state covariance for Covar's result.
+func covarUnverified(unv error) error {
+	if unv == nil {
+		return nil
+	}
+	return fmt.Errorf("Covar: %w", unv)
 }
 
 // covarScaleExponentLimit bounds the binary exponents of max|B|, max|C| and
@@ -109,7 +119,8 @@ func covarNeedsScaling(B, C, W *mat.Dense) bool {
 
 // covarStateTerm sets P to C·X·Cᵀ, X the state covariance under B·W·Bᵀ. With
 // scale, B, C and W are first scaled by powers of two, which is exact, so
-// that the Lyapunov solve neither overflows nor underflows spuriously.
+// that the Lyapunov solve neither overflows nor underflows spuriously. An
+// uncertified X (ErrAccuracyUnverified) still sets P and is returned.
 func covarStateTerm(P *mat.Dense, sys *System, W *mat.Dense, scale bool) error {
 	n, m, p := sys.Dims()
 	B, C, Ws := sys.B, sys.C, W
@@ -138,7 +149,7 @@ func covarStateTerm(P *mat.Dense, sys *System, W *mat.Dense, scale bool) error {
 	} else {
 		X, err = dlyapChecked(sys.A, Q, nil)
 	}
-	if err != nil {
+	if X == nil {
 		return err
 	}
 
@@ -154,7 +165,7 @@ func covarStateTerm(P *mat.Dense, sys *System, W *mat.Dense, scale bool) error {
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 // covarContinuousDelayed evaluates P_ij = Σ_kl W_kl ∫ g_ik g_jl for a
@@ -203,6 +214,7 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	}
 
 	P := mat.NewDense(p, p, nil)
+	var unv error
 	if n > 0 {
 		N := n * ng
 		aAug := mat.NewDense(N, N, nil)
@@ -218,7 +230,7 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		Q := inputNoiseIntensity(bAug, W, N, m)
 		symmetrize(Q.RawMatrix().Data, N, N)
 		Y, err := lyapChecked(aAug, Q, nil)
-		if err != nil {
+		if err, unv = unverifiedLyapunov(err); err != nil {
 			return nil, err
 		}
 
@@ -286,7 +298,7 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 			}
 		}
 	}
-	return P, nil
+	return P, covarUnverified(unv)
 }
 
 // finishCovarEntry makes P[i,j] infinite when feedthrough noise reaches it, and

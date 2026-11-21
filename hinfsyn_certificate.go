@@ -256,7 +256,8 @@ func ratInverse(M [][]*big.Rat) ([][]*big.Rat, bool) {
 // lyapunovStable reports whether every matrix A = Â + E with
 // |E| ≤ u·|Â| + η elementwise (u = eps/2, η the smallest subnormal), that
 // is every exact matrix Â rounds from, is stable: Hurwitz, or Schur when
-// discrete. It solves ÂᵀP + PÂ = −I (ÂᵀPÂ − P = −I) in float64 and
+// discrete. It solves ÂᵀP + PÂ = −I (ÂᵀPÂ − P = −I) in float64, without
+// Lyap's certificate since the check below verifies P itself, and
 // certifies, with every rounding of the check bounded by γ_k = k·u/(1−k·u)
 // (Higham, Accuracy and Stability of Numerical Algorithms, §3.1), that P
 // is positive definite and AᵀP + PA (AᵀPA − P) negative definite for every
@@ -270,11 +271,11 @@ func lyapunovStable(Ahat *mat.Dense, discrete bool) bool {
 	var P *mat.Dense
 	var err error
 	if discrete {
-		P, err = DLyap(At, eyeDense(N), nil)
+		P, err = dlyap(At, eyeDense(N), nil)
 	} else {
-		P, err = Lyap(At, eyeDense(N), nil)
+		P, err = lyap(At, eyeDense(N), nil)
 	}
-	if err != nil {
+	if err != nil || !finiteSlice(P.RawMatrix().Data) {
 		return false
 	}
 	pr := P.RawMatrix()

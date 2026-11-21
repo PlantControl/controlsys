@@ -76,15 +76,19 @@ func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 		return nil, fmt.Errorf("Gram: %w", err)
 	}
 	X, e, err := policy.scaledGramian(base)
+	err, unv := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, fmt.Errorf("Gram: %w", err)
+	}
+	if unv != nil {
+		unv = fmt.Errorf("Gram: %w", unv)
 	}
 	if typ == base {
 		ldexpDense(X, 2*e)
 		if err := finiteDense("Gram", "gramian", X, ErrOverflow); err != nil {
 			return nil, err
 		}
-		return X, nil
+		return X, unv
 	}
 	R, err := gramFactor(X, n)
 	if err != nil {
@@ -94,7 +98,7 @@ func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := finiteDense("Gram", "factor", R, ErrOverflow); err != nil {
 		return nil, err
 	}
-	return R, nil
+	return R, unv
 }
 
 // gramFactor returns an upper triangular R with X = Rᵀ·R for a symmetric

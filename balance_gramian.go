@@ -108,7 +108,7 @@ func (s *schurLyapunov) transposed(t, u, tmp []float64) schurLyapunov {
 // returns ‖d‖/‖X‖.
 func (g *refinedGramian) correction(lo []float64) (float64, error) {
 	if lo == nil {
-		lyapResidualDot2(g.a, g.x, g.f, g.k, g.discrete, g.ax, g.r)
+		lyapResidualDot2(g.a, g.x, g.f, g.k, nil, 0, g.discrete, g.ax, g.r)
 	} else {
 		lyapResidualDD(g.a, g.x, lo, g.f, g.k, g.discrete, g.ax, g.r)
 	}
@@ -245,8 +245,9 @@ func lyapResidualDD(A *mat.Dense, x, lo, f []float64, k int, discrete bool, ax [
 // lyapResidualDot2 is lyapResidualDD of X = x, accumulated as compensated
 // dot products (Ogita–Rump–Oishi Dot2: FMA TwoProduct and TwoSum, errors
 // summed in float64), accurate as if computed in twice the working
-// precision. The float64 conversions keep products from fusing.
-func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []dd, r []float64) {
+// precision. The float64 conversions keep products from fusing. With f nil
+// the constant term is the symmetric part of q (row stride ldq), not F·Fᵀ.
+func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, q []float64, ldq int, discrete bool, ax []dd, r []float64) {
 	n, _ := A.Dims()
 	aRaw := A.RawMatrix()
 	a, lda := aRaw.Data, aRaw.Stride
@@ -269,7 +270,6 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []d
 		}
 		for i := range n {
 			axi := ax[i*n : i*n+n]
-			fi := f[i*k : i*k+k]
 			for j := i; j < n; j++ {
 				aj := a[j*lda : j*lda+n]
 				var p, e float64
@@ -289,16 +289,7 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []d
 					e += (p - (s - bb)) + (h - bb)
 					p = s
 				}
-				fj := f[j*k : j*k+k]
-				for l, fv := range fi {
-					gv := fj[l]
-					h := float64(fv * gv)
-					lo := math.FMA(fv, gv, -h)
-					s := p + h
-					bb := s - p
-					e += ((p - (s - bb)) + (h - bb)) + lo
-					p = s
-				}
+				p, e = lyapConstTerm(p, e, f, k, q, ldq, i, j)
 				v := p + e
 				r[i*n+j] = v
 				r[j*n+i] = v
@@ -309,7 +300,6 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []d
 	for i := range n {
 		ai := a[i*lda : i*lda+n]
 		xi := x[i*n : i*n+n]
-		fi := f[i*k : i*k+k]
 		for j := i; j < n; j++ {
 			aj := a[j*lda : j*lda+n]
 			xj := x[j*n : j*n+n]
@@ -330,21 +320,35 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, discrete bool, ax []d
 				e += ((p - (s - bb)) + (h - bb)) + lo
 				p = s
 			}
-			fj := f[j*k : j*k+k]
-			for l, fv := range fi {
-				gv := fj[l]
-				h := float64(fv * gv)
-				lo := math.FMA(fv, gv, -h)
-				s := p + h
-				bb := s - p
-				e += ((p - (s - bb)) + (h - bb)) + lo
-				p = s
-			}
+			p, e = lyapConstTerm(p, e, f, k, q, ldq, i, j)
 			v := p + e
 			r[i*n+j] = v
 			r[j*n+i] = v
 		}
 	}
+}
+
+// lyapConstTerm adds to the compensated sum p + e the (i,j) entry of F·Fᵀ
+// (f n×k) or, with f nil, of the symmetric part of q.
+func lyapConstTerm(p, e float64, f []float64, k int, q []float64, ldq, i, j int) (float64, float64) {
+	add := func(h, lo float64) {
+		s := p + h
+		bb := s - p
+		e += ((p - (s - bb)) + (h - bb)) + lo
+		p = s
+	}
+	if f == nil {
+		add(0.5*q[i*ldq+j], 0)
+		add(0.5*q[j*ldq+i], 0)
+		return p, e
+	}
+	fi, fj := f[i*k:i*k+k], f[j*k:j*k+k]
+	for l, fv := range fi {
+		gv := fj[l]
+		h := float64(fv * gv)
+		add(h, math.FMA(fv, gv, -h))
+	}
+	return p, e
 }
 
 // semidefiniteFactor returns L (n×n) with X ≈ L·Lᵀ for a symmetric X that
