@@ -22,6 +22,9 @@ import (
 // returns ErrDimensionMismatch; with no inputs P is the p×p zero matrix.
 // An Inf or NaN entry of P returns ErrOverflow, except the continuous entries
 // white noise through D makes infinite, whatever their state part holds.
+// The state covariance carries Lyap's (DLyap's) certificate: an equation
+// within its singular band returns ErrSingularEquation, an uncertified one
+// P with ErrAccuracyUnverified.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := requireFiniteSystem("Covar", sys); err != nil {
 		return nil, err

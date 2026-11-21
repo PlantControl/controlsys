@@ -44,7 +44,10 @@ const (
 // MATLAB gram, models with internal delays (either domain) return
 // ErrInternalDelayUnsupported; absorb or approximate the delays first. A
 // gramian (or factor) entry beyond float64 range returns ErrOverflow; the
-// factor types can succeed where the gramian itself overflows.
+// factor types can succeed where the gramian itself overflows. The gramian
+// carries Lyap's (DLyap's) certificate: an equation within its singular
+// band returns ErrSingularEquation, an uncertified gramian (or factor) is
+// returned with ErrAccuracyUnverified.
 // See https://www.mathworks.com/help/control/ref/statespacemodel.gram.html.
 func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := requireFiniteSystem("Gram", sys); err != nil {

@@ -174,7 +174,9 @@ func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
 // Discrete internal delays are absorbed exactly, so the result has one value
 // per original state plus one per delay sample. Continuous internal-delay
 // models return ErrContinuousInternalDelay. A value beyond float64 range
-// returns ErrOverflow.
+// returns ErrOverflow. The gramians carry Lyap's (DLyap's) certificate: an
+// equation within its singular band returns ErrSingularEquation, an
+// uncertified gramian the values with ErrAccuracyUnverified.
 func HSV(sys *System) ([]float64, error) {
 	if err := requireFiniteSystem("HSV", sys); err != nil {
 		return nil, err
