@@ -60,7 +60,7 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
 	k := lyapunovBandK(n)
 	banded := func(e float64) bool { return !(e*k*u < 1) }
 
-	singular := fmt.Errorf("operator within %g·ε·‖L‖ of singular: %w", k, ErrSingularEquation)
+	singular := lyapunovSingular(k)
 	qn := denseNormScaled(Q.RawMatrix())
 	xn := scaledNorm2(w[:n*n])
 	growth := 0.0
@@ -82,6 +82,16 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w []float64) error {
 	}
 	return refineLyapunov(s, A, Q, w, banded, singular)
 }
+
+// lyapunovSingular is the band error, formed lazily so that certified
+// solves do not allocate it.
+type lyapunovSingular float64
+
+func (k lyapunovSingular) Error() string {
+	return fmt.Sprintf("operator within %g·ε·‖L‖ of singular: %v", float64(k), ErrSingularEquation)
+}
+
+func (k lyapunovSingular) Unwrap() error { return ErrSingularEquation }
 
 // refineLyapunov refines X in w by corrections solved on the Schur form from
 // double-double residuals of the stored A and Q.
