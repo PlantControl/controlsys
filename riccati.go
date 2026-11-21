@@ -145,7 +145,7 @@ type RiccatiOpts struct {
 	// X, which the float64 Newton step accepted and is typically accurate
 	// but not proved, is returned unchanged with ErrAccuracyUnverified. A
 	// result Dare certifies without that stage (an X confirmed in extended
-	// precision, no states or inputs) keeps its nil error: under
+	// precision) keeps its nil error: under
 	// NoCertificate a nil error still means X is certified. Dare and the discrete solves built on it (Dlqr, Lqi,
 	// Lqrd, Kalman, Kalmd) honour it; Care, Lqr, Lqe and the continuous
 	// solves ignore it.
