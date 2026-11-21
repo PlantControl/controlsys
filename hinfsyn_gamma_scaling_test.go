@@ -25,7 +25,10 @@ func hinfRegPlant(t *testing.T, kind uint8, v [fzNVals]float64, k float64) (*Sys
 // bound on the optimal gamma.
 func hinfH2CandidateNorm(t *testing.T, P *System, ny, nu int) float64 {
 	t.Helper()
-	h2, err := H2Syn(P, ny, nu)
+	// h2Syn: H2Syn's own H2Norm of these closed loops is ErrSingularEquation,
+	// their Stein operator within K·ε·‖L‖ of singular (ESR456); the oracle
+	// needs only the controller.
+	h2, err := h2Syn(P, ny, nu)
 	if err != nil {
 		t.Fatal(err)
 	}
