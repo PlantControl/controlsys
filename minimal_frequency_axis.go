@@ -914,9 +914,9 @@ func bandResponses(sys, red *System, pts []complex128) (boundedResponse, bounded
 // the response of rz, is finite, and, with under, whether every entry that
 // is not structurally zero (no path from its input through the nonzeros of
 // Â to its output) has terms of at least 2^−969, above which their rounding
-// is relative, or exactly zero, and is not zero at every ok point: below
-// it a response and its bounds underflow, to an exact zero that verifies
-// any cut, while an isolated exact zero is the stored data's own.
+// is relative, or exactly zero and still zero on B̂ and Ĉ scaled up
+// (zerosExact): below the floor a response and its bounds underflow, to an
+// exact zero that verifies any cut.
 func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, big bool) {
 	const tiny = 0x1p-969
 	n, m, p := rz.n, rz.m, rz.p
@@ -956,16 +956,12 @@ func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, 
 	}
 	pm := p * m
 	finite, big = true, true
-	var nonzero []bool
-	if under {
-		nonzero = make([]bool, pm)
-	}
-	seen := false
+	var zs []int
 	for k, ok := range b.ok {
 		if !ok {
 			continue
 		}
-		seen = true
+		zero := false
 		for y := range pm {
 			o := k*pm + y
 			g := b.g[o]
@@ -973,14 +969,43 @@ func (b *boundedResponse) inRange(rz *balancedRealization, under bool) (finite, 
 			if under && live[y] {
 				t := b.terms[o]
 				big = big && !(t > 0 && t < tiny)
-				nonzero[y] = nonzero[y] || t != 0
+				zero = zero || t == 0
+			}
+		}
+		if zero {
+			zs = append(zs, k)
+		}
+	}
+	if finite && big && len(zs) > 0 {
+		big = b.zerosExact(rz, zs, live)
+	}
+	return finite, big
+}
+
+// zerosExact reports whether the live entries with zero terms at the
+// points zs of b, the response of rz, stay exactly zero with B̂ and Ĉ
+// scaled up by powers of two to largest magnitudes 2^400: a zero that
+// does is the stored data's own, a zero that does not had underflowed.
+func (b *boundedResponse) zerosExact(rz *balancedRealization, zs []int, live []bool) bool {
+	sz, ok := scaledIO(*rz, maxExponent(rz.b)-400, maxExponent(rz.c)-400)
+	if !ok {
+		return false
+	}
+	pts := make([]complex128, len(zs))
+	for i, k := range zs {
+		pts[i] = b.ev.pts[k]
+	}
+	z := boundedResponseOf(sz, pts)
+	defer z.release()
+	pm := b.p * b.m
+	for i, k := range zs {
+		for y := range pm {
+			if live[y] && b.terms[k*pm+y] == 0 && (!z.ok[i] || z.terms[i*pm+y] != 0) {
+				return false
 			}
 		}
 	}
-	for y := range nonzero {
-		big = big && !(seen && live[y] && !nonzero[y])
-	}
-	return finite, big
+	return true
 }
 
 // maxExponent is the binary exponent e of the largest |v_i|, 2^(e−1) ≤

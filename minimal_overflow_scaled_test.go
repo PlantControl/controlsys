@@ -167,3 +167,33 @@ func TestReduceMidUnderflowScaledIOKeepsCut(t *testing.T) {
 		t.Fatalf("band-scaled order %d, in-range %d", got.Order, want.Order)
 	}
 }
+
+// An entry whose terms underflow to an exact zero at only some band points
+// (|s| = 2^705 against a stable pole near 2^700, B·2^−300, C·2^−200, so
+// balanced 2^(eB+eC) is above the up-front rescale's 2^−512) is out of
+// range in inRange: exact zeros that are not the stored data's own pass
+// 0 ≤ tol·0, so they must send the band to the rescaled realization
+// (QMVNHR).
+func TestBandInRangeDetectsUnderflowedZero(t *testing.T) {
+	big := math.Ldexp(1, 700)
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 0.5, 0.25, -big}),
+		mat.NewDense(2, 1, []float64{math.Ldexp(1, -300), math.Ldexp(3, -301)}),
+		mat.NewDense(1, 2, []float64{math.Ldexp(1, -200), math.Ldexp(5, -202)}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rz := newBalancedRealization(sys, 2, 1, 1)
+	if e := maxExponent(rz.b) + maxExponent(rz.c); !(e < 0 && e >= -512) {
+		t.Fatalf("balanced eB+eC = %d, want in [−512, 0)", e)
+	}
+	pts := []complex128{0.5i, complex(0, math.Ldexp(1, 705))}
+	b := boundedResponseOf(rz, pts)
+	defer b.release()
+	if !b.ok[1] || b.terms[1] != 0 || b.terms[0] == 0 {
+		t.Fatalf("setup: terms %v, want nonzero then an underflowed zero", b.terms)
+	}
+	if finite, inRange := b.inRange(&rz, true); !finite || inRange {
+		t.Fatalf("inRange = (%v, %v), want finite and out of range", finite, inRange)
+	}
+}
