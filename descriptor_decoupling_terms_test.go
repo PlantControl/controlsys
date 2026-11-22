@@ -335,29 +335,76 @@ func desc320InverseFro(sys *System, s complex128) (float64, bool) {
 	return v, !math.IsInf(v, 0) && !math.IsNaN(v)
 }
 
-// TestDescriptorDecouplingRidgeBoundsExact: for the triangular form with
-// coupling γ = 2¹⁰ and a perturbation along R, ridgeBounds.right and left
-// bound ‖Δ·M22·B̃2‖/‖M‖ and
-// ‖C̃1·M11·Δ‖/‖M‖ (M = (sT − S)⁻¹ in 320 bits) for |Δ| at the given bound,
-// on a sweep of s, and are sharper than the plain ‖Δ‖‖B̃2‖, ‖C̃1‖‖Δ‖.
+// TestDescriptorDecouplingRidgeBoundsExact: ridgeBounds.right and left
+// bound ‖Δ·M22·B̃2‖/‖M‖ and ‖C̃1·M11·Δ‖/‖M‖ (M = (sT − S)⁻¹ in 320 bits)
+// for |Δ| at the given bound, at every swept s: near each pole at radii
+// 1e-1..1e-8 and on three rays |s| = 10^(k/2). Cases: the triangular form
+// with γ = 2¹⁰ and a perturbation along R (sharper than plain), and two
+// graded forms (EUNKOP round-3 ruling 4: E entries over two decades,
+// near-coincident block eigenvalues, R ≈ ρ·u·e1ᵀ, L ≈ λ·e1·zᵀ with ρ, λ up to
+// 1e4, C̃1 and B̃2 nearly orthogonal to them), where each bound is at most
+// 0.05 of the plain one. The graded forms are tight: on the first, the
+// right bound without its ‖K1‖·‖L·B̃2‖ term, and a quarter of it, fall below
+// the exact value; on the second, likewise the left bound without its
+// ‖C̃1·R‖·‖K2‖ term, and a quarter of it.
 func TestDescriptorDecouplingRidgeBoundsExact(t *testing.T) {
-	n, n1 := 3, 1
-	n2 := n - n1
-	f := descTriangularForm(t, 0x1p10)
-	rb := newRidgeBounds(n1, n2, f.m, f.p, f.r, f.l, f.bq0, f.cz0)
-	if !rb.okR || !rb.okL {
-		t.Fatal("ridge factor failed")
+	type ridgeCase struct {
+		name   string
+		f      descForm
+		dR, dL []float64
+		graded bool
 	}
-	dR := []float64{1, 1e-3}
-	dL := []float64{1}
-	right, left := rb.right(dR, 1), rb.left(dL, 1)
-	if !(right < froAll(dR)*rb.b2) || !(left < rb.c1*froAll(dL)) {
-		t.Fatalf("ridge bounds %.3g %.3g not sharper than plain %.3g %.3g", right, left, froAll(dR)*rb.b2, rb.c1*froAll(dL))
+	cases := []ridgeCase{
+		{"triangular γ=2^10", descTriangularForm(t, 0x1p10), []float64{1, 1e-3}, []float64{1}, false},
+		{"graded, right tight", newDescForm(t, 4, 2,
+			[]float64{-4.260552783033032, -0.39012250528141346, 4394.129877991152, 13196.026436106667, 0, -0.48609922135378625, -4.255910876420233, -13.306152775226971, 0, 0, -3.198667381214299, -8.615052866364481, 0, 0, 0, -0.11690761758535959},
+			[]float64{4.260552783033032, 1.1044358521456343, -4398.718952024533, -4102.261181440685, 0, 0.4853559694326002, 4.2608742699668705, 3.226937034472974, 0, 0, 3.200465789884258, 2.7362223119506983, 0, 0, 0, 0.11654554145447889},
+			[]float64{0.5791324718397228, 1.4205333235731503, -0.5371599747825158, -0.7430406175432387},
+			[]float64{-0.02250747613000768, -0.40909804072082134, -1.5238258135102094, 0.15023176993184673}),
+			[]float64{1, 0.0015785267193327184}, []float64{1, 0.0017184099640129202}, true},
+		{"graded, left tight", newDescForm(t, 4, 2,
+			[]float64{-3.367410003133366, -0.45975690077101866, -270.47285154638814, 79.49157181645134, 0, -0.5021467741457373, 45.113349576978536, -0.4224393870814851, 0, 0, -8.412500239543546, 1.9798050897295512, 0, 0, 0, -0.2916409421692357},
+			[]float64{3.367410003133366, -0.41889825305713535, 373.3169097582439, 27.65993497616059, 0, 0.5139277923092036, -46.12651971509099, 1.2916633204077184, 0, 0, 8.713300305442097, -0.06560674460935256, 0, 0, 0, 0.2759028178200159},
+			[]float64{0.6607488062377564, -1.0329618060112324, -1.5649306932622435, 0.8571858660866405},
+			[]float64{-1.8097146265119477, 0.9490796159358905, -0.37508943116822335, 0.7115201878034547}),
+			[]float64{1, 0.0006643000372368502}, []float64{1, 0.00021073954224045196}, true},
 	}
-	scored := 0
-	for k := -6; k <= 12; k++ {
-		for _, th := range []float64{math.Pi / 2, 1.1, 0.15} {
-			x := cmplx.Rect(math.Pow(10, float64(k)/2), th)
+	for _, tc := range cases {
+		f := tc.f
+		n, n1 := f.n, f.n1
+		n2 := n - n1
+		rb := newRidgeBounds(n1, n2, f.m, f.p, f.r, f.l, f.bq0, f.cz0)
+		if !rb.okR || !rb.okL {
+			t.Fatalf("%s: ridge factor failed", tc.name)
+		}
+		right, left := rb.right(tc.dR, 1), rb.left(tc.dL, 1)
+		plainR, plainL := froAll(tc.dR)*rb.b2, rb.c1*froAll(tc.dL)
+		if tc.graded {
+			if !(right <= 0.05*plainR) || !(left <= 0.05*plainL) {
+				t.Errorf("%s: ridge/plain right %.3g left %.3g, want ≤ 0.05", tc.name, right/plainR, left/plainL)
+			}
+		} else if !(right < plainR) || !(left < plainL) {
+			t.Errorf("%s: ridge bounds %.3g %.3g not sharper than plain %.3g %.3g", tc.name, right, left, plainR, plainL)
+		}
+		var pts []complex128
+		for i := range n {
+			if f.t[i*n+i] == 0 {
+				continue
+			}
+			pole := complex(f.s[i*n+i]/f.t[i*n+i], 0)
+			for _, d := range []float64{1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8} {
+				for _, ph := range []float64{0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6} {
+					pts = append(pts, pole+cmplx.Rect(d, ph))
+				}
+			}
+		}
+		for k := -6; k <= 12; k++ {
+			for _, th := range []float64{math.Pi / 2, 1.1, 0.15} {
+				pts = append(pts, cmplx.Rect(math.Pow(10, float64(k)/2), th))
+			}
+		}
+		scored := 0
+		for _, x := range pts {
 			M, mf, ok := desc320Inverse(f.sys, x)
 			if !ok {
 				continue
@@ -376,7 +423,7 @@ func TestDescriptorDecouplingRidgeBoundsExact(t *testing.T) {
 						if a%2 == 1 {
 							sign = sg
 						}
-						acc += complex(sign*dR[a], 0) * row
+						acc += complex(sign*tc.dR[a], 0) * row
 					}
 					vr.addC(acc)
 				}
@@ -391,21 +438,21 @@ func TestDescriptorDecouplingRidgeBoundsExact(t *testing.T) {
 						if b%2 == 1 {
 							sign = sg
 						}
-						acc += col * complex(sign*dL[b], 0)
+						acc += col * complex(sign*tc.dL[b], 0)
 					}
 					vl.addC(acc)
 				}
-				if r := vr.norm() / mf; !(r <= right*(1+1e-6)) {
-					t.Errorf("s=%v: ‖Δ·M22·B̃2‖/‖M‖ = %.6g > right %.6g", x, r, right)
+				if r := vr.norm() / mf; !(r <= right*(1+1e-9)) {
+					t.Errorf("%s s=%v: ‖Δ·M22·B̃2‖/‖M‖ = %.6g > right %.6g", tc.name, x, r, right)
 				}
-				if r := vl.norm() / mf; !(r <= left*(1+1e-6)) {
-					t.Errorf("s=%v: ‖C̃1·M11·Δ‖/‖M‖ = %.6g > left %.6g", x, r, left)
+				if r := vl.norm() / mf; !(r <= left*(1+1e-9)) {
+					t.Errorf("%s s=%v: ‖C̃1·M11·Δ‖/‖M‖ = %.6g > left %.6g", tc.name, x, r, left)
 				}
 			}
 		}
-	}
-	if scored == 0 {
-		t.Fatal("no point scored")
+		if scored == 0 {
+			t.Fatalf("%s: no point scored", tc.name)
+		}
 	}
 }
 
