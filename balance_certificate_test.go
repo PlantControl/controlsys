@@ -425,7 +425,7 @@ func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 		t.Fatalf("Balred(n) differs from Balreal: %v", err)
 	}
 	for _, proj := range []StateProjection{MatchDC, Truncate} {
-		for k := 0; k < 4; k++ {
+		for k := range 4 {
 			red, _, err := Balred(sys, k, BalredOptions{StateProjection: proj})
 			if err != nil {
 				t.Fatal(err)
