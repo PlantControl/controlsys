@@ -59,6 +59,7 @@ func FuzzModsep(f *testing.F) {
 		if res.Slow == nil || res.Fast == nil {
 			t.Fatalf("Modsep: nil part\n%s", s)
 		}
+		fzSepTolSum(t, s, "Modsep", sys, res.Slow, res.Fast)
 		ns, _, _ := res.Slow.Dims()
 		nf, _, _ := res.Fast.Dims()
 		if ns+nf != n {
