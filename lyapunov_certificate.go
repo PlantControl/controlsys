@@ -122,7 +122,16 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 	if n >= 24 && twoSided() {
 		return nil
 	}
-	if nf*mu*u <= 1/(2*k) {
+	skip := nf*mu*u <= 1/(2*k)
+	if !skip {
+		// Entering the last tier: μ₁ is formed here, and the two-sided bound
+		// may still certify X or put the operator outside the band.
+		if twoSided() {
+			return nil
+		}
+		skip = math.Sqrt(mu*mu1)*u*2*k <= 1
+	}
+	if skip {
 		var r []float64
 		if d == nil {
 			// Residual-only exit on the stored form: the error of X is at
@@ -133,19 +142,17 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 			if nf*mu*rn <= lyapunovTau/2*xn {
 				return nil
 			}
-			if n < 24 && twoSided() {
-				return nil
+			// Below order 24 μ₁ is formed only when the two-sided bounds
+			// can still certify: n·μ·‖r‖ within 64 of the residual bar.
+			if mu1 >= 0 || nf*mu*rn <= 64*(lyapunovTau/2)*xn {
+				if twoSided() || math.Sqrt(mu*mu1)*rn <= lyapunovTau/2*xn {
+					return nil
+				}
 			}
-			if math.Sqrt(mu*mu1)*rn <= lyapunovTau/2*xn {
-				return nil
-			}
-		} else if n < 24 && twoSided() {
+		} else if twoSided() {
 			return nil
 		}
 		return refineLyapunov(s, A, Q, w, d, band, singular, r)
-	}
-	if n < 24 && twoSided() {
-		return nil
 	}
 	// The last tier: μ certifies neither X nor the distance to singular.
 	// Witnesses can only prove Singular (Dlacn2, a lower bound in exact
@@ -794,9 +801,11 @@ func exactlyScaled(x, v float64) bool {
 // balancedLyapunov is the certified solve of the balanced equation,
 // Ã = D⁻¹·A·D and Q̃ = D⁻¹·Q·D⁻¹ for D = balanceLyapunov(A), returning
 // X = D·X̃·D. ok is false when D is a multiple of I or a scaling of A, Q or
-// X̃ overflows or underflows (the caller keeps its raw verdict), and when
-// the eigenvalues of the raw Schur form t are within K units ε·s̃ of the
-// balanced matrix of a singular pair (no retry can certify then).
+// X̃ overflows or underflows (the caller keeps its raw verdict), and unless
+// balancing shrinks ‖A‖_F by 4 or more or, after a certificate verdict
+// (t the raw Schur form, nil after the solver's own diagonal test), the
+// eigenvalue pairs of t are more than K units ε·s̃ of the balanced matrix
+// from singular.
 func balancedLyapunov(A, Q *mat.Dense, discrete bool, t []float64) (X *mat.Dense, err error, ok bool) {
 	n, _ := A.Dims()
 	aRaw, qRaw := A.RawMatrix(), Q.RawMatrix()
@@ -806,7 +815,9 @@ func balancedLyapunov(A, Q *mat.Dense, discrete bool, t []float64) (X *mat.Dense
 	if d == nil {
 		return nil, nil, false
 	}
-	if !(lyapunovEigU(t, n, discrete, lyapunovUnit(mat.NewDense(n, n, a), discrete)) > lyapunovBandK(n)) {
+	Ab := mat.NewDense(n, n, a)
+	shrink := lyapFrobenius(aRaw.Data, n, n, aRaw.Stride) / lyapFrobenius(a, n, n, n)
+	if !(shrink >= 4) && (t == nil || !(lyapunovEigU(t, n, discrete, lyapunovUnit(Ab, discrete)) > lyapunovBandK(n))) {
 		return nil, nil, false
 	}
 	q := make([]float64, n*n)
@@ -823,7 +834,7 @@ func balancedLyapunov(A, Q *mat.Dense, discrete bool, t []float64) (X *mat.Dense
 			}
 		}
 	}
-	Ab, Qb := mat.NewDense(n, n, a), mat.NewDense(n, n, q)
+	Qb := mat.NewDense(n, n, q)
 	s, err := newSchurLyapunov(Ab, n, discrete, nil)
 	if err != nil {
 		return nil, nil, false

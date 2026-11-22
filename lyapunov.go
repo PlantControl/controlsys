@@ -89,9 +89,9 @@ func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 // is singular or within K·ε·2‖A‖_F of singular (K = 4(n+5)), the rounding
 // of the stored A, both in the stored scaling and in its diagonally
 // balanced form D⁻¹·A·D (power-of-two D; the balanced equation is tried
-// only when the stored one fails other than in the solver's own diagonal
-// test, and its eigenvalue pairs are apart beyond the band in the balanced
-// units): its eigenvalues λᵢ + λⱼ = 0 for some
+// only when the stored one fails and balancing shrinks ‖A‖_F by 4 or
+// more, or the stored certificate failed with eigenvalue pairs apart beyond
+// the band in the balanced units): its eigenvalues λᵢ + λⱼ = 0 for some
 // pair, or nearly so in a sense rounding can reach. A nonsingular but
 // ill-conditioned equation is refined from double-double residuals; when
 // refinement stalls above 1e-10, Lyap returns its best X with
@@ -124,20 +124,23 @@ func lyapunovChecked(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bo
 		return nil, err
 	}
 	X, s, err := solveLyapunov(op, A, Q, opts, discrete)
-	if err != nil {
+	var rawT []float64
+	switch {
+	case err == nil && lyapunovUncertifiedBaseline:
+		return X, nil
+	case err == nil:
+		if err = certifyLyapunov(&s, A, Q, X.RawMatrix().Data, nil); err == nil {
+			return X, nil
+		}
+		rawT = s.t
+	case !errors.Is(err, ErrSingularEquation) || lyapunovUncertifiedBaseline:
 		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-	if lyapunovUncertifiedBaseline {
-		return X, nil
-	}
-	if err = certifyLyapunov(&s, A, Q, X.RawMatrix().Data, nil); err == nil {
-		return X, nil
 	}
 	unv := errors.Is(err, ErrAccuracyUnverified)
 	if !unv && !errors.Is(err, ErrSingularEquation) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	if Xb, errb, ok := balancedLyapunov(A, Q, discrete, s.t); ok {
+	if Xb, errb, ok := balancedLyapunov(A, Q, discrete, rawT); ok {
 		if errb == nil || (!unv && errors.Is(errb, ErrAccuracyUnverified)) {
 			X, err, unv = Xb, errb, errb != nil
 		}

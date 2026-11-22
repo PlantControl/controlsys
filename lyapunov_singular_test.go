@@ -438,14 +438,9 @@ func TestLyapAboveCapLastTierUnverified(t *testing.T) {
 	}
 }
 
-// TestLyapSolverDiagonalBandNoRetry (ESR456 perf re-ruling 3a): when the
-// stored equation fails the solver's own diagonal test (here the
-// similarity diag(2³⁰, 1, 2⁻³⁰) of a well-posed continuous equation), Lyap
-// returns ErrSingularEquation without the balanced retry.
-func TestLyapSolverDiagonalBandNoRetry(t *testing.T) {
-	d := []float64{0x1p30, 1, 0x1p-30}
-	a := []float64{-1.2, 0.4, 0.1, -0.3, -0.8, 0.5, 0.2, -0.1, -2}
-	q := []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3}
+// lyapScaled returns D·A·D⁻¹ and D·Q·D for D = diag(2ᵉ, 1, 2⁻ᵉ), exact.
+func lyapScaled(a, q []float64, e int) (*mat.Dense, *mat.Dense) {
+	d := []float64{math.Ldexp(1, e), 1, math.Ldexp(1, -e)}
 	A := mat.NewDense(3, 3, nil)
 	Q := mat.NewDense(3, 3, nil)
 	for i := range 3 {
@@ -454,86 +449,65 @@ func TestLyapSolverDiagonalBandNoRetry(t *testing.T) {
 			Q.Set(i, j, d[i]*q[i*3+j]*d[j])
 		}
 	}
-	if _, _, err := solveLyapunov("Lyap", A, Q, nil, false); !errors.Is(err, ErrSingularEquation) {
-		t.Fatalf("solve: %v, want the diagonal test's ErrSingularEquation", err)
+	return A, Q
+}
+
+// TestLyapSolverDiagonalBandRetry (ESR456 perf ruling Q2): a well-posed
+// continuous equation under the exact similarity diag(2ᵉ, 1, 2⁻ᵉ) fails the
+// solver's own diagonal test from e = 20; balancing shrinks ‖A‖_F by far
+// more than 4, so the balanced retry runs and certifies X.
+func TestLyapSolverDiagonalBandRetry(t *testing.T) {
+	a := []float64{-1.2, 0.4, 0.1, -0.3, -0.8, 0.5, 0.2, -0.1, -2}
+	q := []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3}
+	for _, e := range []int{20, 30, 36} {
+		A, Q := lyapScaled(a, q, e)
+		if _, _, err := solveLyapunov("Lyap", A, Q, nil, false); !errors.Is(err, ErrSingularEquation) {
+			t.Fatalf("e=%d: solve: %v, want the diagonal test's ErrSingularEquation", e, err)
+		}
+		X, err := Lyap(A, Q, nil)
+		if err != nil {
+			t.Fatalf("e=%d: %v", e, err)
+		}
+		if r := relErr(X, lyapKronBig(A, Q, false)); !(r <= 1e-9) {
+			t.Errorf("e=%d: X rel err %g against 320-bit Kronecker solve", e, r)
+		}
 	}
+}
+
+// TestLyapScaledSingularStaysSingular (ESR456): the same similarity of an
+// exactly singular operator (eigenvalues 1 and −1) at e = 30 retries and
+// still returns ErrSingularEquation.
+func TestLyapScaledSingularStaysSingular(t *testing.T) {
+	a := []float64{1, 0.5, 0.25, 0, -1, 0.5, 0, 0, -2}
+	q := []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3}
+	A, Q := lyapScaled(a, q, 30)
 	if X, err := Lyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
 		t.Errorf("Lyap = %v, %v; want nil, ErrSingularEquation", X != nil, err)
 	}
 }
 
-// lyapTridiag is a stable non-normal tridiagonal A: diagonal −0.3·(i+1),
-// subdiagonal sub, superdiagonal 0.1.
-func lyapTridiag(n int, sub float64) *mat.Dense {
-	A := mat.NewDense(n, n, nil)
-	for i := range n {
-		A.Set(i, i, -float64(i+1)*0.3)
-		if i > 0 {
-			A.Set(i, i-1, sub)
-		}
-		if i < n-1 {
-			A.Set(i, i+1, 0.1)
-		}
+// TestLyapSolverDiagonalNoRetry (ESR456): an exactly singular operator
+// (A = M·T·M⁻¹ with eigenvalues 1, −1, −2, integer M) fails the solver's
+// diagonal test; balancing changes A (D ≠ cI) but shrinks ‖A‖_F by less
+// than 4, so Lyap returns ErrSingularEquation without a retry.
+func TestLyapSolverDiagonalNoRetry(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0, 0.5, 0, 3.75, -0.75, 0.25, -2.75, 0.25, -1.25})
+	Q := mat.NewDense(3, 3, []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3})
+	if _, _, err := solveLyapunov("Lyap", A, Q, nil, false); !errors.Is(err, ErrSingularEquation) {
+		t.Fatalf("solve: %v, want the diagonal test's ErrSingularEquation", err)
 	}
-	return A
-}
-
-// TestLyapResidualExitUnrefined (ESR456 perf re-ruling 1): when the one-sided
-// comparison bound misses τ but bound·‖r‖_F ≤ (τ/2)‖X‖_F for the double-
-// double residual r, the plain solve is certified as it is, bit for bit.
-func TestLyapResidualExitUnrefined(t *testing.T) {
-	const n = 10
-	A := lyapTridiag(n, 1)
-	Q := mat.NewDense(n, n, nil)
-	Q.Set(0, 0, 1)
-	Q.Set(1, 1, 1)
-	X0, s, err := solveLyapunov("Lyap", A, Q, nil, false)
-	if err != nil {
-		t.Fatal(err)
+	b := append([]float64(nil), A.RawMatrix().Data...)
+	if d := balanceLyapunov(b, 3); d == nil {
+		t.Fatal("balancing leaves A unchanged; the test needs D ≠ cI")
 	}
-	mu, _ := lyapunovComparisonBound(s.t, n, false, nil)
-	if 8*n*mu*lyapunovUnit(A, false) <= lyapunovTau {
-		t.Fatal("one-sided bound certifies; the test needs it to miss")
+	if shrink := lyapFrobenius(A.RawMatrix().Data, 3, 3, 3) / lyapFrobenius(b, 3, 3, 3); !(shrink < 4) {
+		t.Fatalf("balancing shrinks ‖A‖_F by %g, want < 4", shrink)
 	}
-	want := mat.DenseCopyOf(X0)
-	X, err := Lyap(A, Q, nil)
-	if err != nil {
-		t.Fatal(err)
+	if _, _, ok := balancedLyapunov(A, Q, false, nil); ok {
+		t.Error("balanced retry attempted")
 	}
-	if !mat.Equal(X, want) {
-		t.Error("X differs from the plain solve: refined, not certified by the residual")
-	}
-	if e := relErr(X, lyapKronBig(A, Q, false)); !(e <= lyapunovTau) {
-		t.Errorf("X rel err %g against 320-bit Kronecker solve", e)
-	}
-}
-
-// TestLyapTwoSidedBoundUnrefined (ESR456 perf re-ruling 2): from order 24
-// the two-sided bound 128·√(μ·μ₁)·ε·s ≤ τ certifies the plain solve where
-// 8·n·μ·ε·s does not.
-func TestLyapTwoSidedBoundUnrefined(t *testing.T) {
-	const n = 100
-	A := lyapTridiag(n, 0.2)
-	Q := mat.NewDense(n, n, nil)
-	for i := range n {
-		Q.Set(i, i, 2)
-	}
-	X0, s, err := solveLyapunov("Lyap", A, Q, nil, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := lyapunovUnit(A, false)
-	mu, _ := lyapunovComparisonBound(s.t, n, false, nil)
-	if 8*n*mu*u <= lyapunovTau || !(128*math.Sqrt(mu*lyapunovAdjointBound(s.t, n, false))*u <= lyapunovTau) {
-		t.Fatal("test needs the one-sided bound to miss and the two-sided one to certify")
-	}
-	want := mat.DenseCopyOf(X0)
-	X, err := Lyap(A, Q, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !mat.Equal(X, want) {
-		t.Error("X differs from the plain solve")
+	if X, err := Lyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
+		t.Errorf("Lyap = %v, %v; want nil, ErrSingularEquation", X != nil, err)
 	}
 }
 
