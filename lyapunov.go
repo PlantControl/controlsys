@@ -127,6 +127,9 @@ func lyapunovChecked(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bo
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
+	if lyapunovUncertifiedBaseline {
+		return X, nil
+	}
 	if err = certifyLyapunov(&s, A, Q, X.RawMatrix().Data, nil); err == nil {
 		return X, nil
 	}
@@ -147,6 +150,11 @@ func lyapunovChecked(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bo
 	}
 	return nil, fmt.Errorf("%s: %w", op, err)
 }
+
+// lyapunovUncertifiedBaseline, set only by timing harnesses, skips the
+// certificate so that one process can time the uncertified baseline
+// against the certified path.
+var lyapunovUncertifiedBaseline = false
 
 // lyapChecked is Lyap without the result check (see lyapunovChecked).
 func lyapChecked(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
