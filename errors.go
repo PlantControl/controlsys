@@ -135,7 +135,9 @@ var (
 	ErrNotConverged = errors.New("controlsys: iteration did not converge")
 
 	// ErrSchurFailed reports that an eigenvalue, Schur or QZ iteration did not
-	// converge. It wraps ErrNotConverged.
+	// converge, or that a Schur-based split could not be made reliably
+	// (Stabsep and Modsep: the retained and discarded modes cannot be
+	// separated within SepTol). It wraps ErrNotConverged.
 	ErrSchurFailed error = &derivedError{"controlsys: Schur decomposition failed to converge", ErrNotConverged}
 
 	// ErrSingularEquation reports a Lyapunov, Sylvester or Riccati equation

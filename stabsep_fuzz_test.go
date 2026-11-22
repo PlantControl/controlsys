@@ -23,6 +23,7 @@ func FuzzStabsep(f *testing.F) {
 		if res.Stable == nil || res.Unstable == nil {
 			t.Fatalf("Stabsep: nil part %+v\n%s", res, s)
 		}
+		fzSepTolSum(t, s, "Stabsep", sys, res.Stable, res.Unstable)
 		if !s.Decidable() {
 			fzSkip(t, "pole within error band of stability boundary")
 		}
@@ -58,6 +59,38 @@ func FuzzStabsep(f *testing.F) {
 			}
 		}
 	})
+}
+
+// fzSepTolSum: a nil Stabsep/Modsep split of an explicit model has G1 + G2
+// within SepTol = 10 of the normwise rounding accuracy of G (PZET7B): the
+// exact difference at the test points is at most 10·sepTolUnit.
+func fzSepTolSum(t *testing.T, s *fzSpec, op string, sys, g1, g2 *System) {
+	t.Helper()
+	if sys.E != nil || s.N == 0 {
+		return
+	}
+	m1, m2 := fzSysMats(g1), fzSysMats(g2)
+	n1, _, _ := g1.Dims()
+	n2, _, _ := g2.Dims()
+	for _, x := range fzTestPoints(s) {
+		g0, ok0 := fzExactResponse(s.N, s.M, s.P, s.A, s.B, s.C, s.D, x)
+		ga, ok1 := fzExactResponse(n1, s.M, s.P, m1[0], m1[1], m1[2], m1[3], x)
+		gb, ok2 := fzExactResponse(n2, s.M, s.P, m2[0], m2[1], m2[2], m2[3], x)
+		if !ok0 || !ok1 || !ok2 {
+			continue
+		}
+		var d l2
+		for k := range g0 {
+			d.addC(g0[k] - ga[k] - gb[k])
+		}
+		unit, ok := sepTolUnitOK(sys, x, 1e8)
+		if !ok {
+			continue
+		}
+		if bar := 10 * unit; d.norm() > bar {
+			t.Fatalf("%s: ‖G − G1 − G2‖_F at %v = %.3g > SepTol bar %.3g\n%s", op, x, d.norm(), bar, s)
+		}
+	}
 }
 
 func fzStabsepSeeds() []fzSeed {

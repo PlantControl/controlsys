@@ -20,8 +20,11 @@ import (
 // feedthroughInGroup1 is set, else to G2. Nonsingular-E descriptors are made
 // explicit first so the split follows the generalized eigenvalues of (A, E);
 // ill-conditioned E (descriptorFoldInaccurate) is not.
-// The ordered real Schur form is block-diagonalized with a Sylvester solve, so
-// G1 + G2 is exact. Singular-E descriptors are split with the ordered
+// The ordered real Schur form is block-diagonalized with a Sylvester solve
+// whose rounding decouplingCertificate bounds: the split is returned only when
+// G1 + G2 is certified within SepTol = 10 times the normwise rounding
+// accuracy of the model's response, else ErrSchurFailed. Singular-E
+// descriptors are split with the ordered
 // generalized Schur form instead; infinite eigenvalues are never selected, so
 // the improper/nondynamic part always stays in G2.
 // op names the exported caller for errors; non-finite models are rejected
@@ -30,7 +33,7 @@ func decomposeByEigenvalues(op string, sys *System, isGroup1 func(complex128) bo
 	if err := requireFiniteSystem(op, sys); err != nil {
 		return nil, nil, err
 	}
-	group1, group2, err = decomposeModes(sys, isGroup1)
+	group1, group2, err = decomposeModesCertified(sys, isGroup1, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -57,6 +60,12 @@ func modesAllInGroup1(policy realizationTransformPolicy, group1 *System) (*Syste
 }
 
 func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
+	return decomposeModesCertified(sys, isGroup1, false)
+}
+
+// decomposeModesCertified is decomposeModes; certify applies
+// decouplingCertificate to the explicit (or E⁻¹-folded) route.
+func decomposeModesCertified(sys *System, isGroup1 func(complex128) bool, certify bool) (group1, group2 *System, err error) {
 	if sys.HasDelay() {
 		return nil, nil, fmt.Errorf("delayed model; use Pade or AbsorbDelay first: %w", ErrDelayUnsupported)
 	}
@@ -99,6 +108,10 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 	n2 := n - n1
 	bt, ct := modalInputOutput(sys, z, n, m, p)
 	xGen := blas64.General{Rows: n1, Cols: n2, Stride: n2, Data: x}
+	var cert decouplingCertificate
+	if certify {
+		cert = newDecouplingCertificate(sys, t, x, bt, ct, n1)
+	}
 
 	B1 := extractModalBlock(bt, m, 0, n1, 0, m)
 	B2 := extractModalBlock(bt, m, n1, n, 0, m)
@@ -110,6 +123,9 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 	C2 := extractModalBlock(ct, n, 0, p, n1, n)
 	if p > 0 {
 		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, C1.RawMatrix(), xGen, 1, C2.RawMatrix())
+	}
+	if certify && !cert.accept(B1.RawMatrix().Data, C2.RawMatrix().Data) {
+		return nil, nil, fmt.Errorf("decomposition: retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
 	}
 
 	sys1, err := policy.resultWithZeroFeedthrough(extractModalBlock(t, n, 0, n1, 0, n1), B1, C1)

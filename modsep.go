@@ -19,6 +19,20 @@ type ModsepResult struct {
 // cutoff must be positive and finite (ErrInvalidArgument).
 // A part without states on a model with no inputs or no outputs would be a
 // p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
+//
+// For explicit models, and descriptors with a well-conditioned nonsingular E
+// (split through the fold E⁻¹A, the model the bar refers to), a nil error
+// means Slow + Fast equals sys within MATLAB's default SepTol = 10 times the
+// normwise rounding accuracy of the response, as for Stabsep, certified from
+// the Sylvester decoupling. A mode's side of cutoff is promised only beyond
+// rounding of the stored data: a mode within that rounding of cutoff, in
+// particular within about (Kε)^(1/k)·‖A‖_F (K = 4(n+5)) of a defective cluster of k
+// modes, may land in either part. A decoupling the certificate cannot accept
+// (roughly ‖X‖_F·‖C̃1‖‖B̃2‖/(‖C‖‖B‖) above 72(n+5)/(n+2), as for clusters
+// straddling cutoff) returns ErrSchurFailed ("cannot be separated
+// reliably"), even when the split would have been accurate; MATLAB warns
+// and keeps such modes together instead, and has a SepTol option this API
+// does not. Singular-E descriptors are not covered by the certificate.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 	if err := requireFiniteSystem("Modsep", sys); err != nil {
