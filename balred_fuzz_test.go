@@ -135,7 +135,9 @@ func fzMatsSpec(s *fzSpec, g [4][]float64, n int) *fzSpec {
 // a nil Balreal meets its exact TL·TR = I certificate and is stable,
 // TL·TR = I, the balanced model has the original response, and the order-r
 // reduction (v[14] → r = ⌊clamp((v+3)/6,0,1)·(n+1)⌋; v[13] ≥ 0 MatchDC
-// else Truncate) is stable when σ_r−1 > σ_r, keeps the DC gain under
+// else Truncate) is stable when σ_r−1 > σ_r and nil (a model IsStable does
+// not confirm carries ErrAccuracyUnverified; ErrSingularA22 needs a
+// residualized block within 8× of its floor), keeps the DC gain under
 // MatchDC, and obeys sup_ω σmax(G−Gr) ≤ 2·Σ_{i≥r} σ_i on a pole-clustered
 // sweep confirmed by exact rational responses.
 func FuzzBalred(f *testing.F) {
@@ -221,13 +223,28 @@ func FuzzBalred(f *testing.F) {
 		if !gap {
 			fzErr(t, s, "Balred", err, ErrSingularA22, ErrNotMinimal)
 		}
-		fzErr(t, s, "Balred", err)
+		if errors.Is(err, ErrSingularA22) && method == MatchDC {
+			if st := fzResidualizedSigmaMin(br.Sys, order); st > 8*balanceA22K*float64(n)*eps {
+				t.Fatalf("Balred: ErrSingularA22 with σmin(M22)/‖M‖_F = %.3g·n·ε\n%s", st/(float64(n)*eps), s)
+			}
+			fzSkip(t, "Balred: residualized block singular within rounding")
+		}
+		unverified := errors.Is(err, ErrAccuracyUnverified)
+		if !unverified {
+			fzErr(t, s, "Balred", err)
+		}
 		if !slices.Equal(hsvR, br.HSV) {
 			t.Fatalf("Balred HSV %v differ from Balreal %v\n%s", hsvR, br.HSV, s)
 		}
 		nr, _, _ := red.Dims()
 		if nr != order {
 			t.Fatalf("Balred order %d, want %d\n%s", nr, order, s)
+		}
+		if st, serr := red.IsStable(); order < n && (serr != nil || st == unverified) {
+			t.Fatalf("Balred order %d: IsStable %v (%v) with err %v\n%s", order, st, serr, err, s)
+		}
+		if unverified {
+			fzSkip(t, "Balred: reduction not confirmed stable")
 		}
 		if !gap {
 			fzSkip(t, "repeated HSV at the truncation order")
@@ -324,4 +341,22 @@ func fzBalredSeeds() []fzSeed {
 		}),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.DScal = 0, 2, 2, 3 }),
 	}
+}
+
+// fzResidualizedSigmaMin returns σmin(M22)/‖M‖_F for M = A (A − I discrete)
+// of sys and M22 its block on states order.. .
+func fzResidualizedSigmaMin(sys *System, order int) float64 {
+	n, _, _ := sys.Dims()
+	M := mat.DenseCopyOf(sys.A)
+	if sys.IsDiscrete() {
+		for i := range n {
+			M.Set(i, i, M.At(i, i)-1)
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(mat.DenseCopyOf(M.Slice(order, n, order, n)), mat.SVDNone) {
+		return math.Inf(1)
+	}
+	v := svd.Values(nil)
+	return v[len(v)-1] / mat.Norm(M, 2)
 }

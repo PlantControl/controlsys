@@ -406,7 +406,8 @@ func TestBalred_NoiseTailCertifiedOrder(t *testing.T) {
 }
 
 // JV4E3K: on a certified, numerically minimal model Balred is bit-identical
-// to Modred of Balreal, and Balred(n) is Balreal.
+// to Modred of Balreal, passes IsStable at every order (M3HDEP), and
+// Balred(n) is Balreal.
 func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 	sys, err := NewFromSlices(4, 2, 2,
 		[]float64{-1, 0.5, 0, 0.25, -0.5, -2, 1, 0, 0, -0.75, -3, 0.5, 0.25, 0, -1, -4},
@@ -441,6 +442,7 @@ func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 			if !mat.Equal(red.D, want.D) || k > 0 && (!mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C)) {
 				t.Fatalf("Balred(%d, %v) not bit-identical to Modred(Balreal)", k, proj)
 			}
+			requireStable(t, "Balred", red)
 		}
 	}
 }
@@ -495,7 +497,9 @@ func TestBalred_CertifiedSubFloorTailUnchanged(t *testing.T) {
 }
 
 // JV4E3K: whenever Balreal certifies, Balred errs exactly for orders that
-// split the tail below n·ε·σ₁ and otherwise reduces Balreal's realization.
+// split the tail below n·ε·σ₁ and otherwise reduces Balreal's realization,
+// returned with ErrAccuracyUnverified when IsStable does not confirm it
+// (M3HDEP: rotZ/697 order 1 Truncate).
 func TestBalred_CertifiedOrderInvariant(t *testing.T) {
 	for _, tc := range []balanceCertCase{certRotZ153, certRotZ855, certRotZ697, certRotZ526} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -512,23 +516,14 @@ func TestBalred_CertifiedOrderInvariant(t *testing.T) {
 			}
 			for _, proj := range []StateProjection{MatchDC, Truncate} {
 				for k := 0; k < tc.n; k++ {
-					red, _, err := Balred(sys, k, BalredOptions{StateProjection: proj})
 					if nmin < k {
-						if !errors.Is(err, ErrSingularTransform) {
+						if _, _, err := Balred(sys, k, BalredOptions{StateProjection: proj}); !errors.Is(err, ErrSingularTransform) {
 							t.Fatalf("Balred(%d, %v) err = %v; want ErrSingularTransform above nmin %d", k, proj, err, nmin)
 						}
 						continue
 					}
-					var elim []int
-					for i := k; i < tc.n; i++ {
-						elim = append(elim, i)
-					}
-					want, werr := Modred(br.Sys, elim, proj)
-					if (err == nil) != (werr == nil) {
-						t.Fatalf("Balred(%d, %v) err %v, Modred err %v", k, proj, err, werr)
-					}
-					if err == nil && (!mat.Equal(red.D, want.D) || k > 0 && (!mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C))) {
-						t.Fatalf("Balred(%d, %v) not bit-identical to Modred of Balreal", k, proj)
+					if err := balredStabilityContract(t, sys, br, k, proj); errors.Is(err, ErrSingularTransform) {
+						t.Fatalf("Balred(%d, %v) err = %v at or below nmin %d", k, proj, err, nmin)
 					}
 				}
 			}
@@ -564,10 +559,10 @@ func TestBalred_StableReductionRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := requireStableReduction(red, 1); !errors.Is(err, ErrSingularTransform) {
-		t.Fatalf("requireStableReduction err = %v; want ErrSingularTransform", err)
+	if err := reductionStability(red, 1, []float64{2, 1}, true); !errors.Is(err, ErrSingularTransform) {
+		t.Fatalf("head reduction err = %v; want ErrSingularTransform", err)
 	}
-	if err := requireStableReduction(sys, 2); err != nil {
+	if err := reductionStability(sys, 2, []float64{2, 1}, false); err != nil {
 		t.Fatalf("stable model: %v", err)
 	}
 }
