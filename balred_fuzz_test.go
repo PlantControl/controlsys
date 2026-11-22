@@ -132,6 +132,7 @@ func fzMatsSpec(s *fzSpec, g [4][]float64, n int) *fzSpec {
 
 // FuzzBalred: on decidable delay-free models Balreal/Balred reject exactly
 // the unstable ones; otherwise HSV match the Kronecker-gramian oracle,
+// a nil Balreal meets its exact TL·TR = I certificate and is stable,
 // TL·TR = I, the balanced model has the original response, and the order-r
 // reduction (v[14] → r = ⌊clamp((v+3)/6,0,1)·(n+1)⌋; v[13] ≥ 0 MatchDC
 // else Truncate) is stable when σ_r−1 > σ_r, keeps the DC gain under
@@ -169,6 +170,7 @@ func FuzzBalred(f *testing.F) {
 			}
 		}
 		fzErr(t, s, "Balreal", err, ErrNotMinimal, ErrSingularEquation, ErrSingularTransform, ErrMinimalityUndetermined)
+		balanceCertHolds(t, br, "Balreal")
 		n := s.N
 		hsv, tol2, ok := fzHSVOracle(s)
 		if !ok || tol2 > 1e-6*hsv[0]*hsv[0] {
