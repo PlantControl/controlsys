@@ -1,6 +1,7 @@
-//go:build !amd64
+//go:build !arm64
 
 package controlsys
 
-// hasFMA: arm64 and the other supported targets fuse in hardware.
-const hasFMA = true
+// hasFMA is false off arm64: math.FMA may be emulated in software (amd64
+// without FMA3, as under Rosetta), so twoProductLo splits (Dekker).
+const hasFMA = false

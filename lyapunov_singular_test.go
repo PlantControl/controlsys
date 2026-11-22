@@ -536,3 +536,23 @@ func TestLyapTwoSidedBoundUnrefined(t *testing.T) {
 		t.Error("X differs from the plain solve")
 	}
 }
+
+// TestLyapDefaultCertified (ESR456): outside the timing harness's build the
+// uncertified baseline is off, so DLyap certifies: it bands a near-Jordan
+// Stein operator whose plain solve succeeds.
+func TestLyapDefaultCertified(t *testing.T) {
+	if lyapunovUncertifiedBaseline {
+		t.Fatal("uncertified baseline on in a default build")
+	}
+	A := lyapNearJordan(t, 1e-7, true)
+	Q := mat.NewDense(3, 3, nil)
+	for i := range 3 {
+		Q.Set(i, i, 1)
+	}
+	if _, _, err := solveLyapunov("DLyap", A, Q, nil, true); err != nil {
+		t.Fatalf("plain solve: %v", err)
+	}
+	if _, err := DLyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) {
+		t.Errorf("DLyap: %v, want ErrSingularEquation", err)
+	}
+}

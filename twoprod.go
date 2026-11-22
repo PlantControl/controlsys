@@ -3,10 +3,9 @@ package controlsys
 import "math"
 
 // twoProductLo returns a·b − h exactly for h = float64(a·b), the product
-// rounded explicitly so that it does not fuse (TwoProduct): a fused
-// multiply-add in hardware, else Dekker's split, which is exact unless a
-// split overflows (|a| or |b| ≥ 2⁹⁹⁵) or the product's error underflows,
-// where the software math.FMA is used.
+// rounded explicitly so that it does not fuse (TwoProduct): math.FMA on
+// arm64, else Dekker's split, which is exact unless a split overflows (|a|
+// or |b| ≥ 2⁹⁹⁵) or the product's error underflows, where math.FMA is used.
 func twoProductLo(a, b, h float64) float64 {
 	if hasFMA {
 		return math.FMA(a, b, -h)
