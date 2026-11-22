@@ -471,6 +471,7 @@ func TestDescriptorRidgeOverflowStaysPlain(t *testing.T) {
 // the fold residuals F_A, F_B, and the form residual.
 func TestDescriptorDecouplingCertificateBoundsExactRounding(t *testing.T) {
 	rng := rand.New(rand.NewPCG(19, 23))
+	checked := 0
 	for trial := range 8 {
 		n, m, p := 6, 2, 2
 		A := mat.NewDense(n, n, nil)
@@ -520,6 +521,7 @@ func TestDescriptorDecouplingCertificateBoundsExactRounding(t *testing.T) {
 			r[i] /= scale
 			l[i] /= scale
 		}
+		checked++
 		half := 0.5 * float64(n+1) * ep
 		for name, f := range map[string][]float64{"S": s, "T": tt} {
 			res := sylvesterResidual(f, n, n1, r, l)
@@ -613,6 +615,9 @@ func TestDescriptorDecouplingCertificateBoundsExactRounding(t *testing.T) {
 				t.Errorf("trial %d form %s: exact %.3g, measured %.3g", trial, name, e, got)
 			}
 		}
+	}
+	if checked < 3 {
+		t.Fatalf("only %d of 8 trials split; the check is vacuous", checked)
 	}
 }
 

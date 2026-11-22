@@ -472,12 +472,30 @@ func TestStabsepDescriptorAcceptedSumWithinSepTol(t *testing.T) {
 }
 
 // TestStabsepStiffDescriptorCertifiedWithinBar: the full-rank-E stiff
-// models of YW5B4U (stiffFullRankECases) still split nil through
+// models of YW5B4U (stiffFullRankECases, stiffFullRankEWithFiniteCases)
+// still split nil through
 // splitStiffFullRank's composed certificate, within the descriptor bar.
 func TestStabsepStiffDescriptorCertifiedWithinBar(t *testing.T) {
 	full := 0
 	for i, c := range stiffFullRankECases {
 		sys := stiffFullRankEModel(t, i)
+		if !matlabRankFull(t, sys.E) {
+			continue
+		}
+		full++
+		res, err := Stabsep(sys)
+		var g1, g2 *System
+		if err == nil {
+			g1, g2 = res.Stable, res.Unstable
+		}
+		descRequireNilWithinBar(t, c.name, sys, g1, g2, err, descPoints(sys))
+	}
+	for _, c := range stiffFullRankEWithFiniteCases {
+		sys, err := NewDescriptor(mat.NewDense(3, 3, c.a), mat.NewDense(3, 1, c.b), mat.NewDense(1, 3, c.c),
+			mat.NewDense(1, 1, []float64{c.d}), mat.NewDense(3, 3, c.e), c.dt)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !matlabRankFull(t, sys.E) {
 			continue
 		}
