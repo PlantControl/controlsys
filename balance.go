@@ -366,10 +366,11 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 //
 // Balanced truncation and singular perturbation are stable for σ_order >
 // σ_order+1 but give no stability margin: an order splitting a near-equal
-// pair can keep a pole within IsStable's boundary band. A reduction that
-// IsStable does not confirm is returned with ErrAccuracyUnverified (with
-// ErrSingularTransform and no model when the transformation is not
-// certified). MatchDC returns ErrSingularA22 when the residualized block
+// pair can keep a pole within IsStable's boundary band. For order < n, a
+// reduction that IsStable does not confirm is returned with
+// ErrAccuracyUnverified (with ErrSingularTransform and no model when the
+// transformation is not certified); order n returns Balreal's realization
+// without that check. MatchDC returns ErrSingularA22 when the residualized block
 // (A22, or A22 − I for discrete models) of the balanced realization is
 // singular within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular
 // values equal to rounding.
