@@ -33,7 +33,7 @@ func decomposeByEigenvalues(op string, sys *System, isGroup1 func(complex128) bo
 	if err := requireFiniteSystem(op, sys); err != nil {
 		return nil, nil, err
 	}
-	group1, group2, err = decomposeModesCertified(sys, isGroup1, true)
+	group1, group2, err = decomposeModesCertified(sys, isGroup1, true, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -60,12 +60,24 @@ func modesAllInGroup1(policy realizationTransformPolicy, group1 *System) (*Syste
 }
 
 func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	return decomposeModesCertified(sys, isGroup1, false)
+	return decomposeModesCertified(sys, isGroup1, false, nil)
+}
+
+// stiffInnerSplit carries splitStiffFullRank's outer bar, E block T11 =
+// t[:k,:k] (stride ldt) and budget into the inner explicit split of rest.
+type stiffInnerSplit struct {
+	bar    descriptorBar
+	t      []float64
+	ldt    int
+	budget *descriptorBudget
 }
 
 // decomposeModesCertified is decomposeModes; certify applies
-// decouplingCertificate to the explicit (or E⁻¹-folded) route.
-func decomposeModesCertified(sys *System, isGroup1 func(complex128) bool, certify bool) (group1, group2 *System, err error) {
+// decouplingCertificate to the explicit (or E⁻¹-folded) route, and inner,
+// when set, adds that route's split to splitStiffFullRank's budget
+// (descriptorBudget.addStiffInner) instead. Descriptors split by the
+// generalized Schur form are always certified (decomposeGeneralized).
+func decomposeModesCertified(sys *System, isGroup1 func(complex128) bool, certify bool, inner *stiffInnerSplit) (group1, group2 *System, err error) {
 	if sys.HasDelay() {
 		return nil, nil, fmt.Errorf("delayed model; use Pade or AbsorbDelay first: %w", ErrDelayUnsupported)
 	}
@@ -107,6 +119,9 @@ func decomposeModesCertified(sys *System, isGroup1 func(complex128) bool, certif
 	}
 	n2 := n - n1
 	bt, ct := modalInputOutput(sys, z, n, m, p)
+	if inner != nil {
+		inner.budget.addStiffInner(inner.bar, inner.t, inner.ldt, n, sys, t, z, n1, x, bt, ct)
+	}
 	xGen := blas64.General{Rows: n1, Cols: n2, Stride: n2, Data: x}
 	var cert decouplingCertificate
 	if certify {
@@ -126,6 +141,9 @@ func decomposeModesCertified(sys *System, isGroup1 func(complex128) bool, certif
 	}
 	if certify && !cert.accept(B1.RawMatrix().Data, C2.RawMatrix().Data) {
 		return nil, nil, fmt.Errorf("decomposition: retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
+	}
+	if inner != nil {
+		inner.budget.require(allFinite(B1.RawMatrix().Data) && allFinite(C2.RawMatrix().Data))
 	}
 
 	sys1, err := policy.resultWithZeroFeedthrough(extractModalBlock(t, n, 0, n1, 0, n1), B1, C1)
@@ -180,7 +198,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2))
 	}
 	if !ok {
-		return decomposeGeneralizedQZ(sys, isGroup1)
+		return decomposeGeneralizedQZ(sys, isGroup1, true)
 	}
 	policy := newRealizationTransformPolicy(sys)
 	if nf == 0 {
@@ -208,7 +226,11 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 			}
 			if err == nil {
 				stiffTol := qzInfiniteTol(16*float64(nf)*eps(), normA, normE)
-				if g1, g2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, stiffTol, real(lambda), isGroup1); ok {
+				g1, g2, ok, err := splitStiffFullRank(policy, sys, s, t, q, z, recip, stiffTol, real(lambda), isGroup1)
+				if err != nil {
+					return nil, nil, err
+				}
+				if ok {
 					return g1, g2, nil
 				}
 			}
@@ -220,12 +242,16 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if n := nf; !sawInfinite && n == a.RawMatrix().Rows && n1 < n &&
 		descriptorERankDeficient(extractModalBlock(t, n, n1, n, n1, n)) && !descriptorERankDeficient(sys.E) {
 		if lambda, tol, ok := stiffTinyBetaPole(sys.A, sys.E); ok {
-			if g1, g2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, tol, real(lambda), isGroup1); ok && (g2.E == nil || !descriptorERankDeficient(g2.E)) {
+			g1, g2, ok, err := splitStiffFullRank(policy, sys, s, t, q, z, recip, tol, real(lambda), isGroup1)
+			if err != nil {
+				return nil, nil, err
+			}
+			if ok && (g2.E == nil || !descriptorERankDeficient(g2.E)) {
 				return g1, g2, nil
 			}
 		}
 	}
-	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+	return splitGeneralizedSchurCertified(policy, sys, s, t, q, z, n1, recip)
 }
 
 // descriptorERankDeficient reports whether E fails MATLAB rank
@@ -304,10 +330,10 @@ func stiffFullRankPole(A, E *mat.Dense) (complex128, bool) {
 // joins the part isGroup1(λ) picks. It reports false, leaving the
 // caller's form untouched, when there is not exactly one such block or
 // the blocks cannot be separated.
-func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, recip bool, stiffTol, lambda float64, isGroup1 func(complex128) bool) (group1, group2 *System, ok bool) {
+func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, recip bool, stiffTol, lambda float64, isGroup1 func(complex128) bool) (group1, group2 *System, ok bool, err error) {
 	n, m, p := sys.Dims()
 	if n < 2 {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	at := -1
 	for i := range n {
@@ -316,12 +342,12 @@ func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q,
 			continue
 		}
 		if at >= 0 {
-			return nil, nil, false
+			return nil, nil, false, nil
 		}
 		at = i
 	}
 	if at < 0 {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	s, t, q, z = slices.Clone(s), slices.Clone(t), slices.Clone(q), slices.Clone(z)
 	k := n - 1
@@ -332,21 +358,26 @@ func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q,
 		}
 		work := make([]float64, 4*n+16)
 		if _, last, ok := impl.Dtgexc(true, true, n, qzA, n, qzB, n, q, n, z, n, at, k, work, len(work)); !ok || last != k {
-			return nil, nil, false
+			return nil, nil, false, nil
 		}
 	}
 	if s[k*n+k-1] != 0 || t[k*n+k-1] != 0 || s[k*n+k] == 0 {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	t[k*n+k] = s[k*n+k] / lambda
-	rest, stiff, err := splitGeneralizedSchur(policy, sys, s, t, q, z, k, recip)
+	bar := newDescriptorBar(sys)
+	var budget descriptorBudget
+	rest, stiff, err := splitGeneralizedSchur(policy, sys, s, t, q, z, k, recip, &budget)
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	beta := stiff.E.At(0, 0)
-	r1, r2, err := decomposeModes(rest, isGroup1)
+	r1, r2, err := decomposeModesCertified(rest, isGroup1, false, &stiffInnerSplit{bar: bar, t: t, ldt: n, budget: &budget})
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, false, nil
+	}
+	if !budget.accepted() {
+		return nil, nil, false, errModesInseparable()
 	}
 	r2.D = denseCopy(sys.D)
 	b := make([]float64, m)
@@ -363,9 +394,9 @@ func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q,
 		r2, err = appendExplicitState(policy, r2, lambda, b, c)
 	}
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
-	return r1, r2, true
+	return r1, r2, true, nil
 }
 
 // appendExplicitState returns the explicit g with one more state x' = a·x
@@ -834,7 +865,7 @@ func denseOrNil(d []float64, n int) *mat.Dense {
 // decomposeGeneralizedQZ is decomposeGeneralized on the whole pencil:
 // eigenvalues with |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained
 // one that certifyFiniteRetained cannot certify finite fails closed.
-func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
+func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify bool) (group1, group2 *System, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, _, _ := sys.Dims()
 	s := make([]float64, n*n)
@@ -878,15 +909,21 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool) (group1
 	if n1 == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
-	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+	if certify {
+		return splitGeneralizedSchurCertified(policy, sys, s, t, q, z, n1, recip)
+	}
+	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, nil)
 }
 
 // splitGeneralizedSchur decouples the n1 leading modes of the generalized
 // Schur form Qᵀ(A, E)Z = (S, T) of orderedQZ (recip as it returns) from the
 // rest; see decomposeGeneralized.
-func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool) (group1, group2 *System, err error) {
+func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool, budget *descriptorBudget) (group1, group2 *System, err error) {
 	n, m, p := sys.Dims()
 	n2 := n - n1
+	if n1 > 0 && n2 > 0 && (s[n1*n+n1-1] != 0 || t[n1*n+n1-1] != 0) {
+		return nil, nil, errModesInseparable()
+	}
 
 	bq := make([]float64, n*m)
 	cz := make([]float64, p*n)
@@ -902,9 +939,15 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 			0, blas64.General{Rows: p, Cols: n, Stride: n, Data: cz})
 	}
 
+	var b1, b2, c1, c2 float64
+	if budget != nil {
+		b1, b2 = froStrided(bq, m, n1, m), froStrided(tail(bq, n1*m), m, n2, m)
+		c1, c2 = froStrided(cz, n, p, n1), froStrided(tail(cz, n1), n, p, n2)
+	}
+	var r, l []float64
 	if n2 > 0 {
-		r := make([]float64, n1*n2)
-		l := make([]float64, n1*n2)
+		r = make([]float64, n1*n2)
+		l = make([]float64, n1*n2)
 		for i := range n1 {
 			for j := range n2 {
 				r[i*n2+j] = -s[i*n+n1+j]
@@ -913,7 +956,7 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 		}
 		scale, ok := qzSylvester(n, n1, recip, s, t, r, l)
 		if !ok || scale < 1e-12 {
-			return nil, nil, fmt.Errorf("retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
+			return nil, nil, errModesInseparable()
 		}
 		for i := range r {
 			r[i] /= scale
@@ -951,6 +994,9 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 			blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, B1.RawMatrix())
 		}
 	}
+	if budget != nil {
+		budget.addGeneralizedSplit(newDescriptorBar(sys), sys, s, t, q, z, n1, r, l, b1, b2, c1, c2, bq, cz, A1, B1)
+	}
 	group1, err = policy.resultWithZeroFeedthrough(A1, B1, extractModalBlock(cz, n, 0, p, 0, n1))
 	if err != nil {
 		return nil, nil, err
@@ -965,6 +1011,24 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 	}
 	group2.E = extractModalBlock(t, n, n1, n, n1, n)
 	return group1, group2, nil
+}
+
+// splitGeneralizedSchurCertified is splitGeneralizedSchur returning the
+// parts only when descriptorBudget certifies them.
+func splitGeneralizedSchurCertified(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool) (group1, group2 *System, err error) {
+	var budget descriptorBudget
+	group1, group2, err = splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, &budget)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !budget.accepted() {
+		return nil, nil, errModesInseparable()
+	}
+	return group1, group2, nil
+}
+
+func errModesInseparable() error {
+	return fmt.Errorf("retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
 }
 
 // orderSchurGroupFirst reorders the real Schur form (t, z) so the blocks whose

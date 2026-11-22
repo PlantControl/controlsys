@@ -462,7 +462,7 @@ func stiffPencilSplit(sys *System) (whole, slow, fast *System, ok bool) {
 	}
 	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
 		return cmplx.Abs(l)*normE*qzLargeRatio < normA
-	})
+	}, false)
 	if err != nil {
 		return whole, nil, nil, true
 	}
