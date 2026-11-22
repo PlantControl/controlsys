@@ -93,17 +93,29 @@ func sameModel(a, b *System) bool {
 	return n == 0 || mat.Equal(a.A, b.A) && mat.Equal(a.B, b.B) && mat.Equal(a.C, b.C)
 }
 
-// balredStabilityContract checks Balred(order k) on a certified model: a
-// nil result passes IsStable and equals Modred of Balreal's realization;
-// ErrAccuracyUnverified carries that same model, which fails IsStable; any
-// other error is ErrSingularA22 (MatchDC) or ErrSingularTransform above nmin,
-// with no model.
+// balredStabilityContract checks Balred(order k) on a certified model:
+// above nmin it is ErrSingularTransform with no model; otherwise a nil
+// result passes IsStable and equals Modred of Balreal's realization,
+// ErrAccuracyUnverified carries that same model, which fails IsStable, and
+// the only other outcome is ErrSingularA22 (MatchDC) with no model.
 func balredStabilityContract(t *testing.T, sys *System, br *BalrealResult, k int, proj StateProjection) error {
 	t.Helper()
 	red, hsv, err := Balred(sys, k, BalredOptions{StateProjection: proj})
+	nmin := 0
+	for _, v := range br.HSV {
+		if v > float64(len(br.HSV))*eps()*br.HSV[0] {
+			nmin++
+		}
+	}
+	if k > nmin {
+		if red != nil || !errors.Is(err, ErrSingularTransform) {
+			t.Fatalf("Balred(%d, %v) above nmin %d: value %v, err %v", k, proj, nmin, red != nil, err)
+		}
+		return err
+	}
 	unv := errors.Is(err, ErrAccuracyUnverified)
 	if err != nil && !unv {
-		if red != nil || !(errors.Is(err, ErrSingularA22) && proj == MatchDC || errors.Is(err, ErrSingularTransform)) {
+		if red != nil || !errors.Is(err, ErrSingularA22) || proj != MatchDC {
 			t.Fatalf("Balred(%d, %v): value %v, err %v", k, proj, red != nil, err)
 		}
 		return err

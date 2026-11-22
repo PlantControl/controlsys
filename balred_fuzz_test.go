@@ -240,10 +240,10 @@ func FuzzBalred(f *testing.F) {
 		if nr != order {
 			t.Fatalf("Balred order %d, want %d\n%s", nr, order, s)
 		}
+		if st, serr := red.IsStable(); order < n && (serr != nil || st == unverified) {
+			t.Fatalf("Balred order %d: IsStable %v (%v) with err %v\n%s", order, st, serr, err, s)
+		}
 		if unverified {
-			if st, serr := red.IsStable(); serr != nil || st {
-				t.Fatalf("Balred: ErrAccuracyUnverified on a model IsStable confirms (%v)\n%s", serr, s)
-			}
 			fzSkip(t, "Balred: reduction not confirmed stable")
 		}
 		if !gap {

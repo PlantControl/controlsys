@@ -406,7 +406,8 @@ func TestBalred_NoiseTailCertifiedOrder(t *testing.T) {
 }
 
 // JV4E3K: on a certified, numerically minimal model Balred is bit-identical
-// to Modred of Balreal, and Balred(n) is Balreal.
+// to Modred of Balreal, passes IsStable at every order (M3HDEP), and
+// Balred(n) is Balreal.
 func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 	sys, err := NewFromSlices(4, 2, 2,
 		[]float64{-1, 0.5, 0, 0.25, -0.5, -2, 1, 0, 0, -0.75, -3, 0.5, 0.25, 0, -1, -4},
@@ -441,6 +442,7 @@ func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 			if !mat.Equal(red.D, want.D) || k > 0 && (!mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C)) {
 				t.Fatalf("Balred(%d, %v) not bit-identical to Modred(Balreal)", k, proj)
 			}
+			requireStable(t, "Balred", red)
 		}
 	}
 }
