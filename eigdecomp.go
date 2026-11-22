@@ -23,10 +23,11 @@ import (
 // The ordered real Schur form is block-diagonalized with a Sylvester solve
 // whose rounding decouplingCertificate bounds: the split is returned only when
 // G1 + G2 is certified within SepTol = 10 times the normwise rounding
-// accuracy of the model's response, else ErrSchurFailed. Singular-E
-// descriptors are split with the ordered
-// generalized Schur form instead; infinite eigenvalues are never selected, so
-// the improper/nondynamic part always stays in G2.
+// accuracy of the model's response, else ErrSchurFailed. Singular-E (and
+// ill-conditioned-E) descriptors are split with the ordered generalized
+// Schur form instead, certified by descriptorBudget against the descriptor
+// bar; infinite eigenvalues are never selected, so the improper/nondynamic
+// part always stays in G2.
 // op names the exported caller for errors; non-finite models are rejected
 // before the Schur work.
 func decomposeByEigenvalues(op string, sys *System, isGroup1 func(complex128) bool, feedthroughInGroup1 bool) (group1, group2 *System, err error) {
@@ -191,6 +192,8 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // nonzero is selected by its value; when the descriptor G2 that keeps it
 // fails MATLAB rank although E does not, Poles(G2) would drop it, so it too
 // goes through splitStiffFullRank at its value α/β (stiffTinyBetaPole).
+// Every split is certified (descriptorBudget); an uncertified one returns
+// ErrSchurFailed.
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
 	ok = ok && blur == 1
@@ -329,7 +332,10 @@ func stiffFullRankPole(A, E *mat.Dense) (complex128, bool) {
 // well-conditioned T11, is split by decomposeModes, and the stiff state
 // joins the part isGroup1(λ) picks. It reports false, leaving the
 // caller's form untouched, when there is not exactly one such block or
-// the blocks cannot be separated.
+// the blocks cannot be separated. The outer split, the β edit (through the
+// measured form residual) and the inner split are certified together
+// against the bar of sys (descriptorBudget); when they are not,
+// ErrSchurFailed is returned instead of falling through.
 func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, recip bool, stiffTol, lambda float64, isGroup1 func(complex128) bool) (group1, group2 *System, ok bool, err error) {
 	n, m, p := sys.Dims()
 	if n < 2 {
@@ -865,6 +871,8 @@ func denseOrNil(d []float64, n int) *mat.Dense {
 // decomposeGeneralizedQZ is decomposeGeneralized on the whole pencil:
 // eigenvalues with |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained
 // one that certifyFiniteRetained cannot certify finite fails closed.
+// certify applies descriptorBudget to the split (decomposeGeneralized);
+// the TransferFunction and conversion callers split uncertified.
 func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify bool) (group1, group2 *System, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, _, _ := sys.Dims()
@@ -917,7 +925,11 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 
 // splitGeneralizedSchur decouples the n1 leading modes of the generalized
 // Schur form Qᵀ(A, E)Z = (S, T) of orderedQZ (recip as it returns) from the
-// rest; see decomposeGeneralized.
+// rest; see decomposeGeneralized. A cut inside a 2×2 block (S or T
+// nonzero at (n1, n1−1), as Dgges leaves for a near-defective real pair it
+// reports as two real eigenvalues, reference LAPACK alike) returns
+// ErrSchurFailed for every caller. budget, when set, receives the split's
+// certificate terms (descriptorBudget.addGeneralizedSplit).
 func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool, budget *descriptorBudget) (group1, group2 *System, err error) {
 	n, m, p := sys.Dims()
 	n2 := n - n1

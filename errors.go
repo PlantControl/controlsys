@@ -137,7 +137,9 @@ var (
 	// ErrSchurFailed reports that an eigenvalue, Schur or QZ iteration did not
 	// converge, or that a Schur-based split could not be made reliably
 	// (Stabsep and Modsep: the retained and discarded modes cannot be
-	// separated within SepTol). It wraps ErrNotConverged.
+	// separated within SepTol, the cut falls inside a 2×2 block of the
+	// generalized Schur form, or the reduction to that form is not within
+	// an ε-rounding of the stored descriptor). It wraps ErrNotConverged.
 	ErrSchurFailed error = &derivedError{"controlsys: Schur decomposition failed to converge", ErrNotConverged}
 
 	// ErrSingularEquation reports a Lyapunov, Sylvester or Riccati equation
