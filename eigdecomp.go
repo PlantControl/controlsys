@@ -939,10 +939,9 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 			0, blas64.General{Rows: p, Cols: n, Stride: n, Data: cz})
 	}
 
-	var b1, b2, c1, c2 float64
+	var bq0, cz0 []float64
 	if budget != nil {
-		b1, b2 = froStrided(bq, m, n1, m), froStrided(tail(bq, n1*m), m, n2, m)
-		c1, c2 = froStrided(cz, n, p, n1), froStrided(tail(cz, n1), n, p, n2)
+		bq0, cz0 = slices.Clone(bq), slices.Clone(cz)
 	}
 	var r, l []float64
 	if n2 > 0 {
@@ -995,7 +994,7 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 		}
 	}
 	if budget != nil {
-		budget.addGeneralizedSplit(newDescriptorBar(sys), sys, s, t, q, z, n1, r, l, b1, b2, c1, c2, bq, cz, A1, B1)
+		budget.addGeneralizedSplit(newDescriptorBar(sys), sys, s, t, q, z, n1, r, l, bq0, cz0, bq, cz, A1, B1)
 	}
 	group1, err = policy.resultWithZeroFeedthrough(A1, B1, extractModalBlock(cz, n, 0, p, 0, n1))
 	if err != nil {
