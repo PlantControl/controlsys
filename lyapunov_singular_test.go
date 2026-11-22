@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -394,6 +395,45 @@ func TestLyapunovInverseNormLeadingBlock(t *testing.T) {
 		}
 		if math.Abs(got-want) > 1e-12*want {
 			t.Errorf("discrete=%v: leading-block norm %v, full solve %v", discrete, got, want)
+		}
+	}
+}
+
+// TestLyapAboveCapLastTierUnverified (ESR456): an ill-conditioned but
+// well-posed equation whose comparison bound certifies neither X nor the
+// distance to singular is certified nil at order 16, where the exact
+// computed-inverse norm is formed, and returned with ErrAccuracyUnverified
+// above it.
+func TestLyapAboveCapLastTierUnverified(t *testing.T) {
+	for _, tc := range []struct {
+		n   int
+		unv bool
+	}{{16, false}, {17, true}} {
+		n := tc.n
+		rng := rand.New(rand.NewPCG(uint64(n), 3))
+		A := mat.NewDense(n, n, nil)
+		for i := range n {
+			A.Set(i, i, -1-float64(i)/4)
+			for j := i + 1; j < n; j++ {
+				A.Set(i, j, 0.3*rng.NormFloat64())
+			}
+		}
+		A.Set(0, 0, -1e-4)
+		A.Set(1, 1, -1e-4)
+		A.Set(0, 1, 1)
+		Q := mat.NewDense(n, n, nil)
+		for i := range n {
+			Q.Set(i, i, 1)
+		}
+		X, err := Lyap(A, Q, nil)
+		if tc.unv {
+			if !errors.Is(err, ErrAccuracyUnverified) || X == nil {
+				t.Errorf("n=%d: Lyap = %v, %v; want X with ErrAccuracyUnverified", n, X != nil, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("n=%d: %v", n, err)
 		}
 	}
 }
