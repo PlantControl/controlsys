@@ -105,17 +105,51 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 		}
 		gamma = dmax * dmax * xn / weightedNorm(w, n, d)
 	}
-	mu := lyapunovComparisonBound(s.t, n, s.discrete, s.ws)
+	mu, diag := lyapunovComparisonBound(s.t, n, s.discrete, s.ws)
 	if 8*nf*mu*u*gamma <= lyapunovTau {
 		return nil
 	}
-	if !(nf*mu*u <= 1/(2*k)) {
-		if !(math.Max(growth, newLyapunovOperator(s).inverseNormEstimate()) < band) {
-			return singular
+	if nf*mu*u <= 1/(2*k) {
+		return refineLyapunov(s, A, Q, w, d, band, singular)
+	}
+	// The last tier: μ certifies neither X nor the distance to singular.
+	// Witnesses can only prove Singular (Dlacn2, a lower bound in exact
+	// arithmetic that can underestimate by orders, is a cheap exit); a nil
+	// needs the exact 1-norm of the computed inverse, formed only up to
+	// order lyapunovExactCap.
+	if !(diag < band) {
+		return singular
+	}
+	o := newLyapunovOperator(s)
+	if !(math.Max(growth, o.inverseNormEstimate()) < band) {
+		return singular
+	}
+	if n > lyapunovExactCap {
+		err := refineLyapunov(s, A, Q, w, d, band, singular)
+		if err == nil {
+			err = lyapunovUncapped(n)
 		}
+		return err
+	}
+	if e, ok := o.inverseNorm1(band); !ok || !(e < band) {
+		return singular
 	}
 	return refineLyapunov(s, A, Q, w, d, band, singular)
 }
+
+// lyapunovExactCap is the largest order whose last-tier certificate forms
+// the exact 1-norm of the computed inverse (n(n+1)/2 triangular solves);
+// above it that tier returns ErrAccuracyUnverified, never nil.
+const lyapunovExactCap = 16
+
+// lyapunovUncapped is the last-tier error above lyapunovExactCap.
+type lyapunovUncapped int
+
+func (n lyapunovUncapped) Error() string {
+	return fmt.Sprintf("order %d above %d: distance to singular not certified: %v", int(n), lyapunovExactCap, ErrAccuracyUnverified)
+}
+
+func (n lyapunovUncapped) Unwrap() error { return ErrAccuracyUnverified }
 
 // weightedNorm returns ‖D·V·D‖_F of the n×n v, D = diag(d) (d nil for I).
 func weightedNorm(v []float64, n int, d []float64) float64 {
@@ -207,7 +241,8 @@ func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, band 
 // diagonal block-pair operator and whose couplings are the ∞-norms of the
 // off-diagonal blocks of t (Higham, Accuracy and Stability of Numerical
 // Algorithms, §8.3). +Inf when a diagonal block-pair operator is singular.
-func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWorkspace) float64 {
+// diag is the largest of those inverse norms, a lower bound on ‖L_T⁻¹‖∞.
+func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWorkspace) (mu, diag float64) {
 	const small = 6
 	var startBuf [16]int
 	var smallBuf [4 * small * small]float64
@@ -243,6 +278,9 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 		for l := k; l < nb; l++ {
 			v := blockPairInverseNorm(t, n, start[k], size(k), start[l], size(l), discrete)
 			dinv[k*nb+l], dinv[l*nb+k] = v, v
+			if !(v <= diag) {
+				diag = v
+			}
 		}
 	}
 	for k := range nb {
@@ -262,7 +300,6 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 			nrm[k*nb+m] = v
 		}
 	}
-	mu := 0.0
 	for l := nb - 1; l >= 0; l-- {
 		if discrete {
 			for k := range nb {
@@ -290,7 +327,7 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 			}
 			v := dinv[k*nb+l] * sum
 			if !(v <= math.MaxFloat64) {
-				return math.Inf(1)
+				return math.Inf(1), diag
 			}
 			y[k*nb+l] = v
 			if discrete {
@@ -301,7 +338,7 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 			}
 		}
 	}
-	return mu
+	return mu, diag
 }
 
 // blockPairInverseNorm returns ‖M⁻¹‖∞ for M the matrix of X ↦ T_kk·X + X·T_llᵀ
@@ -658,4 +695,62 @@ func balancedLyapunov(A, Q *mat.Dense, discrete bool) (X *mat.Dense, err error, 
 		}
 	}
 	return mat.NewDense(n, n, x), err, true
+}
+
+// inverseNorm1 returns the exact 1-norm of the computed L_T⁻¹ in
+// scaled-packed coordinates, the largest column sum over all n(n+1)/2 unit
+// right-hand sides, stopping at the first column sum that reaches stop; ok
+// is false when a solve fails or leaves float64 range. A unit right-hand
+// side at (p,q), p ≤ q, has its solution in the leading principal block
+// through q's diagonal block, so only that block is solved.
+func (o *lyapunovOperator) inverseNorm1(stop float64) (norm float64, ok bool) {
+	n, t := o.n, o.s.t
+	c := o.c
+	for q := range n {
+		m := q + 1
+		if m < n && t[m*n+q] != 0 {
+			m++
+		}
+		for p := 0; p <= q; p++ {
+			clear(c[:m*m])
+			v := 1.0
+			if p != q {
+				v = math.Sqrt2 / 2
+			}
+			c[p*m+q], c[q*m+p] = v, v
+			var scale float64
+			if o.s.discrete {
+				var err error
+				if scale, err = solveDiscreteSchurLyap(m, t, n, c, m, o.s.ws); err != nil {
+					return norm, false
+				}
+			} else {
+				var solved bool
+				if scale, solved = impl.Dtrsyl(blas.NoTrans, blas.Trans, 1, m, m, t, n, t, n, c, m); !solved {
+					return norm, false
+				}
+			}
+			if scale == 0 {
+				return norm, false
+			}
+			sum := 0.0
+			for i := range m {
+				sum += math.Abs(c[i*m+i])
+				for j := i + 1; j < m; j++ {
+					sum += math.Sqrt2 / 2 * math.Abs(c[i*m+j]+c[j*m+i])
+				}
+			}
+			sum /= scale
+			if !(sum <= math.MaxFloat64) {
+				return norm, false
+			}
+			if sum > norm {
+				norm = sum
+			}
+			if !(norm < stop) {
+				return norm, true
+			}
+		}
+	}
+	return norm, true
 }

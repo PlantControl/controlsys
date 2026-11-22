@@ -324,3 +324,76 @@ func TestBalanceLyapunovIdentity(t *testing.T) {
 		t.Errorf("balanced 2×2: D = %v, want nil", d)
 	}
 }
+
+// TestLyapFrozenSchurDlacn2Miss (ESR456, stop rule 17): A has exact
+// eigenvalues ±32768, so its operator is singular. On amd64 its Schur form
+// (frozen here) passed the diagonal tests, Dlacn2 underestimated ‖L_T⁻¹‖ by
+// ~800×, and refinement from Q = I certified nil. The certificate may not
+// rest on Dlacn2: it must band.
+func TestLyapFrozenSchurDlacn2Miss(t *testing.T) {
+	a := []float64{32768, 0, 0, 0, 0, 0, 360448, 0, 0, 0, 0, 360448, 0, 0, 393216, 0, 0, -98304, 0, 0, 0, 0, 65536, 131072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65536, 0, 0, 0, 0, 0, 0, 0, 98304, 0, 0, 65536, 0, 0, -98304, 0, 0, 0, 0, 0, 0, 0, 65536, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 393216, 0, 0, 0, 0, 393216, 0, 0, 393216, 0, 0, -131072, 0, 0, 0, -131072, 0, 131072, 0, 0, 0, 131072, -131072, 131072, 0, 98304, 0, -196608, 0, 0, 0, -98304, 0, -131072}
+	frozenT := []float64{-0x1p+17, 0x1p+17, -0x1.4ee5002d8dc44p-34, 0x1.0ac61d4136f3ap-32, 0x1.6a09e667f3bcdp+17, 0x0p+00, 0x0p+00, 0x1p+17, 0x0p+00, 0x0p+00, 0x0p+00, -0x1p+17, 0x1.c10ee5968653fp-35, -0x1.a02db5d58166cp-33, -0x1.0f876ccdf6cd8p+17, 0x0p+00, 0x0p+00, -0x1.8p+17, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.0000000000009p+18, 0x1.0f876ccdf6cd2p+19, -0x1.e00000000001p+18, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.fffffffffffd2p+15, -0x1.0f876ccdf6cdbp+17, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, -0x1.fffffffffffd5p+14, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+15, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.6p+18, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+16, 0x1p+17, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+16, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+16, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.8p+18}
+	frozenU := []float64{0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.6a09e667f3bd1p-01, -0x1.339fp-50, -0x1.6a09e667f3bccp-01, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1.83ep-52, 0x1.fffffffffffffp-01, -0x1.48d24p-50, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x1.6a09e667f3bcep-01, 0x1.940ap-51, 0x1.6a09e667f3bcdp-01, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x1p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00, 0x0p+00}
+	const n = 10
+	A := mat.NewDense(n, n, a)
+	Q := mat.NewDense(n, n, nil)
+	for i := range n {
+		Q.Set(i, i, 1)
+	}
+	s := schurLyapunov{n: n, t: frozenT, u: frozenU, tmp: make([]float64, n*n)}
+	w := make([]float64, n*n)
+	if err := s.solve(Q.RawMatrix().Data, n, w); err != nil {
+		t.Fatalf("solve: %v", err)
+	}
+	if err := certifyLyapunov(&s, A, Q, w, nil); !errors.Is(err, ErrSingularEquation) {
+		t.Errorf("certificate on the frozen amd64 Schur form: %v, want ErrSingularEquation", err)
+	}
+	if X, err := Lyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
+		t.Errorf("Lyap = %v, %v; want nil, ErrSingularEquation", X != nil, err)
+	}
+}
+
+// TestLyapunovInverseNormLeadingBlock (ESR456): the exact 1-norm from
+// leading-block solves equals the column sums of the full scaled-packed
+// solve, with complex pairs, both domains.
+func TestLyapunovInverseNormLeadingBlock(t *testing.T) {
+	a := []float64{
+		-0.5, 1.2, 0.3, -0.4, 0.1,
+		-0.9, -0.5, 0.2, 0.6, -0.3,
+		0.1, -0.2, -1.1, 0.7, 0.2,
+		0.3, 0.1, -0.8, -1.1, 0.5,
+		0.2, -0.4, 0.1, 0.3, -2,
+	}
+	for _, discrete := range []bool{false, true} {
+		A := mat.NewDense(5, 5, a)
+		if discrete {
+			A.Scale(0.3, A)
+		}
+		s, err := newSchurLyapunov(A, 5, discrete, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := newLyapunovOperator(&s)
+		got, ok := o.inverseNorm1(math.Inf(1))
+		if !ok {
+			t.Fatalf("discrete=%v: inverseNorm1 failed", discrete)
+		}
+		want := 0.0
+		x := make([]float64, o.nn)
+		for j := range o.nn {
+			clear(x)
+			x[j] = 1
+			if !o.apply(x, false) {
+				t.Fatalf("discrete=%v: apply failed", discrete)
+			}
+			c := 0.0
+			for _, v := range x {
+				c += math.Abs(v)
+			}
+			want = math.Max(want, c)
+		}
+		if math.Abs(got-want) > 1e-12*want {
+			t.Errorf("discrete=%v: leading-block norm %v, full solve %v", discrete, got, want)
+		}
+	}
+}
