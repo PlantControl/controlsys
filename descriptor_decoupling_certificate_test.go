@@ -330,3 +330,300 @@ func descTied354AugQ(t *testing.T) *System {
 	}
 	return sys
 }
+
+// TestStabsepDescriptorSplitTwoByTwoBlockErrors: a cut inside a 2×2 block
+// of the generalized Schur form (S or T nonzero at (n1, n1−1)) returns
+// ErrSchurFailed for every splitGeneralizedSchur caller (EUNKOP ruling 1).
+// The dyadic forms (Q = Z = I) go straight to the split: S with a
+// real-eigenvalue block, and T quasi-triangular as in the reciprocal QZ.
+// tied/354 augQ, where Dgges set n1 inside such a block (ET622B), errors or
+// is within the bar on each arch.
+func TestStabsepDescriptorSplitTwoByTwoBlockErrors(t *testing.T) {
+	eye := []float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
+	for _, tc := range []struct {
+		name  string
+		s, tt []float64
+		recip bool
+	}{
+		{"S block", []float64{-2, 1, 0.5, 1, -2, 0.25, 0, 0, 1}, []float64{1, 0, 0, 0, 1, 0, 0, 0, 0}, false},
+		{"T block", []float64{1, 0.5, 0.5, 0, 1, 0.25, 0, 0, 0}, []float64{-2, 1, 0, 1, -2, 0, 0, 0, 1}, true},
+	} {
+		sys, err := NewDescriptor(mat.NewDense(3, 3, append([]float64(nil), tc.s...)), mat.NewDense(3, 1, []float64{1, 0.5, 1}),
+			mat.NewDense(1, 3, []float64{0.5, 1, 1}), mat.NewDense(1, 1, nil), mat.NewDense(3, 3, append([]float64(nil), tc.tt...)), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, budget := range []*descriptorBudget{nil, {}} {
+			_, _, err := splitGeneralizedSchur(newRealizationTransformPolicy(sys), sys, append([]float64(nil), tc.s...), append([]float64(nil), tc.tt...),
+				append([]float64(nil), eye...), append([]float64(nil), eye...), 1, tc.recip, budget)
+			if !errors.Is(err, ErrSchurFailed) {
+				t.Errorf("%s (budget %v): err = %v, want ErrSchurFailed", tc.name, budget != nil, err)
+			}
+		}
+	}
+	sys := descTied354AugQ(t)
+	res, err := Stabsep(sys)
+	var g1, g2 *System
+	if err == nil {
+		g1, g2 = res.Stable, res.Unstable
+	}
+	descRequireSchurFailedOrWithinBar(t, "tied/354 augQ", sys, g1, g2, err, sepPointsD)
+}
+
+// descTruncationModel is a 3-state pencil whose deflated E level has
+// singular value sigma: E = [1 0 0; 0 σ 1; 0 0 0], so a finite pole small
+// in E sits beside the infinite chain (EUNKOP ruling 4, Fable trunc).
+func descTruncationModel(t *testing.T, sigma float64) *System {
+	t.Helper()
+	A := mat.NewDense(3, 3, []float64{-1, 0.5, 0.2, 0.3, -2, 0.4, 0, 0, 1})
+	E := mat.NewDense(3, 3, []float64{1, 0, 0, 0, sigma, 1, 0, 0, 0})
+	sys, err := NewDescriptor(A, mat.NewDense(3, 1, []float64{0.8, 1.3, 0.6}), mat.NewDense(1, 3, []float64{1.1, 0.7, 1.2}),
+		mat.NewDense(1, 1, nil), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// TestStabsepDescriptorStaircaseTruncationErrors: the staircase deflation
+// zeroes an E singular value up to 1e3·n·ε·σ₁(E), more than the ε-rounding
+// the descriptor contract allows; at 0.9 of that tolerance base Stabsep
+// returned a nil split off by up to 5.5 SepTol units at ζ ≈ 0.007. The
+// measured form residual (fe ≈ 60) now rejects it, and at 0.03 of the
+// tolerance, where the truncation is rounding, the split stays nil within
+// the bar.
+func TestStabsepDescriptorStaircaseTruncationErrors(t *testing.T) {
+	tol := 1e3 * 3 * eps()
+	pts := []complex128{0.07i, 0.6i, 3i, complex(0.37, 0.78), 30i, 300i, 2, 20}
+	sys := descTruncationModel(t, 0.9*tol)
+	if _, err := Stabsep(sys); !errors.Is(err, ErrSchurFailed) {
+		t.Errorf("σ = 0.9·tol: err = %v, want ErrSchurFailed", err)
+	}
+	sys = descTruncationModel(t, 0.03*tol)
+	res, err := Stabsep(sys)
+	var g1, g2 *System
+	if err == nil {
+		g1, g2 = res.Stable, res.Unstable
+	}
+	descRequireNilWithinBar(t, "σ = 0.03·tol", sys, g1, g2, err, pts)
+}
+
+// TestStabsepDescriptorAcceptedSumWithinSepTol: certified splits of
+// dyadic block-triangular descriptors with an algebraic state, continuous
+// and discrete, n = 16, 32, 48, have Stable + Unstable within SepTol/8 of
+// the descriptor bar (320-bit sum).
+func TestStabsepDescriptorAcceptedSumWithinSepTol(t *testing.T) {
+	for _, disc := range []bool{false, true} {
+		for _, n := range []int{16, 32, 48} {
+			rng := rand.New(rand.NewPCG(uint64(n), 31))
+			A := mat.NewDense(n, n, nil)
+			for i := range n {
+				d := -0.5 - 0.25*float64(i%4)
+				if i%3 == 2 {
+					d = 0.75 + 0.25*float64(i%2)
+				}
+				if disc {
+					d = 0.25 + 0.125*float64(i%3)
+					if i%3 == 2 {
+						d = 1.5 + 0.25*float64(i%2)
+					}
+				}
+				A.Set(i, i, d)
+				for j := i + 1; j < n; j++ {
+					A.Set(i, j, float64(rng.IntN(5)-2)/16)
+				}
+			}
+			B := mat.NewDense(n, 1, nil)
+			C := mat.NewDense(1, n, nil)
+			for i := range n {
+				B.Set(i, 0, float64(rng.IntN(5)-2)/4)
+				C.Set(0, i, float64(rng.IntN(5)-2)/4)
+			}
+			dt := 0.0
+			if disc {
+				dt = 0.5
+			}
+			base, err := New(A, B, C, mat.NewDense(1, 1, nil), dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sys := descAugment(t, base, 1, 0, true, uint64(n))
+			res, err := Stabsep(sys)
+			if err != nil {
+				t.Fatalf("n=%d disc %v: %v", n, disc, err)
+			}
+			r, scored := descTolRatio(t, sys, res.Stable, res.Unstable, descPoints(sys))
+			if scored == 0 || !(r <= decouplingSepTol/8) {
+				t.Errorf("n=%d disc %v: ‖G − G1 − G2‖ = %.3g SepTol units at %d points, want ≤ %g", n, disc, r, scored, float64(decouplingSepTol)/8)
+			}
+		}
+	}
+}
+
+// TestStabsepStiffDescriptorCertifiedWithinBar: the full-rank-E stiff
+// models of YW5B4U (stiffFullRankECases) still split nil through
+// splitStiffFullRank's composed certificate, within the descriptor bar.
+func TestStabsepStiffDescriptorCertifiedWithinBar(t *testing.T) {
+	full := 0
+	for i, c := range stiffFullRankECases {
+		sys := stiffFullRankEModel(t, i)
+		if !matlabRankFull(t, sys.E) {
+			continue
+		}
+		full++
+		res, err := Stabsep(sys)
+		var g1, g2 *System
+		if err == nil {
+			g1, g2 = res.Stable, res.Unstable
+		}
+		descRequireNilWithinBar(t, c.name, sys, g1, g2, err, descPoints(sys))
+	}
+	if full == 0 {
+		t.Skip("no model has full MATLAB rank E on this platform")
+	}
+}
+
+// descForcedStiff builds the forced stiff form of Fable's EUNKOP probe:
+// S = [Ts 1; 0 −1], T = [T11 0; 0 tnn], Q = Z = I, B = [Bt; 1], C = [Ct 1],
+// Ts, Bt, Ct the real-Schur data of a corpus row, and returns sys and the
+// form.
+func descForcedStiff(t *testing.T, ts, t11, bt, ct, d []float64, k, m, p int, tnn, dt float64) (*System, []float64, []float64) {
+	t.Helper()
+	N := k + 1
+	S := make([]float64, N*N)
+	T := make([]float64, N*N)
+	B := make([]float64, N*m)
+	C := make([]float64, p*N)
+	for i := range k {
+		copy(S[i*N:i*N+k], ts[i*k:(i+1)*k])
+		copy(T[i*N:i*N+k], t11[i*k:(i+1)*k])
+		S[i*N+k] = 1
+		copy(B[i*m:(i+1)*m], bt[i*m:(i+1)*m])
+		for j := range p {
+			C[j*N+i] = ct[j*k+i]
+		}
+	}
+	S[k*N+k] = -1
+	T[k*N+k] = tnn
+	for j := range m {
+		B[k*m+j] = 1
+	}
+	for j := range p {
+		C[j*N+k] = 1
+	}
+	sys, err := NewDescriptor(mat.NewDense(N, N, append([]float64(nil), S...)), mat.NewDense(N, m, B), mat.NewDense(p, N, C),
+		mat.NewDense(p, m, append([]float64(nil), d...)), mat.NewDense(N, N, append([]float64(nil), T...)), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys, S, T
+}
+
+func descIdentity(n int) []float64 {
+	q := make([]float64, n*n)
+	for i := range n {
+		q[i*n+i] = 1
+	}
+	return q
+}
+
+// TestStabsepStiffDescriptorGradedBlockErrors: the forced stiff form of
+// corpus row fz/1896 (Fable, EUNKOP ruling 5) with T11 graded over six
+// decades and T_nn = 0, split through splitStiffFullRank: the inner
+// explicit split of rest = T11⁻¹·S11 was certified only through κ1·w2 and
+// returned nil 17 SepTol units off. The inner Schur-form terms now reject
+// it; it must not split wrong.
+func TestStabsepStiffDescriptorGradedBlockErrors(t *testing.T) {
+	ts := []float64{0.9999999999997919, 2.250152381725982e-10, -2.381642163415842e-10, 0.9999999999997919}
+	bt := []float64{0.20586974722872886, -0.9263447037308618, 0.7294532831617406, -0.9092968863273804, 0.051342676363590946, 0.8574565860035993}
+	ct := []float64{0.043228645987270005, -0.037380882117603924, 0.015427180765047128, -0.048161778564716026, -0.01962992862732633, -0.036291438004293276}
+	d := []float64{0.16743743620934765, -0.13729034662217793, -0.42034300246299533, -0.34167179696669664, -0.04725594886521098, 0.2546205744980158, 0.4960606059229473, 0.22905744542731435, -0.0741088491848604}
+	t11 := []float64{1.3545149732513833, 0, 0, 6.671040570513134e-07}
+	sys, S, T := descForcedStiff(t, ts, t11, bt, ct, d, 2, 3, 3, 0, 0.0001)
+	isStable := func(ev complex128) bool { return poleInsideStabilityBoundary(ev, false, poleStabilityTolerance(ev)) }
+	g1, g2, ok, err := splitStiffFullRank(newRealizationTransformPolicy(sys), sys, S, T, descIdentity(3), descIdentity(3), false, 1e-12, -1e15, isStable)
+	if err != nil {
+		if !errors.Is(err, ErrSchurFailed) {
+			t.Fatalf("err = %v, want ErrSchurFailed", err)
+		}
+		return
+	}
+	if !ok {
+		t.Fatal("splitStiffFullRank declined; the form no longer exercises the stiff path")
+	}
+	descRequireNilWithinBar(t, "fz/1896 forced", sys, g1, g2, nil, sepPointsD)
+}
+
+// TestStabsepStiffDescriptorBetaEditMeasured: splitStiffFullRank sets the
+// stiff block's β to s_nn/λ, a change Δ of the stored E (EUNKOP ruling 5).
+// The measured E-form residual charges it: with stored T_nn = 0, λ = −1e15
+// (Δ = 1e-15) the split is certified within the bar, and λ = −1e3
+// (Δ = 1e-3, far beyond rounding) returns ErrSchurFailed instead of
+// falling through.
+func TestStabsepStiffDescriptorBetaEditMeasured(t *testing.T) {
+	ts := []float64{-1, 0.5, 0, -2}
+	bt := []float64{1, 0.5}
+	ct := []float64{0.5, 1}
+	isStable := func(ev complex128) bool { return poleInsideStabilityBoundary(ev, true, poleStabilityTolerance(ev)) }
+	for _, tc := range []struct {
+		lambda float64
+		wantOK bool
+	}{{-1e15, true}, {-1e3, false}} {
+		sys, S, T := descForcedStiff(t, ts, []float64{1, 0.25, 0, 0.5}, bt, ct, []float64{0}, 2, 1, 1, 0, 0)
+		g1, g2, ok, err := splitStiffFullRank(newRealizationTransformPolicy(sys), sys, S, T, descIdentity(3), descIdentity(3), false, 1e-12, tc.lambda, isStable)
+		if !tc.wantOK {
+			if !errors.Is(err, ErrSchurFailed) {
+				t.Errorf("λ = %g: ok %v err %v, want ErrSchurFailed", tc.lambda, ok, err)
+			}
+			continue
+		}
+		if err != nil || !ok {
+			t.Fatalf("λ = %g: ok %v err %v", tc.lambda, ok, err)
+		}
+		descRequireNilWithinBar(t, "β edit", sys, g1, g2, nil, sepPointsC)
+	}
+}
+
+// TestDescriptorStiffInnerFormTermIsolated: addStiffInner charges the
+// inner Schur form's residual F_r = T11·(Â1 − Zr·Ts·Zrᵀ) on its own: a
+// perturbation of Ts below its quasi-diagonal, which the inner Sylvester
+// residual never reads, raises only the inner form term.
+func TestDescriptorStiffInnerFormTermIsolated(t *testing.T) {
+	k := 3
+	t11 := []float64{1, 0.25, 0, 0, 0.5, 0.125, 0, 0, 2}
+	restA := mat.NewDense(k, k, []float64{-1, 0.5, 0.25, 0.3, 0.8, -0.2, 0.1, 0.4, -1.5})
+	rest, err := New(restA, mat.NewDense(k, 1, []float64{1, 0.5, -0.5}), mat.NewDense(1, k, []float64{0.5, 1, -1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := NewDescriptor(mat.NewDense(k+1, k+1, nil), mat.NewDense(k+1, 1, []float64{1, 0.5, -0.5, 1}), mat.NewDense(1, k+1, []float64{0.5, 1, -1, 1}),
+		mat.NewDense(1, 1, nil), mat.NewDense(k+1, k+1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer.A.Set(0, 0, 1)
+	outer.E.Set(0, 0, 1)
+	bar := newDescriptorBar(outer)
+	tr, zr, err := modalSchur(rest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n1, err := orderSchurGroupFirst(tr, zr, k, func(ev complex128) bool { return real(ev) < 0 })
+	if err != nil || n1 == 0 || n1 == k {
+		t.Fatalf("n1 = %d, err %v", n1, err)
+	}
+	x, err := separateSchurBlocks(tr, k, n1, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt, ct := modalInputOutput(rest, zr, k, 1, 1)
+	var plain descriptorBudget
+	plain.addStiffInner(bar, t11, k, k, rest, tr, zr, n1, x, bt, ct)
+	pert := append([]float64(nil), tr...)
+	pert[(k-1)*k+0] += 1e-6
+	var hit descriptorBudget
+	hit.addStiffInner(bar, t11, k, k, rest, pert, zr, n1, x, bt, ct)
+	if !(plain.zS < 1) || !(hit.zS > 1e3*plain.zS) || hit.z2 != plain.z2 {
+		t.Errorf("inner form term: zS %.3g → %.3g, z2 %.3g → %.3g; want zS < 1 → over 1e3× and z2 unchanged", plain.zS, hit.zS, plain.z2, hit.z2)
+	}
+}
