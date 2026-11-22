@@ -15,6 +15,9 @@ const (
 	balanceCertCap = 0x1p-10
 	// balanceCertMin is the tolerance floor on TL·TR − I.
 	balanceCertMin = 1e-8
+	// balanceHeadCap caps the tolerance on a leading block of TL·TR − I
+	// when the whole transformation fails its certificate.
+	balanceHeadCap = 0x1p-6
 	// balanceCertK scales the rounding term K·n·ε·σ₁/σ_h of the tolerance.
 	balanceCertK = 4
 )
@@ -42,20 +45,35 @@ func (c *balanceCert) floor() float64 { return float64(c.n) * eps() * c.hsv[0] }
 // when the transformation fails its certificate: where τ_h reaches its cap.
 func (c *balanceCert) band() float64 { return c.floor() * balanceCertK / balanceCertCap }
 
-func (c *balanceCert) tau(h int) float64 {
+func (c *balanceCert) tau(h int) float64 { return c.tauCap(h, balanceCertCap) }
+
+func (c *balanceCert) tauCap(h int, limit float64) float64 {
 	s := c.hsv[h-1]
 	if !(s > 0) {
-		return balanceCertCap
+		return limit
 	}
-	return math.Min(balanceCertCap, math.Max(balanceCertMin, balanceCertK*float64(c.n)*eps()*c.hsv[0]/s))
+	return math.Min(limit, math.Max(balanceCertMin, balanceCertK*float64(c.n)*eps()*c.hsv[0]/s))
 }
 
-// ok reports whether the leading h×h block of TL·TR − I is within τ_h.
-func (c *balanceCert) ok(h int) bool {
+// ok reports whether the leading h×h block of TL·TR − I is within its
+// tolerance capped at limit.
+func (c *balanceCert) ok(h int, limit float64) bool {
 	if c.prefix == nil {
 		c.compute()
 	}
-	return math.Sqrt(c.prefix[h]) <= c.tau(h)
+	return math.Sqrt(c.prefix[h]) <= c.tauCap(h, limit)
+}
+
+// nmin is the number of Hankel singular values above the floor.
+func (c *balanceCert) nmin() int {
+	floor := c.floor()
+	k := 0
+	for _, v := range c.hsv {
+		if v > floor {
+			k++
+		}
+	}
+	return k
 }
 
 // full reports whether the whole transformation is certified, accepting
@@ -64,7 +82,7 @@ func (c *balanceCert) full() bool {
 	if c.prefix == nil && c.quickBound() <= c.tau(c.n)/2 {
 		return true
 	}
-	return c.ok(c.n)
+	return c.ok(c.n, balanceCertCap)
 }
 
 // quickBound bounds ‖TL·TR − I‖_F from the float64 product: ‖fl(E)‖_F +
@@ -135,26 +153,20 @@ func (c *balanceCert) compute() {
 }
 
 // certifiedOrder returns the largest h such that the leading h balanced
-// states are certified, never keeping part of a tail at or below the
-// rounding floor and dropping only directions with HSV ≤ band. ok is false
-// when a direction above the band fails its certificate.
+// states are certified to the head tolerance, for a transformation failing
+// its full certificate: it never keeps part of a tail at or below the
+// rounding floor and drops only directions with HSV ≤ band. ok is false when
+// a direction above the band fails its certificate.
 func (c *balanceCert) certifiedOrder() (h int, ok bool) {
-	floor := c.floor()
 	band := c.band()
-	nmin := 0
-	for _, v := range c.hsv {
-		if v > floor {
-			nmin++
-		}
-	}
-	h = nmin
+	h = c.nmin()
 	if h == c.n {
 		if c.hsv[c.n-1] > band {
 			return 0, false
 		}
 		h = c.n - 1
 	}
-	for h > 0 && !c.ok(h) {
+	for h > 0 && !c.ok(h, balanceHeadCap) {
 		if c.hsv[h-1] > band {
 			return 0, false
 		}

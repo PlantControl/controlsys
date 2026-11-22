@@ -350,14 +350,18 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // [0, n]; order n returns the balanced realization of Balreal and order 0 a
 // static gain. opts.StateProjection selects MatchDC (the zero value, MATLAB
 // default) or Truncate. sys must satisfy the requirements of Balreal, except
-// its certificate of TL·TR = I: when the whole transformation is not
-// certified, Balred reduces the leading balanced states it does certify,
-// after truncating the directions whose Hankel singular values are at most
-// n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁ (SLICOT AB09AD and
-// AB09BD likewise cap the order at the numerically minimal one). MatchDC
+// its certificate of TL·TR = I.
+//
+// When the transformation is certified, Balred reduces Balreal's balanced
+// realization; an order that would keep part of a tail of Hankel singular
+// values at or below n·ε·σ₁ returns ErrSingularTransform naming the
+// numerically minimal order (SLICOT AB09AD and AB09BD likewise cap the order
+// there). When it is not, Balred reduces the leading balanced states it does
+// certify, after truncating the directions whose Hankel singular values are
+// at most n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC
 // then keeps the DC gain to within twice the sum of the truncated Hankel
-// singular values. An order above the certified one returns
-// ErrSingularTransform naming it.
+// singular values. An order above the certified one, or a reduction of that
+// head that is not stable, returns ErrSingularTransform.
 func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, error) {
 	if err := requireFiniteSystem("Balred", sys); err != nil {
 		return nil, nil, err
@@ -383,7 +387,12 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	}
 	src := br.Sys
 	h := n
-	if !full || br.HSV[n-1] <= cert.floor() {
+	head := !full
+	if full {
+		if nmin := cert.nmin(); order > nmin {
+			return nil, nil, fmt.Errorf("Balred: order %d would keep part of the tail at the rounding of σ₁ above numerically minimal order %d: %w", order, nmin, ErrSingularTransform)
+		}
+	} else {
 		var ok bool
 		if h, ok = cert.certifiedOrder(); !ok {
 			return nil, nil, fmt.Errorf("Balred: balancing transformation numerically singular above the rounding of σ₁: %w", ErrSingularTransform)
@@ -403,11 +412,29 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("Balred: %w", err)
 	}
+	if head {
+		if err := requireStableReduction(red, order); err != nil {
+			return nil, nil, err
+		}
+	}
 	propagateIONames(red, sys)
 	if red, err = derivedOp("Balred").model(red, nil); err != nil {
 		return nil, nil, err
 	}
 	return red, br.HSV, nil
+}
+
+// requireStableReduction returns ErrSingularTransform when a reduction of
+// the certified head of a numerically non-minimal model is not stable.
+func requireStableReduction(red *System, order int) error {
+	st, err := red.IsStable()
+	if err != nil {
+		return fmt.Errorf("Balred: %w", err)
+	}
+	if !st {
+		return fmt.Errorf("Balred: order %d reduction of the certified head is not stable: %w", order, ErrSingularTransform)
+	}
+	return nil
 }
 
 // balancedHead returns the leading h states of the balanced realization,

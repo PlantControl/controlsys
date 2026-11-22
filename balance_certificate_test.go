@@ -111,6 +111,27 @@ var (
 	}
 )
 
+var (
+	// rotZ/153 amd64: σ₈ below n·ε·σ₁, σ₅ ≈ σ₆; transformation certified.
+	certRotZ153 = balanceCertCase{
+		name: "certified with sub-floor tail", n: 8, m: 1, p: 2,
+		a: []float64{-1.4901161193847656e-08, 0.5, 0, 1, -1, -1, 0.5, 1, -0.5, -1.4901161193847656e-08, 0, 0.5, 0, 0, 1, 0, 0, 0, -2.3283064365386963e-10, 2, 0.5, 1, 0, 0, 0, 0, -2, -2.3283064365386963e-10, 0, 0.5, -0.5, 0.5, 0, 0, 0, 0, -0.5, 2, -0.5, 0.5, 0, 0, 0, 0, -2, -0.5, -1, -0.5, 0, 0, 0, 0, 0, 0, -7.450580596923828e-09, 0.5, 0, 0, 0, 0, 0, 0, -0.5, -7.450580596923828e-09},
+		b: []float64{1, 2, 1, 1, 1, 0.5, 1, 0},
+		c: []float64{1, 0, -1, 0, 2, -1, 0.5, -1, 2, 0, 1, -1, 0.5, -1, 0, 1},
+		d: []float64{0, 0},
+	}
+	// rotZ/336: transformation off by 1e-3 to 2e-3; σ₇/σ₁ = 5.9e-15 is above
+	// n·ε·σ₁ and σ₈ below it.
+	certRotZ336 = balanceCertCase{
+		name: "uncertified with head above floor", n: 8, m: 1, p: 1,
+		a:   []float64{-2, 0.5, -0.5, 0, -0.5, 0, 0, 0.5, -0.5, -2, 0.5, 1, 0, 0.5, 1, 1, 0, 0, -2, 0.5, -0.5, -0.5, 0, 0, 0, 0, -0.5, -2, -0.5, -0.5, 1, -0.5, 0, 0, 0, 0, -2, 0, 0.5, 1, 0, 0, 0, 0, 0, -4.656612873077393e-10, 0.5, 0.5, 0, 0, 0, 0, 0, -0.5, -4.656612873077393e-10, 1, 0, 0, 0, 0, 0, 0, 0, -9.313225746154785e-10},
+		b:   []float64{0, 0, 0.5, 1, 0, 0, 2, 0.5},
+		c:   []float64{0.5, 0, 0.5, 0, 0.5, 0, 0, 1},
+		d:   []float64{0},
+		ref: []float64{2.910381223025578e+08, 2.9103812219169384e+08, 2.3139786485662082e+08, 0.047000777701123986, 0.002335872149040454, 2.748031376750222e-05, 1.7182686161731992e-06, 1.2642992569934422e-08},
+	}
+)
+
 func (tc balanceCertCase) sys(t *testing.T) *System {
 	t.Helper()
 	sys, err := NewFromSlices(tc.n, tc.m, tc.p, tc.a, tc.b, tc.c, tc.d, tc.dt)
@@ -184,6 +205,28 @@ func responseGap(t *testing.T, g, gr *System) (gap, top float64) {
 	return gap, top
 }
 
+// certFidelity checks |G − G_bal|(jω) ≤ (32·F + 1e-10)·|G(jω)| entrywise
+// on exact responses of the stored data, F the exact ‖TL·TR − I‖_F.
+func certFidelity(t *testing.T, g, gb *System, f float64) {
+	t.Helper()
+	for _, w := range []float64{0.1, 0.4, 0.9, 1.1, 2.5, 6} {
+		ga, ok1 := exactStoredResponse(g, complex(0, w))
+		gr, ok2 := exactStoredResponse(gb, complex(0, w))
+		if !ok1 || !ok2 {
+			t.Fatalf("exact response failed at ω = %v", w)
+		}
+		top := 0.0
+		for _, v := range ga {
+			top = math.Max(top, cmplx.Abs(v))
+		}
+		for i := range ga {
+			if gap := cmplx.Abs(ga[i] - gr[i]); gap > (32*f+1e-10)*top {
+				t.Fatalf("ω = %v: |G − G_bal| = %.3g > (32·%.3g + 1e-10)·|G| = %.3g", w, gap, f, (32*f+1e-10)*top)
+			}
+		}
+	}
+}
+
 // exactResponseGap is maxResponseGap with both responses of the stored data
 // evaluated exactly.
 func exactResponseGap(t *testing.T, g, gr *System) float64 {
@@ -253,10 +296,7 @@ func TestBalreal_CertifiedTransformation(t *testing.T) {
 				t.Fatalf("exact ‖TL·TR−I‖ = %.3g, τ = %.3g: under 8× margin", f, tau)
 			}
 			balrealHSVWithin(t, br.HSV, tc.ref, 1e-12)
-			_, top := responseGap(t, sys, br.Sys)
-			if gap := exactResponseGap(t, sys, br.Sys); gap > 100*f*top+1e-12*tc.ref[0] {
-				t.Fatalf("|G − G_bal| = %.3g, max |G| = %.3g, ‖TL·TR−I‖ = %.3g", gap, top, f)
-			}
+			certFidelity(t, sys, br.Sys, f)
 			requireStable(t, "Balreal", br.Sys)
 		})
 	}
@@ -429,4 +469,105 @@ func balanceCertHolds(t *testing.T, br *BalrealResult, what string) {
 		t.Fatalf("%s: nil with exact ‖TL·TR−I‖ = %.3g > τ = %.3g", what, f, tau)
 	}
 	requireStable(t, what, br.Sys)
+}
+
+// JV4E3K: a certified transformation with a sub-floor tail reduces Balreal's
+// realization unchanged, even where the order splits the near-equal σ₅, σ₆
+// (rotZ/153).
+func TestBalred_CertifiedSubFloorTailUnchanged(t *testing.T) {
+	sys := certRotZ153.sys(t)
+	br, err := Balreal(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	red, _, err := Balred(sys, 5, BalredOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Modred(br.Sys, []int{5, 6, 7}, MatchDC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C) || !mat.Equal(red.D, want.D) {
+		t.Fatal("Balred(5) not bit-identical to Modred of Balreal")
+	}
+	requireStable(t, "Balred(5)", red)
+}
+
+// JV4E3K: whenever Balreal certifies, Balred errs exactly for orders that
+// split the tail below n·ε·σ₁ and otherwise reduces Balreal's realization.
+func TestBalred_CertifiedOrderInvariant(t *testing.T) {
+	for _, tc := range []balanceCertCase{certRotZ153, certRotZ855, certRotZ697, certRotZ526} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := tc.sys(t)
+			br, err := Balreal(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nmin := 0
+			for _, v := range br.HSV {
+				if v > float64(tc.n)*0x1p-52*br.HSV[0] {
+					nmin++
+				}
+			}
+			for _, proj := range []StateProjection{MatchDC, Truncate} {
+				for k := 0; k < tc.n; k++ {
+					red, _, err := Balred(sys, k, BalredOptions{StateProjection: proj})
+					if nmin < k {
+						if !errors.Is(err, ErrSingularTransform) {
+							t.Fatalf("Balred(%d, %v) err = %v; want ErrSingularTransform above nmin %d", k, proj, err, nmin)
+						}
+						continue
+					}
+					var elim []int
+					for i := k; i < tc.n; i++ {
+						elim = append(elim, i)
+					}
+					want, werr := Modred(br.Sys, elim, proj)
+					if (err == nil) != (werr == nil) {
+						t.Fatalf("Balred(%d, %v) err %v, Modred err %v", k, proj, err, werr)
+					}
+					if err == nil && (!mat.Equal(red.D, want.D) || k > 0 && (!mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C))) {
+						t.Fatalf("Balred(%d, %v) not bit-identical to Modred of Balreal", k, proj)
+					}
+				}
+			}
+		})
+	}
+}
+
+// JV4E3K: an uncertified transformation still reduces its certified head
+// at order 7 of rotZ/336, stable and within 2·tail.
+func TestBalred_UncertifiedHeadAboveFloor(t *testing.T) {
+	sys := certRotZ336.sys(t)
+	for _, proj := range []StateProjection{MatchDC, Truncate} {
+		red, _, err := Balred(sys, 7, BalredOptions{StateProjection: proj})
+		if err != nil {
+			t.Fatalf("Balred(7, %v): %v", proj, err)
+		}
+		requireStable(t, "Balred(7)", red)
+		floor := 8 * 0x1p-52 * certRotZ336.ref[0]
+		if gap := exactResponseGap(t, sys, red); gap > 2*certRotZ336.ref[7]+3.4*floor {
+			t.Fatalf("Balred(7, %v): |G − Gr| = %.3g > 2·tail %.3g + 3.4 floors", proj, gap, 2*certRotZ336.ref[7])
+		}
+	}
+}
+
+// JV4E3K: a head reduction that is not stable is refused.
+func TestBalred_StableReductionRequired(t *testing.T) {
+	sys, err := NewFromSlices(2, 1, 1, []float64{0.5, 2, -2, -1}, []float64{1, 1}, []float64{1, 1}, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStable(t, "fixture", sys)
+	red, err := modred(sys, []int{1}, Truncate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireStableReduction(red, 1); !errors.Is(err, ErrSingularTransform) {
+		t.Fatalf("requireStableReduction err = %v; want ErrSingularTransform", err)
+	}
+	if err := requireStableReduction(sys, 2); err != nil {
+		t.Fatalf("stable model: %v", err)
+	}
 }
