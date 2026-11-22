@@ -230,19 +230,30 @@ func TestStabsepDescriptorIllConditionedDecouplingErrors(t *testing.T) {
 	}
 }
 
-// TestStabsepDescriptorIllConditionedFoldStaysNil: rotZ/880 with a stable
-// fast mode −1e8 in E = diag(I, 1e-8) (EUNKOP fastE): Stabsep folds T11
-// with that mode into the explicit Stable part. The fold residual's
-// rounding is bounded componentwise; a normwise ε‖T11‖‖Â1‖ rejected this
-// accurate split at ζ ≈ 7e5.
+// TestStabsepDescriptorIllConditionedFoldStaysNil: a well-separated dyadic
+// model with a stable fast mode −1e8 in E = diag(I, 1e-8) (EUNKOP fastE):
+// Stabsep folds T11 with that mode into the explicit Stable part. The fold
+// residual's rounding is bounded componentwise; a normwise ε‖T11‖‖Â1‖
+// rejected such accurate splits (rotZ/880 fastE at ζ ≈ 7e5).
 func TestStabsepDescriptorIllConditionedFoldStaysNil(t *testing.T) {
-	sys := descAugment(t, descRotZ880(t), -1, 1e-8, false, 0)
+	base := sepLit(t, 3, 1, 1, []float64{-1, 0.5, 0.25, 0, -2, 0.5, 0, 0, 1}, []float64{1, -0.5, 0.75}, []float64{0.5, 1, -1}, []float64{0}, 0)
+	sys := descAugment(t, base, -1, 1e-8, false, 0)
 	res, err := Stabsep(sys)
 	var g1, g2 *System
 	if err == nil {
 		g1, g2 = res.Stable, res.Unstable
+		if n1, _, _ := g1.Dims(); n1 != 3 {
+			t.Fatalf("Stable has %d states, want 3 (the fast mode folded in)", n1)
+		}
 	}
-	descRequireNilWithinBar(t, "rotZ/880 fastE", sys, g1, g2, err, sepPointsC)
+	descRequireNilWithinBar(t, "dyadic fastE", sys, g1, g2, err, sepPointsC)
+
+	f := newDescForm(t, 4, 3, []float64{-1, 0.5, 0.25, 1, 0, -2, 0.5, 1, 0, 0, -1, 1, 0, 0, 0, 1}, []float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1e-8, 0, 0, 0, 0, 0},
+		[]float64{1, -0.5, 1, 1}, []float64{0.5, 1, 1, 1})
+	d, _, _, _ := f.budget()
+	if plain, _ := d.tiers(); !(plain <= 1) {
+		t.Errorf("fold with T11 = diag(1, 1, 1e-8): first-tier ζ″ = %.3g, want ≤ 1", plain)
+	}
 }
 
 // TestStabsepDescriptorBadlyScaledPencilStaysNil: the XACVXD pencil
@@ -345,8 +356,8 @@ func TestStabsepDescriptorSplitTwoByTwoBlockErrors(t *testing.T) {
 		s, tt []float64
 		recip bool
 	}{
-		{"S block", []float64{-2, 1, 0.5, 1, -2, 0.25, 0, 0, 1}, []float64{1, 0, 0, 0, 1, 0, 0, 0, 0}, false},
-		{"T block", []float64{1, 0.5, 0.5, 0, 1, 0.25, 0, 0, 0}, []float64{-2, 1, 0, 1, -2, 0, 0, 0, 1}, true},
+		{"S block", []float64{-2, 1, 0.5, 1, -3, 0.25, 0, 0, 1}, []float64{1, 0, 0, 0, 1, 0, 0, 0, 0}, false},
+		{"T block", []float64{1, 0.5, 0.5, 0, 1, 0.25, 0, 0, 0}, []float64{-2, 1, 0, 1, -3, 0, 0, 0, 1}, true},
 	} {
 		sys, err := NewDescriptor(mat.NewDense(3, 3, append([]float64(nil), tc.s...)), mat.NewDense(3, 1, []float64{1, 0.5, 1}),
 			mat.NewDense(1, 3, []float64{0.5, 1, 1}), mat.NewDense(1, 1, nil), mat.NewDense(3, 3, append([]float64(nil), tc.tt...)), 0)
