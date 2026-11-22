@@ -109,8 +109,43 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 	if 8*nf*mu*u*gamma <= lyapunovTau {
 		return nil
 	}
+	// The two-sided bound √(μ·μ₁) ≥ ‖L_T⁻¹‖₂, μ₁ the comparison bound of the
+	// adjoint (‖·‖₁); formed first from order 24, where it is cheap against
+	// the residual, and only when needed below it.
+	mu1 := -1.0
+	twoSided := func() bool {
+		if mu1 < 0 {
+			mu1 = lyapunovAdjointBound(s.t, n, s.discrete)
+		}
+		return 128*math.Sqrt(mu*mu1)*u*gamma <= lyapunovTau
+	}
+	if n >= 24 && twoSided() {
+		return nil
+	}
 	if nf*mu*u <= 1/(2*k) {
-		return refineLyapunov(s, A, Q, w, d, band, singular)
+		var r []float64
+		if d == nil {
+			// Residual-only exit on the stored form: the error of X is at
+			// most bound·‖r‖_F, r the double-double residual.
+			r = make([]float64, n*n)
+			lyapunovResidual(s, A, Q, w, r)
+			rn := scaledNorm2(r)
+			if nf*mu*rn <= lyapunovTau/2*xn {
+				return nil
+			}
+			if n < 24 && twoSided() {
+				return nil
+			}
+			if math.Sqrt(mu*mu1)*rn <= lyapunovTau/2*xn {
+				return nil
+			}
+		} else if n < 24 && twoSided() {
+			return nil
+		}
+		return refineLyapunov(s, A, Q, w, d, band, singular, r)
+	}
+	if n < 24 && twoSided() {
+		return nil
 	}
 	// The last tier: μ certifies neither X nor the distance to singular.
 	// Witnesses can only prove Singular (Dlacn2, a lower bound in exact
@@ -125,7 +160,7 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 		return singular
 	}
 	if n > lyapunovExactCap {
-		err := refineLyapunov(s, A, Q, w, d, band, singular)
+		err := refineLyapunov(s, A, Q, w, d, band, singular, nil)
 		if err == nil {
 			err = lyapunovUncapped(n)
 		}
@@ -134,7 +169,7 @@ func certifyLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, d []float64) error {
 	if e, ok := o.inverseNorm1(band); !ok || !(e < band) {
 		return singular
 	}
-	return refineLyapunov(s, A, Q, w, d, band, singular)
+	return refineLyapunov(s, A, Q, w, d, band, singular, nil)
 }
 
 // lyapunovExactCap is the largest order whose last-tier certificate forms
@@ -150,6 +185,67 @@ func (n lyapunovUncapped) Error() string {
 }
 
 func (n lyapunovUncapped) Unwrap() error { return ErrAccuracyUnverified }
+
+// lyapunovResidual writes into r the double-double residual of the stored
+// equation at w (refineLyapunov's first-step residual).
+func lyapunovResidual(s *schurLyapunov, A, Q *mat.Dense, w, r []float64) {
+	var ax []dd
+	if s.discrete {
+		ax = make([]dd, s.n*s.n)
+	}
+	qRaw := Q.RawMatrix()
+	lyapResidualDot2(A, w, nil, 0, qRaw.Data, qRaw.Stride, s.discrete, ax, r)
+}
+
+// lyapunovAdjointBound returns μ₁, the comparison bound on J·Tᵀ·J (J the
+// reversal), the quasi-triangular form of the adjoint operator: μ₁ ≥ ‖L_T⁻¹‖₁.
+func lyapunovAdjointBound(t []float64, n int, discrete bool) float64 {
+	tt := make([]float64, n*n)
+	for i := range n {
+		for j := range n {
+			tt[i*n+j] = t[(n-1-j)*n+(n-1-i)]
+		}
+	}
+	mu, _ := lyapunovComparisonBound(tt, n, discrete, nil)
+	return mu
+}
+
+// lyapunovEigU returns the smallest eigenvalue-pair distance |λᵢ+λⱼ|
+// (discrete |λᵢλⱼ−1|) of the quasi-triangular t over unit.
+func lyapunovEigU(t []float64, n int, discrete bool, unit float64) float64 {
+	ev := make([]complex128, 0, n)
+	for i := 0; i < n; {
+		if i+1 < n && t[(i+1)*n+i] != 0 {
+			a, b, c, d := t[i*n+i], t[i*n+i+1], t[(i+1)*n+i], t[(i+1)*n+i+1]
+			tr, det := a+d, a*d-b*c
+			disc := tr*tr/4 - det
+			if disc < 0 {
+				im := math.Sqrt(-disc)
+				ev = append(ev, complex(tr/2, im), complex(tr/2, -im))
+			} else {
+				sq := math.Sqrt(disc)
+				ev = append(ev, complex(tr/2+sq, 0), complex(tr/2-sq, 0))
+			}
+			i += 2
+		} else {
+			ev = append(ev, complex(t[i*n+i], 0))
+			i++
+		}
+	}
+	m := math.Inf(1)
+	for i := range ev {
+		for j := i; j < len(ev); j++ {
+			v := ev[i] + ev[j]
+			if discrete {
+				v = ev[i]*ev[j] - 1
+			}
+			if a := math.Hypot(real(v), imag(v)); a < m {
+				m = a
+			}
+		}
+	}
+	return m / unit
+}
 
 // weightedNorm returns ‖D·V·D‖_F of the n×n v, D = diag(d) (d nil for I).
 func weightedNorm(v []float64, n int, d []float64) float64 {
@@ -178,10 +274,14 @@ func (k lyapunovSingular) Unwrap() error { return ErrSingularEquation }
 // refineLyapunov refines X in w by corrections solved on the Schur form from
 // double-double residuals of the stored A and Q.
 // A correction growth ‖d‖/‖r‖ of band or more returns singular.
-func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, band float64, singular error) error {
+// r0, when not nil, is the residual of w already formed for the first step.
+func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, band float64, singular error, r0 []float64) error {
 	n := s.n
 	nn := n * n
-	r, d := make([]float64, nn), make([]float64, nn)
+	r, d := r0, make([]float64, nn)
+	if r == nil {
+		r = make([]float64, nn)
+	}
 	var ax []dd
 	if s.discrete {
 		ax = make([]dd, nn)
@@ -190,8 +290,10 @@ func refineLyapunov(s *schurLyapunov, A, Q *mat.Dense, w, scale []float64, band 
 	bestCorr := math.Inf(1)
 	prev := math.Inf(1)
 	qRaw := Q.RawMatrix()
-	for range lyapunovRefineSteps {
-		lyapResidualDot2(A, w, nil, 0, qRaw.Data, qRaw.Stride, s.discrete, ax, r)
+	for step := range lyapunovRefineSteps {
+		if step > 0 || r0 == nil {
+			lyapResidualDot2(A, w, nil, 0, qRaw.Data, qRaw.Stride, s.discrete, ax, r)
+		}
 		if err := s.solve(r, n, d); err != nil {
 			return singular
 		}
@@ -649,14 +751,19 @@ func exactlyScaled(x, v float64) bool {
 // balancedLyapunov is the certified solve of the balanced equation,
 // Ã = D⁻¹·A·D and Q̃ = D⁻¹·Q·D⁻¹ for D = balanceLyapunov(A), returning
 // X = D·X̃·D. ok is false when D is a multiple of I or a scaling of A, Q or
-// X̃ overflows or underflows (the caller keeps its raw verdict).
-func balancedLyapunov(A, Q *mat.Dense, discrete bool) (X *mat.Dense, err error, ok bool) {
+// X̃ overflows or underflows (the caller keeps its raw verdict), and when
+// the eigenvalues of the raw Schur form t are within K units ε·s̃ of the
+// balanced matrix of a singular pair (no retry can certify then).
+func balancedLyapunov(A, Q *mat.Dense, discrete bool, t []float64) (X *mat.Dense, err error, ok bool) {
 	n, _ := A.Dims()
 	aRaw, qRaw := A.RawMatrix(), Q.RawMatrix()
 	a := make([]float64, n*n)
 	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
 	d := balanceLyapunov(a, n)
 	if d == nil {
+		return nil, nil, false
+	}
+	if !(lyapunovEigU(t, n, discrete, lyapunovUnit(mat.NewDense(n, n, a), discrete)) > lyapunovBandK(n)) {
 		return nil, nil, false
 	}
 	q := make([]float64, n*n)

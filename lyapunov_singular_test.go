@@ -233,7 +233,7 @@ func TestLyapRefinementStallUnverified(t *testing.T) {
 	for i := range s.t {
 		s.t[i] *= 2.5
 	}
-	err = refineLyapunov(&s, A, Q, x, nil, math.Inf(1), ErrSingularEquation)
+	err = refineLyapunov(&s, A, Q, x, nil, math.Inf(1), ErrSingularEquation, nil)
 	if !errors.Is(err, ErrAccuracyUnverified) {
 		t.Fatalf("err = %v, want ErrAccuracyUnverified", err)
 	}
@@ -281,11 +281,11 @@ func TestGramSingularWithinRoundingErrors(t *testing.T) {
 }
 
 // TestLyapBalancedRetryScaledEquation (ESR456): a well-posed equation under
-// the exact similarity diag(2³⁰, 1, 2⁻³⁰) is within ε·‖L‖ of singular in
+// the exact similarity diag(2¹⁵, 1, 2⁻¹⁵) is within ε·‖L‖ of singular in
 // the stored scaling; the balanced retry certifies X to the 320-bit
 // solution in the stored scaling.
 func TestLyapBalancedRetryScaledEquation(t *testing.T) {
-	d := []float64{0x1p30, 1, 0x1p-30}
+	d := []float64{0x1p15, 1, 0x1p-15}
 	for _, discrete := range []bool{false, true} {
 		a := []float64{-1.2, 0.4, 0.1, -0.3, -0.8, 0.5, 0.2, -0.1, -2}
 		if discrete {
@@ -435,5 +435,29 @@ func TestLyapAboveCapLastTierUnverified(t *testing.T) {
 		if err != nil {
 			t.Errorf("n=%d: %v", n, err)
 		}
+	}
+}
+
+// TestLyapSolverDiagonalBandNoRetry (ESR456 perf re-ruling 3a): when the
+// stored equation fails the solver's own diagonal test (here the
+// similarity diag(2³⁰, 1, 2⁻³⁰) of a well-posed continuous equation), Lyap
+// returns ErrSingularEquation without the balanced retry.
+func TestLyapSolverDiagonalBandNoRetry(t *testing.T) {
+	d := []float64{0x1p30, 1, 0x1p-30}
+	a := []float64{-1.2, 0.4, 0.1, -0.3, -0.8, 0.5, 0.2, -0.1, -2}
+	q := []float64{2, 0.5, 0.1, 0.5, 1, -0.3, 0.1, -0.3, 3}
+	A := mat.NewDense(3, 3, nil)
+	Q := mat.NewDense(3, 3, nil)
+	for i := range 3 {
+		for j := range 3 {
+			A.Set(i, j, d[i]*a[i*3+j]/d[j])
+			Q.Set(i, j, d[i]*q[i*3+j]*d[j])
+		}
+	}
+	if _, _, err := solveLyapunov("Lyap", A, Q, nil, false); !errors.Is(err, ErrSingularEquation) {
+		t.Fatalf("solve: %v, want the diagonal test's ErrSingularEquation", err)
+	}
+	if X, err := Lyap(A, Q, nil); !errors.Is(err, ErrSingularEquation) || X != nil {
+		t.Errorf("Lyap = %v, %v; want nil, ErrSingularEquation", X != nil, err)
 	}
 }
