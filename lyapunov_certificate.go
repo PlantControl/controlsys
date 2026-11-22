@@ -402,39 +402,41 @@ func lyapunovComparisonBound(t []float64, n int, discrete bool, ws *LyapunovWork
 			nrm[k*nb+m] = v
 		}
 	}
+	// y is symmetric (the (k,l) and (l,k) equations coincide under the
+	// transpose similarity), so only k ≤ l is solved, with row l of y
+	// standing for column l and contiguous dot products.
 	for l := nb - 1; l >= 0; l-- {
+		yl := y[l*nb : l*nb+nb]
+		nl := nrm[l*nb : l*nb+nb]
 		if discrete {
+			zl := z[l*nb : l*nb+nb]
 			for k := range nb {
-				zp := 0.0
-				for p := l + 1; p < nb; p++ {
-					zp += nrm[l*nb+p] * y[k*nb+p]
-				}
-				z[k*nb+l] = zp
+				zl[k] = dotUnrolled(nl[l+1:], y[k*nb+l+1:k*nb+nb])
 			}
+			for m := l + 1; m < nb; m++ {
+				zl[m] += nl[l] * yl[m]
+			}
+			for k := l; k >= 0; k-- {
+				sum := 1 + dotUnrolled(nrm[k*nb+k+1:k*nb+nb], zl[k+1:]) + nrm[k*nb+k]*zl[k]
+				v := dinv[k*nb+l] * sum
+				if !(v <= math.MaxFloat64) {
+					return math.Inf(1), diag
+				}
+				y[k*nb+l], y[l*nb+k] = v, v
+				zl[k] += nl[l] * v
+				if v > mu {
+					mu = v
+				}
+			}
+			continue
 		}
-		for k := nb - 1; k >= 0; k-- {
-			sum := 1.0
-			if discrete {
-				for m := k + 1; m < nb; m++ {
-					sum += nrm[k*nb+m] * z[m*nb+l]
-				}
-				sum += nrm[k*nb+k] * z[k*nb+l]
-			} else {
-				for m := k + 1; m < nb; m++ {
-					sum += nrm[k*nb+m] * y[m*nb+l]
-				}
-				for m := l + 1; m < nb; m++ {
-					sum += nrm[l*nb+m] * y[k*nb+m]
-				}
-			}
+		for k := l; k >= 0; k-- {
+			sum := 1 + dotUnrolled(nrm[k*nb+k+1:k*nb+nb], yl[k+1:]) + dotUnrolled(nl[l+1:], y[k*nb+l+1:k*nb+nb])
 			v := dinv[k*nb+l] * sum
 			if !(v <= math.MaxFloat64) {
 				return math.Inf(1), diag
 			}
-			y[k*nb+l] = v
-			if discrete {
-				z[k*nb+l] += nrm[l*nb+l] * v
-			}
+			y[k*nb+l], y[l*nb+k] = v, v
 			if v > mu {
 				mu = v
 			}
@@ -464,8 +466,16 @@ func blockPairInverseNorm(t []float64, n, ka, da, la, db int, discrete bool) flo
 		}
 		return math.Max(math.Abs(m[3])+math.Abs(m[1]), math.Abs(m[2])+math.Abs(m[0])) / math.Abs(det)
 	}
-	var m, inv [16]float64
+	var m [16]float64
 	blockPairMatrix(m[:], t, n, ka, da, la, db, discrete)
+	return inverseNormInf4(&m)
+}
+
+// inverseNormInf4 returns ‖M⁻¹‖∞ of the row-major 4×4 m (overwritten) by
+// Gauss–Jordan elimination with partial pivoting, +Inf when singular.
+func inverseNormInf4(m *[16]float64) float64 {
+	const N = 4
+	var inv [16]float64
 	for i := range N {
 		inv[i*N+i] = 1
 	}
@@ -515,6 +525,10 @@ func blockPairInverseNorm(t []float64, n, ka, da, la, db int, discrete bool) flo
 // blockPairMatrix writes into m the (da·db)² row-major matrix of
 // X ↦ T_kk·X + X·T_llᵀ (or T_kk·X·T_llᵀ − X) on the da×db block X.
 func blockPairMatrix(m []float64, t []float64, n, ka, da, la, db int, discrete bool) {
+	if da == 2 && db == 2 {
+		blockPairMatrix22((*[16]float64)(m[:16]), t, n, ka, la, discrete)
+		return
+	}
 	N := da * db
 	for i := range da {
 		for j := range db {
@@ -543,11 +557,40 @@ func blockPairMatrix(m []float64, t []float64, n, ka, da, la, db int, discrete b
 	}
 }
 
+// blockPairMatrix22 is blockPairMatrix for two 2×2 blocks, written out
+// (the same operations, so the same values).
+func blockPairMatrix22(m *[16]float64, t []float64, n, ka, la int, discrete bool) {
+	a := [4]float64{t[ka*n+ka], t[ka*n+ka+1], t[(ka+1)*n+ka], t[(ka+1)*n+ka+1]}
+	b := [4]float64{t[la*n+la], t[la*n+la+1], t[(la+1)*n+la], t[(la+1)*n+la+1]}
+	if discrete {
+		for i := range 2 {
+			for j := range 2 {
+				for p := range 2 {
+					for q := range 2 {
+						v := a[i*2+p] * b[j*2+q]
+						if i == p && j == q {
+							v--
+						}
+						m[(i*2+j)*4+p*2+q] = v
+					}
+				}
+			}
+		}
+		return
+	}
+	*m = [16]float64{
+		a[0] + b[0], b[1], a[1], 0,
+		b[2], a[0] + b[3], 0, a[1],
+		a[2], 0, a[3] + b[0], b[1],
+		0, a[2], b[2], a[3] + b[3],
+	}
+}
+
 // lyapunovOperator is L_T restricted to symmetric matrices in scaled-packed
 // coordinates (off-diagonal entries ×√2, so that the packed 2-inner product
 // is the Frobenius one and the adjoint is the solve with Tᵀ).
 type lyapunovOperator struct {
-	s     *schurLyapunov
+	s     schurLyapunov
 	tt    []float64
 	c     []float64
 	n, nn int
@@ -555,7 +598,7 @@ type lyapunovOperator struct {
 
 func newLyapunovOperator(s *schurLyapunov) *lyapunovOperator {
 	n := s.n
-	o := &lyapunovOperator{s: s, n: n, nn: n * (n + 1) / 2, c: make([]float64, n*n)}
+	o := &lyapunovOperator{s: *s, n: n, nn: n * (n + 1) / 2, c: make([]float64, n*n)}
 	if s.discrete {
 		o.tt = make([]float64, n*n)
 		for i := range n {
@@ -860,4 +903,22 @@ func (o *lyapunovOperator) inverseNorm1(stop float64) (norm float64, ok bool) {
 		}
 	}
 	return norm, true
+}
+
+// dotUnrolled returns Σ a[i]·b[i] over len(a) ≤ len(b), four partial sums.
+func dotUnrolled(a, b []float64) float64 {
+	var s0, s1, s2, s3 float64
+	n := len(a)
+	b = b[:n]
+	i := 0
+	for ; i+4 <= n; i += 4 {
+		s0 += a[i] * b[i]
+		s1 += a[i+1] * b[i+1]
+		s2 += a[i+2] * b[i+2]
+		s3 += a[i+3] * b[i+3]
+	}
+	for ; i < n; i++ {
+		s0 += a[i] * b[i]
+	}
+	return (s0 + s1) + (s2 + s3)
 }

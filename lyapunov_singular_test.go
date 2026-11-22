@@ -461,3 +461,78 @@ func TestLyapSolverDiagonalBandNoRetry(t *testing.T) {
 		t.Errorf("Lyap = %v, %v; want nil, ErrSingularEquation", X != nil, err)
 	}
 }
+
+// lyapTridiag is a stable non-normal tridiagonal A: diagonal −0.3·(i+1),
+// subdiagonal sub, superdiagonal 0.1.
+func lyapTridiag(n int, sub float64) *mat.Dense {
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		A.Set(i, i, -float64(i+1)*0.3)
+		if i > 0 {
+			A.Set(i, i-1, sub)
+		}
+		if i < n-1 {
+			A.Set(i, i+1, 0.1)
+		}
+	}
+	return A
+}
+
+// TestLyapResidualExitUnrefined (ESR456 perf re-ruling 1): when the one-sided
+// comparison bound misses τ but bound·‖r‖_F ≤ (τ/2)‖X‖_F for the double-
+// double residual r, the plain solve is certified as it is, bit for bit.
+func TestLyapResidualExitUnrefined(t *testing.T) {
+	const n = 10
+	A := lyapTridiag(n, 1)
+	Q := mat.NewDense(n, n, nil)
+	Q.Set(0, 0, 1)
+	Q.Set(1, 1, 1)
+	X0, s, err := solveLyapunov("Lyap", A, Q, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu, _ := lyapunovComparisonBound(s.t, n, false, nil)
+	if 8*n*mu*lyapunovUnit(A, false) <= lyapunovTau {
+		t.Fatal("one-sided bound certifies; the test needs it to miss")
+	}
+	want := mat.DenseCopyOf(X0)
+	X, err := Lyap(A, Q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.Equal(X, want) {
+		t.Error("X differs from the plain solve: refined, not certified by the residual")
+	}
+	if e := relErr(X, lyapKronBig(A, Q, false)); !(e <= lyapunovTau) {
+		t.Errorf("X rel err %g against 320-bit Kronecker solve", e)
+	}
+}
+
+// TestLyapTwoSidedBoundUnrefined (ESR456 perf re-ruling 2): from order 24
+// the two-sided bound 128·√(μ·μ₁)·ε·s ≤ τ certifies the plain solve where
+// 8·n·μ·ε·s does not.
+func TestLyapTwoSidedBoundUnrefined(t *testing.T) {
+	const n = 100
+	A := lyapTridiag(n, 0.2)
+	Q := mat.NewDense(n, n, nil)
+	for i := range n {
+		Q.Set(i, i, 2)
+	}
+	X0, s, err := solveLyapunov("Lyap", A, Q, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := lyapunovUnit(A, false)
+	mu, _ := lyapunovComparisonBound(s.t, n, false, nil)
+	if 8*n*mu*u <= lyapunovTau || !(128*math.Sqrt(mu*lyapunovAdjointBound(s.t, n, false))*u <= lyapunovTau) {
+		t.Fatal("test needs the one-sided bound to miss and the two-sided one to certify")
+	}
+	want := mat.DenseCopyOf(X0)
+	X, err := Lyap(A, Q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.Equal(X, want) {
+		t.Error("X differs from the plain solve")
+	}
+}

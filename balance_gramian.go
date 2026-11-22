@@ -259,7 +259,7 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, q []float64, ldq int,
 				for l, av := range ai {
 					xv := x[l*n+j]
 					h := float64(av * xv)
-					lo := math.FMA(av, xv, -h)
+					lo := twoProductLo(av, xv, h)
 					s := p + h
 					bb := s - p
 					e += ((p - (s - bb)) + (h - bb)) + lo
@@ -276,7 +276,7 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, q []float64, ldq int,
 				for l, y := range axi {
 					av := aj[l]
 					h := float64(y.hi * av)
-					lo := math.FMA(y.hi, av, -h)
+					lo := twoProductLo(y.hi, av, h)
 					s := p + h
 					bb := s - p
 					e += ((p - (s - bb)) + (h - bb)) + lo + y.lo*av
@@ -307,14 +307,14 @@ func lyapResidualDot2(A *mat.Dense, x, f []float64, k int, q []float64, ldq int,
 			for l, av := range ai {
 				xv := xj[l]
 				h := float64(av * xv)
-				lo := math.FMA(av, xv, -h)
+				lo := twoProductLo(av, xv, h)
 				s := p + h
 				bb := s - p
 				e += ((p - (s - bb)) + (h - bb)) + lo
 				p = s
 				av, xv = aj[l], xi[l]
 				h = float64(av * xv)
-				lo = math.FMA(av, xv, -h)
+				lo = twoProductLo(av, xv, h)
 				s = p + h
 				bb = s - p
 				e += ((p - (s - bb)) + (h - bb)) + lo
@@ -346,7 +346,7 @@ func lyapConstTerm(p, e float64, f []float64, k int, q []float64, ldq, i, j int)
 	for l, fv := range fi {
 		gv := fj[l]
 		h := float64(fv * gv)
-		add(h, math.FMA(fv, gv, -h))
+		add(h, twoProductLo(fv, gv, h))
 	}
 	return p, e
 }
