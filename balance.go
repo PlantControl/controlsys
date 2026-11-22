@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -360,8 +361,18 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // certify, after truncating the directions whose Hankel singular values are
 // at most n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC
 // then keeps the DC gain to within twice the sum of the truncated Hankel
-// singular values. An order above the certified one, or a reduction of that
-// head that is not stable, returns ErrSingularTransform.
+// singular values. An order above the certified one returns
+// ErrSingularTransform.
+//
+// Balanced truncation and singular perturbation are stable for σ_order >
+// σ_order+1 but give no stability margin: an order splitting a near-equal
+// pair can keep a pole within IsStable's boundary band. A reduction that
+// IsStable does not confirm is returned with ErrAccuracyUnverified (with
+// ErrSingularTransform and no model when the transformation is not
+// certified). MatchDC returns ErrSingularA22 when the residualized block
+// (A22, or A22 − I for discrete models) of the balanced realization is
+// singular within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular
+// values equal to rounding.
 func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, error) {
 	if err := requireFiniteSystem("Balred", sys); err != nil {
 		return nil, nil, err
@@ -404,6 +415,9 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 			return nil, nil, err
 		}
 	}
+	if opts.StateProjection == MatchDC && order < h && residualizedBlockSingular(src, order, n) {
+		return nil, nil, fmt.Errorf("Balred: residualized states %d..%d singular within the rounding of the balanced realization: %w", order, h-1, ErrSingularA22)
+	}
 	elim := make([]int, 0, h-order)
 	for i := order; i < h; i++ {
 		elim = append(elim, i)
@@ -412,29 +426,63 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("Balred: %w", err)
 	}
-	if head {
-		if err := requireStableReduction(red, order); err != nil {
-			return nil, nil, err
-		}
-	}
 	propagateIONames(red, sys)
 	if red, err = derivedOp("Balred").model(red, nil); err != nil {
+		return nil, nil, err
+	}
+	if err := reductionStability(red, order, br.HSV, head); err != nil {
+		if errors.Is(err, ErrAccuracyUnverified) {
+			return red, br.HSV, err
+		}
 		return nil, nil, err
 	}
 	return red, br.HSV, nil
 }
 
-// requireStableReduction returns ErrSingularTransform when a reduction of
-// the certified head of a numerically non-minimal model is not stable.
-func requireStableReduction(red *System, order int) error {
+// balanceA22K scales the rounding floor K·n·ε·‖A‖_F below which Balred treats
+// the residualized block as singular.
+const balanceA22K = 4
+
+// residualizedBlockSingular reports whether the block of M = src.A (src.A − I
+// when discrete) on states order.. has σmin ≤ balanceA22K·n·ε·‖M‖_F.
+func residualizedBlockSingular(src *System, order, n int) bool {
+	h, _, _ := src.Dims()
+	r := h - order
+	raw := src.A.RawMatrix()
+	buf := make([]float64, h*h+r*r+r)
+	m, m22, sv := buf[:h*h], buf[h*h:h*h+r*r], buf[h*h+r*r:]
+	copyStrided(m, h, raw.Data, raw.Stride, h, h)
+	if src.IsDiscrete() {
+		for i := range h {
+			m[i*h+i]--
+		}
+	}
+	copyStrided(m22, r, m[order*h+order:], h, r, r)
+	wq := make([]float64, 1)
+	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, r, m22, r, sv, nil, 1, nil, 1, wq, -1)
+	work := make([]float64, int(wq[0]))
+	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, r, m22, r, sv, nil, 1, nil, 1, work, len(work)) {
+		return false
+	}
+	return sv[r-1] <= balanceA22K*float64(n)*eps()*scaledNorm2(m)
+}
+
+// reductionStability returns nil when red passes IsStable. Otherwise a
+// reduction of a certified transformation returns ErrAccuracyUnverified,
+// the caller keeping the model, and one of the certified head of a
+// numerically non-minimal model ErrSingularTransform.
+func reductionStability(red *System, order int, hsv []float64, head bool) error {
 	st, err := red.IsStable()
 	if err != nil {
 		return fmt.Errorf("Balred: %w", err)
 	}
-	if !st {
+	if st {
+		return nil
+	}
+	if head {
 		return fmt.Errorf("Balred: order %d reduction of the certified head is not stable: %w", order, ErrSingularTransform)
 	}
-	return nil
+	return fmt.Errorf("Balred: order %d reduction (σ[%d] = %.17g, σ[%d] = %.17g) has a pole IsStable does not confirm, within its boundary band: %w", order, order-1, hsv[max(order-1, 0)], order, hsv[order], ErrAccuracyUnverified)
 }
 
 // balancedHead returns the leading h states of the balanced realization,

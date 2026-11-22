@@ -182,7 +182,8 @@ var (
 	ErrInvalidOrder = errors.New("controlsys: reduction order out of range")
 
 	// ErrSingularA22 reports a singular fast-state block in singular
-	// perturbation reduction.
+	// perturbation reduction; Balred also reports a block singular within
+	// the rounding of its balanced realization.
 	ErrSingularA22 = errors.New("controlsys: A22 block singular; singular perturbation not applicable")
 
 	// ErrNotSISO reports an operation restricted to single-input (or SISO)
