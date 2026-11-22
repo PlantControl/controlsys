@@ -53,6 +53,13 @@ func FuzzModsep(f *testing.F) {
 			fzSkip(t, "cutoff not representable")
 		}
 		sys := s.System(t, fzSysOpts{})
+		fzDescriptorSepTolSum(t, s, "Modsep", sys, func(d *System) (*System, *System, error) {
+			r, err := Modsep(d, cutoff)
+			if err != nil {
+				return nil, nil, err
+			}
+			return r.Slow, r.Fast, nil
+		})
 		res, err := Modsep(sys, cutoff)
 		fzContract(t, s, "Modsep", res != nil, err)
 		fzErr(t, s, "Modsep", err, ErrSchurFailed)

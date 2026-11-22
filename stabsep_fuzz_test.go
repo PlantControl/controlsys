@@ -17,6 +17,13 @@ func FuzzStabsep(f *testing.F) {
 	}
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
 		sys := s.System(t, fzSysOpts{})
+		fzDescriptorSepTolSum(t, s, "Stabsep", sys, func(d *System) (*System, *System, error) {
+			r, err := Stabsep(d)
+			if err != nil {
+				return nil, nil, err
+			}
+			return r.Stable, r.Unstable, nil
+		})
 		res, err := Stabsep(sys)
 		fzContract(t, s, "Stabsep", res != nil, err)
 		fzErr(t, s, "Stabsep", err, ErrSchurFailed)
@@ -89,6 +96,57 @@ func fzSepTolSum(t *testing.T, s *fzSpec, op string, sys, g1, g2 *System) {
 		}
 		if bar := 10 * unit; d.norm() > bar {
 			t.Fatalf("%s: ‖G − G1 − G2‖_F at %v = %.3g > SepTol bar %.3g\n%s", op, x, d.norm(), bar, s)
+		}
+	}
+}
+
+// fzDescriptorSepTolSum: the model with one algebraic state appended
+// (E = diag(I, 0), A = diag(A, 1), a row and column of ones in B and C,
+// split by the generalized Schur form) either errors or splits within the
+// descriptor SepTol bar at the test points (EUNKOP).
+func fzDescriptorSepTolSum(t *testing.T, s *fzSpec, op string, sys *System, split func(*System) (*System, *System, error)) {
+	t.Helper()
+	if sys.E != nil || s.N == 0 || sys.HasDelay() {
+		return
+	}
+	n, m, p := sys.Dims()
+	A := mat.NewDense(n+1, n+1, nil)
+	E := mat.NewDense(n+1, n+1, nil)
+	B := mat.NewDense(n+1, m, nil)
+	C := mat.NewDense(p, n+1, nil)
+	A.Slice(0, n, 0, n).(*mat.Dense).Copy(sys.A)
+	B.Slice(0, n, 0, m).(*mat.Dense).Copy(sys.B)
+	C.Slice(0, p, 0, n).(*mat.Dense).Copy(sys.C)
+	for i := range n {
+		E.Set(i, i, 1)
+	}
+	A.Set(n, n, 1)
+	for j := range m {
+		B.Set(n, j, 1)
+	}
+	for i := range p {
+		C.Set(i, n, 1)
+	}
+	d, err := NewDescriptor(A, B, C, mat.DenseCopyOf(sys.D), E, sys.Dt)
+	if err != nil {
+		return
+	}
+	g1, g2, err := split(d)
+	if err != nil {
+		return
+	}
+	for _, x := range fzTestPoints(s) {
+		unit, ok := descTolUnitOK(d, x)
+		if !ok {
+			continue
+		}
+		g, a, b := sepEval320(t, d, x), sepEval320(t, g1, x), sepEval320(t, g2, x)
+		var e l2
+		for k := range g {
+			e.addC(g[k] - a[k] - b[k])
+		}
+		if bar := decouplingSepTol * unit; e.norm() > bar {
+			t.Fatalf("%s descriptor: ‖G − G1 − G2‖_F at %v = %.3g > SepTol bar %.3g\n%s", op, x, e.norm(), bar, s)
 		}
 	}
 }
