@@ -400,7 +400,8 @@ func TestLyapunovInverseNormLeadingBlock(t *testing.T) {
 }
 
 // TestLyapAboveCapLastTierUnverified (ESR456): an ill-conditioned but
-// well-posed equation whose comparison bound certifies neither X nor the
+// well-posed equation whose comparison bounds, one- and two-sided
+// (√(μμ₁)·εs·2K ≈ 64–71 > 1, no band skip), certify neither X nor the
 // distance to singular is certified nil at order 16, where the exact
 // computed-inverse norm is formed, and returned with ErrAccuracyUnverified
 // above it.
@@ -415,7 +416,7 @@ func TestLyapAboveCapLastTierUnverified(t *testing.T) {
 		for i := range n {
 			A.Set(i, i, -1-float64(i)/4)
 			for j := i + 1; j < n; j++ {
-				A.Set(i, j, 0.3*rng.NormFloat64())
+				A.Set(i, j, rng.NormFloat64())
 			}
 		}
 		A.Set(0, 0, -1e-4)
