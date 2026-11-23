@@ -22,7 +22,12 @@ import (
 // its generalized Schur parts, which keep the poles of the pencil (A, E),
 // by every method but least squares (matched from the transfer function of
 // the pencil), its I/O delays as for an explicit model; the result then
-// has new state coordinates and no state names. With internal delays, all
+// has new state coordinates and no state names. The split is certified
+// against the descriptor bar: where the stiff and slow modes cannot be
+// separated reliably (a split that fails or is not certified, for ZOH and
+// FOH within half the decoupling budget), C2D returns an error wrapping
+// ErrSchurFailed and a nil model, every method alike; the discretized model
+// itself is not certified. With internal delays, all
 // methods that accept them (ZOH, FOH, Tustin) treat the descriptor part G of H = lft(G, delay) the
 // same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
@@ -55,7 +60,7 @@ func c2dExit(out *System, err error) (*System, error) {
 // fit through a descriptor pencil returns errPencilFitUncertified with the
 // model; only C2D (least squares) reaches it.
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
-	out, err := sys.c2dUnchecked(dt, opts)
+	out, err := sys.c2dUnchecked(dt, opts, true)
 	if err != nil && !errors.Is(err, errPencilFitUncertified) {
 		return nil, err
 	}
@@ -71,23 +76,44 @@ func (sys *System) c2dUnguarded(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
 	}
-	return c2dExit(sys.c2dUnchecked(dt, opts))
+	return c2dExit(sys.c2dUnchecked(dt, opts, false))
 }
 
-func (sys *System) c2dUnchecked(dt float64, opts C2DOptions) (*System, error) {
+// stiffSplitLimit is the ζ″ limit (stiffSplit.within) at which C2D with
+// method takes the stiff split's parts: stiffHoldZeta for ZOH and FOH from
+// C2D, C2DMap and D2D (public), else 1. Step and Lsim discretize through
+// c2dUnguarded and keep 1.
+func stiffSplitLimit(method C2DMethod, public bool) float64 {
+	if public && (method == "" || method == C2DMethodZOH || method == C2DMethodFOH) {
+		return stiffHoldZeta
+	}
+	return 1
+}
+
+// c2dUnchecked is C2D without the check of its result; public reports a
+// call from C2D, C2DMap or D2D (stiffSplitLimit).
+func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*System, error) {
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
+		limit := stiffSplitLimit(opts.Method, public)
 		route := foldInaccurateParts
 		if opts.Method == C2DMethodMatched {
 			route = stiffDescriptorParts
 		}
-		if parts, ok := route(sys); ok {
+		if sp, ok := route(sys); ok {
+			if err := sp.within(limit); err != nil {
+				return nil, err
+			}
 			normalized, err := normalizeC2DOptions(dt, opts)
 			if err != nil {
 				return nil, err
 			}
-			return discretizeStiffDescriptor(sys, parts, dt, normalized)
+			return discretizeStiffDescriptor(sys, sp.parts, dt, normalized)
 		}
-		if px, ok := stiffDescriptorExplicit(sys, opts.Method); ok {
+		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			sys = px
 		}
 	}
@@ -489,16 +515,18 @@ func zohAugmentedExp(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 // cond(E)·ε, up to a stability flip, and one matrix exponential of the
 // stiff pole beside them loses the slow dynamics to the squarings. ok is
 // false when the fold is accurate, E is rank deficient, or the generalized
-// Schur form zeroed the stiff part's E (deflated).
-func stiffDescriptorParts(sys *System) ([]*System, bool) {
+// Schur form zeroed the stiff part's E (deflated). A split that is not
+// certified is ok with sp.err set (stiffSplit): the caller returns that
+// error, never the parts.
+func stiffDescriptorParts(sys *System) (stiffSplit, bool) {
 	if !sys.IsDescriptor() || sys.HasDelay() {
-		return nil, false
+		return stiffSplit{}, false
 	}
-	parts, deflated, ok := stiffExplicitParts(sys)
-	if !ok || deflated {
-		return nil, false
+	sp, ok := stiffExplicitSplit(sys)
+	if !ok || sp.deflated {
+		return stiffSplit{}, false
 	}
-	return parts, true
+	return sp, true
 }
 
 // foldAccurateECond is the 1-norm condition estimate of E below which C2D
@@ -512,59 +540,69 @@ const foldAccurateECond = 1e6
 
 // foldInaccurateParts is stiffDescriptorParts for an E whose LU condition
 // estimate is foldAccurateECond or more.
-func foldInaccurateParts(sys *System) ([]*System, bool) {
+func foldInaccurateParts(sys *System) (stiffSplit, bool) {
 	if !sys.IsDescriptor() {
-		return nil, false
+		return stiffSplit{}, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if lu.Cond() < foldAccurateECond {
-		return nil, false
+		return stiffSplit{}, false
 	}
 	return stiffDescriptorParts(sys)
 }
 
 // splitFastPencil returns explicit parts of the fast descriptor part of
-// stiffPencilSplit, split again by the ordered generalized Schur form into
-// modes with |λ| < qzLargeRatio·ρ and the rest, recursively. Folded whole
-// by svdExplicit, a fast part with two stiff singular values of E keeps its
+// stiffPencilSplit, split again by the ordered generalized Schur form at the
+// stiffCut of the moduli of its fold, nominally |λ| < qzLargeRatio·ρ, into
+// the modes below the cut and the rest, recursively. Folded whole by
+// svdExplicit, a fast part with two stiff singular values of E keeps its
 // slower stiff pole only to ε·‖E⁻¹A‖ (1e-6 relative at |λ| ~ 1e4 beside
-// 1e15), while the generalized Schur form resolves it to ε relative and
-// the triangular fold of the leading block keeps it. ok is false when the
-// fold is exactly singular (deflated).
-func splitFastPencil(fast *System) ([]*System, bool) {
+// 1e15), while the generalized Schur form resolves it to ε relative and the
+// triangular fold of the leading block keeps it. zeta is the largest ζ″ of
+// the certified splits. A split with modes on both sides of its cut that
+// fails or is not certified returns err (errStiffInseparable) with the
+// fold, which only TransferFunction, judging the sum, takes. ok is false
+// when the fold is exactly singular (deflated).
+func splitFastPencil(fast *System) (parts []*System, zeta float64, err error, ok bool) {
 	folded, ok := svdExplicit(fast)
 	if !ok {
-		return nil, false
+		return nil, 0, nil, false
 	}
 	n, _, _ := fast.Dims()
 	if n == 1 {
-		return []*System{folded}, true
+		return []*System{folded}, 0, nil, true
 	}
 	var eig mat.Eigen
 	if !eig.Factorize(folded.A, mat.EigenNone) {
-		return []*System{folded}, true
+		return []*System{folded}, 0, nil, true
 	}
 	rho := 0.0
+	mods := make([]float64, 0, n)
 	for _, l := range eig.Values(nil) {
 		rho = math.Max(rho, cmplx.Abs(l))
+		mods = append(mods, cmplx.Abs(l))
 	}
-	slow, rest, err := decomposeGeneralizedQZ(fast, func(l complex128) bool {
-		return cmplx.Abs(l) < qzLargeRatio*rho
-	}, false)
+	cut := stiffCut(mods, qzLargeRatio*rho)
+	slow, rest, zeta, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool {
+		return cmplx.Abs(l) < cut
+	}, nil)
 	if err != nil {
-		return []*System{folded}, true
+		if !splitsBothSides(mods, cut) {
+			return []*System{folded}, 0, nil, true
+		}
+		return []*System{folded}, 0, errStiffInseparable(), true
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := rest.Dims()
 	if n1 == 0 || n2 == 0 {
-		return []*System{folded}, true
+		return []*System{folded}, 0, nil, true
 	}
-	restParts, ok := splitFastPencil(rest)
+	restParts, rz, rerr, ok := splitFastPencil(rest)
 	if !ok {
-		return []*System{folded}, true
+		return []*System{folded}, 0, nil, true
 	}
-	return append([]*System{slow}, restParts...), true
+	return append([]*System{slow}, restParts...), math.Max(zeta, rz), rerr, true
 }
 
 // discretizeStiffDescriptor discretizes the descriptor sys from its
@@ -616,35 +654,40 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 // otherwise fold E⁻¹A. Upper quasi-triangular, it lets
 // the hold discretize its stiff and slow modes separately
 // (stiffModalHold). Matched is left to newC2DPlan, which keeps the
-// transfer function of the pencil.
-func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
+// transfer function of the pencil. A split not certified within limit
+// (stiffSplit.within) returns its error.
+func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64) (*System, bool, error) {
 	if method == C2DMethodMatched || !sys.IsDescriptor() || !sys.HasDelay() {
-		return nil, false
+		return nil, false, nil
 	}
 	if sys.LFT != nil {
 		if method == C2DMethodImpulse {
-			return nil, false
+			return nil, false, nil
 		}
-		return stiffLFTExplicit(sys)
+		return stiffLFTExplicitWithin(sys, limit)
 	}
-	parts, ok := foldInaccurateParts(ioDelayFreeCore(sys))
+	sp, ok := foldInaccurateParts(ioDelayFreeCore(sys))
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
+	if err := sp.within(limit); err != nil {
+		return nil, false, err
+	}
+	parts := sp.parts
 	for i, part := range parts {
 		if parts[i], ok = realSchurPart(part); !ok {
-			return nil, false
+			return nil, false, nil
 		}
 	}
 	out, err := parallelExplicit(parts)
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	propagateNames(out, sys)
 	out.StateName = nil
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
-	return out, true
+	return out, true, nil
 }
 
 // ioDelayFreeCore returns sys without its I/O delays (Delay, InputDelay,

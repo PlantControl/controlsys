@@ -16,8 +16,19 @@ import (
 // of sys carry over; state names are dropped. ok is false when sys has no
 // internal delays or G does not need the split.
 func stiffLFTExplicit(sys *System) (*System, bool) {
-	out, _, ok := stiffLFTExplicitState(sys, nil)
-	return out, ok
+	out, ok, err := stiffLFTExplicitWithin(sys, 1)
+	return out, ok && err == nil
+}
+
+// stiffLFTExplicitWithin is stiffLFTExplicit returning the error of a
+// split of G not certified within limit (stiffSplit.within), for C2D.
+func stiffLFTExplicitWithin(sys *System, limit float64) (*System, bool, error) {
+	sp, ok, err := newStiffLFTSplitWithin(sys, nil, limit)
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	out, _, ok := sp.explicit()
+	return out, ok, nil
 }
 
 // stiffLFTSampled is stiffLFTExplicitState for a response sampled at the
@@ -29,14 +40,22 @@ func stiffLFTExplicit(sys *System) (*System, bool) {
 // no exact chain, so their fold takes the ZOH discretization too and the
 // parts are kept. The gate decides before the parts are assembled.
 func stiffLFTSampled(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.VecDense, bool) {
-	sp, ok := newStiffLFTSplit(sys, x0)
-	if !ok {
-		return nil, nil, false
+	out, xt, ok, err := stiffLFTSampledWithin(sys, x0, dt)
+	return out, xt, ok && err == nil
+}
+
+// stiffLFTSampledWithin is stiffLFTSampled returning the error of a split
+// of G that is not certified (Lsim).
+func stiffLFTSampledWithin(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.VecDense, bool, error) {
+	sp, ok, err := newStiffLFTSplitWithin(sys, x0, 1)
+	if !ok || err != nil {
+		return nil, nil, ok, err
 	}
 	if sp.foldAccurate(dt) {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
-	return sp.explicit()
+	out, xt, ok := sp.explicit()
+	return out, xt, ok, nil
 }
 
 // stiffLFTSampledAuto is stiffLFTSampled for a response sampled at the
@@ -45,17 +64,18 @@ func stiffLFTSampled(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.V
 // also needs chainFits: its exact delay chain, on the fold's own automatic
 // grid, within the chain budget (delayChainWithinBudget). Over budget the
 // fold takes the ZOH discretization too, after the rejected chain's cost,
-// so the parts are kept.
-func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) float64, chainFits func() bool) (*System, *mat.VecDense, bool) {
-	sp, ok := newStiffLFTSplit(sys, x0)
-	if !ok {
-		return nil, nil, false
+// so the parts are kept. A split of G that is not certified returns its
+// error.
+func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) float64, chainFits func() bool) (*System, *mat.VecDense, bool, error) {
+	sp, ok, err := newStiffLFTSplitWithin(sys, x0, 1)
+	if !ok || err != nil {
+		return nil, nil, false, err
 	}
 	out, xt, ok := sp.explicit()
 	if !ok || sp.foldAccurate(dtOf(out)) && chainFits() {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
-	return out, xt, true
+	return out, xt, true, nil
 }
 
 // delayChainWithinBudget reports whether newDelayChain of the internal-delay
@@ -86,8 +106,8 @@ func (sp *stiffLFTSplit) foldAccurate(dt float64) bool {
 // from the input columns E·x0 and A·x0 appended to G (freePartShare), so
 // the free response of the returned model from xt is that of sys from x0.
 func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (*System, *mat.VecDense, bool) {
-	sp, ok := newStiffLFTSplit(sys, x0)
-	if !ok {
+	sp, ok, err := newStiffLFTSplitWithin(sys, x0, 1)
+	if !ok || err != nil {
 		return nil, nil, false
 	}
 	return sp.explicit()
@@ -104,15 +124,18 @@ type stiffLFTSplit struct {
 	cond  float64
 }
 
-func newStiffLFTSplit(sys *System, x0 *mat.VecDense) (*stiffLFTSplit, bool) {
+// newStiffLFTSplitWithin splits G; ok is false when the split does not apply,
+// and err reports a split not certified within limit (stiffSplit.within),
+// certified with G's own B and C.
+func newStiffLFTSplitWithin(sys *System, x0 *mat.VecDense, limit float64) (*stiffLFTSplit, bool, error) {
 	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
-		return nil, false
+		return nil, false, nil
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	cond := lu.Cond()
 	if cond < foldAccurateECond {
-		return nil, false
+		return nil, false, nil
 	}
 	n, m, _ := sys.Dims()
 	g := conversionAugmentedRational(sys)
@@ -130,14 +153,18 @@ func newStiffLFTSplit(sys *System, x0 *mat.VecDense) (*stiffLFTSplit, bool) {
 		b.SetCol(cols+1, ax.RawVector().Data)
 		g.B, g.D = b, d
 	}
-	parts, ok := stiffDescriptorParts(g)
+	split, ok := stiffDescriptorParts(g)
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
+	if err := split.within(limit); err != nil {
+		return nil, true, err
+	}
+	parts := split.parts
 	if parts[0], ok = realSchurPart(parts[0]); !ok {
-		return nil, false
+		return nil, false, nil
 	}
-	return &stiffLFTSplit{sys: sys, x0: x0, parts: parts, cols: cols, cond: cond}, true
+	return &stiffLFTSplit{sys: sys, x0: x0, parts: parts, cols: cols, cond: cond}, true, nil
 }
 
 // explicit assembles the parts, each in real Schur form, into the model of

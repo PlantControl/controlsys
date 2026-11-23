@@ -177,8 +177,16 @@ type splitTerms struct {
 }
 
 func (d *descriptorBudget) accepted() bool {
+	return d.zeta(1) <= 1
+}
+
+// zeta is the ζ″ of accepted: the plain value when it is at most floor,
+// else the least of it and the ridge-sharpened one, so the parts are
+// accepted at any limit L ≥ floor iff zeta(floor) ≤ L; +Inf when a block
+// failed, NaN when no tier is a number.
+func (d *descriptorBudget) zeta(floor float64) float64 {
 	if d.failed {
-		return false
+		return math.Inf(1)
 	}
 	theta := d.theta
 	if !(theta > 0) {
@@ -188,8 +196,9 @@ func (d *descriptorBudget) accepted() bool {
 	for _, sp := range d.splits {
 		zS, zT, z2 = zS+sp.zS, zT+sp.zT, z2+sp.z2
 	}
-	if secondTierZeta(zS, zT, z2, theta) <= 1 {
-		return true
+	plain := secondTierZeta(zS, zT, z2, theta)
+	if plain <= floor {
+		return plain
 	}
 	zS, zT, z2 = d.zS, d.zT, d.z2
 	for _, sp := range d.splits {
@@ -200,7 +209,11 @@ func (d *descriptorBudget) accepted() bool {
 		}
 		zS, zT, z2 = zS+a, zT+b, z2+c
 	}
-	return secondTierZeta(zS, zT, z2, theta) <= 1
+	ridge := secondTierZeta(zS, zT, z2, theta)
+	if math.IsNaN(plain) || ridge < plain {
+		return ridge
+	}
+	return plain
 }
 
 // secondTierZeta is ζ″ = max(z1, (z1 + θ·z2)/(1 + θ)), z1 = max(zS, zT);

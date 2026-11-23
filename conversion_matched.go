@@ -303,8 +303,12 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 		return nil, fmt.Errorf("matched: internal delays: %w", ErrFeedbackDelay)
 	}
 	if sys.IsDescriptor() {
-		if _, stiff := stiffDescriptorParts(sys); !stiff {
+		sp, stiff := stiffDescriptorParts(sys)
+		if !stiff {
 			return nil, ErrDescriptorUnsupported
+		}
+		if err := sp.within(1); err != nil {
+			return nil, err
 		}
 	}
 	rational, err := sys.transferRational(nil)

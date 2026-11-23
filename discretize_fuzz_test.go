@@ -275,6 +275,7 @@ func FuzzC2DExpm(f *testing.F) {
 		fzAddSeed(f, s)
 	}
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
+		fzStiffStraddleArm(t, s)
 		if s.Discrete {
 			fzSkip(t, "discrete spec")
 		}
@@ -460,6 +461,7 @@ func FuzzC2DTustinPrewarp(f *testing.F) {
 		fzAddSeed(f, s)
 	}
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
+		fzStiffStraddleArm(t, s)
 		if s.Discrete {
 			fzSkip(t, "discrete spec")
 		}
