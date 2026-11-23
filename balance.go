@@ -453,10 +453,11 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // that MatchDC creates. For order < n, a
 // reduction that IsStable does not confirm is returned with
 // ErrAccuracyUnverified (with ErrSingularTransform and no model when the
-// transformation is not certified), as is Balreal's realization at order n. MatchDC returns ErrSingularA22 when the residualized block
-// (A22, or A22 − I for discrete models) of the balanced realization is
-// singular within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular
-// values equal to rounding.
+// transformation is not certified), as is Balreal's realization at order
+// n. MatchDC returns ErrSingularA22 when the residualized block (A22, or
+// A22 − I for discrete models) of the balanced realization is singular
+// within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular values
+// equal to rounding.
 func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, error) {
 	if err := requireFiniteSystem("Balred", sys); err != nil {
 		return nil, nil, err
