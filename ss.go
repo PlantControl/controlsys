@@ -263,10 +263,19 @@ func (sys *System) Poles() ([]complex128, error) {
 // (discrete), with tol = 1e-10·max(1, |p|), so a pole on or within tol of the
 // boundary is not stable. This band is a deliberate departure from MATLAB
 // isstable (https://www.mathworks.com/help/control/ref/dynamicsystem.isstable.html),
-// whose test is strict (Re p < 0, |p| < 1): float64 cannot certify which
-// side of the boundary a pole within the band lies on, and a strict test
-// flips on rounding, giving false "stable" results for marginal poles.
-// IsStabilizable, IsDetectable and Stabsep use the same band. Descriptor poles are those of
+// whose test is strict (Re p < 0, |p| < 1).
+//
+// The poles are float64 eigenvalues, so the verdict holds within rounding,
+// not exactly, and it is not a certificate. For an explicit delay-free
+// model it is the band verdict of the exact poles of some matrix within
+// K·ε·‖A‖_F of A, K = 4(n+5), in the stored scaling or in its diagonally
+// balanced form (the eigensolver balances first). A model whose exact
+// poles lie within that rounding of the band edge may get either answer:
+// a slow pole below ε·‖A‖_F beside a fast one, a lightly damped pole with a
+// large eigenvalue condition number, or a cluster of k nearly defective
+// poles, which moves by about (K·ε)^(1/k)·‖A‖_F. Beyond that rounding the
+// verdict is exact. IsStabilizable, IsDetectable and Stabsep use the same
+// band and rounding. Descriptor poles are those of
 // Poles: eigenvalues from the null space of an E rank deficient by MATLAB's
 // rank tolerance are infinite and do not count. Input, output and I/O delays do not
 // affect stability. Discrete internal delays are absorbed exactly into
@@ -312,7 +321,7 @@ func (sys *System) IsStable() (bool, error) {
 }
 
 // nonStablePoleCount is the number of poles that IsStable classifies as not
-// stable; IsStable is true exactly when it is 0. A continuous model with
+// stable, within IsStable's rounding; IsStable is true exactly when it is 0. A continuous model with
 // internal delays, whose roots IsStable does not count, returns
 // ErrContinuousInternalDelay.
 func (sys *System) nonStablePoleCount() (int, error) {

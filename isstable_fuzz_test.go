@@ -2,7 +2,10 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // FuzzIsStableDelayFree: IsStable of a finite-dimensional model (no internal
@@ -32,6 +35,7 @@ func FuzzIsStableDelayFree(f *testing.F) {
 				}
 				return
 			}
+			fzIsStableWithinRounding(t, s, sys.A, st)
 			fzSkip(t, "verdict unresolvable: pole within error band of stability boundary")
 		}
 		want := s.Unstable() == 0
@@ -55,6 +59,32 @@ func FuzzIsStableDelayFree(f *testing.F) {
 			t.Fatalf("IsStable = %v, want %v\n%s", st, want, s)
 		}
 	})
+}
+
+// fzIsStableWithinRounding (GEFTJ6): for n ≤ 8 with every pole |p| ≤ 0.99,
+// where the integer band test is IsStable's band, a verdict other than the
+// exact one needs a band-edge witness within (n+5)·ε‖M‖_F, M the stored A or
+// its balanced form: IsStable's rounding, K/4 with K = 4(n+5).
+func fzIsStableWithinRounding(t *testing.T, s *fzSpec, a *mat.Dense, st bool) {
+	t.Helper()
+	if s.N == 0 || s.N > 8 {
+		return
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(a, mat.EigenNone) {
+		return
+	}
+	for _, p := range eig.Values(nil) {
+		if cmplx.Abs(p) > 0.99 {
+			return
+		}
+	}
+	if st == exactBandStable(a, !s.Discrete) {
+		return
+	}
+	if d := bandEdgeDistance(a, !s.Discrete); d > float64(s.N+5) {
+		t.Fatalf("IsStable = %v differs from the exact band verdict, band-edge witness %.3g·ε‖M‖_F > %d\n%s", st, d, s.N+5, s)
+	}
 }
 
 // fzSurelyNotStable reports whether the exact float64 A has a root that any

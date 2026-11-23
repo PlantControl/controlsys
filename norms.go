@@ -23,7 +23,10 @@ const NormH2 = 2
 // sys, following MATLAB norm
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.norm.html).
 //
-// The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
+// The H2 norm of an unstable model is +Inf, with a nil error, where unstable
+// means IsStable is false, which holds within rounding of its band: a model
+// within that rounding of the band edge can return +Inf although its exact
+// poles are stable, or a finite norm although they are not. The L∞ norm is the peak gain
 // over frequency without regard to stability; it equals the H∞ norm for
 // stable models and is +Inf when a pole lies on the stability boundary
 // (imaginary axis or unit circle). For continuous internal-delay models the
@@ -54,7 +57,8 @@ func Norm(sys *System, normType float64) (float64, error) {
 	return 0, fmt.Errorf("Norm: normType is %g, want 2 or Inf: %w", normType, ErrInvalidArgument)
 }
 
-// H2Norm computes the H2 norm of a stable LTI system.
+// H2Norm computes the H2 norm of a stable LTI system. A model IsStable
+// rejects, within IsStable's rounding of its band, returns ErrUnstable.
 //
 // For continuous systems with D ≠ 0, or with a delayed direct feedthrough
 // through internal delays, the H2 norm is infinite. Input, output and I/O
@@ -327,7 +331,11 @@ func ldexpExact(data []float64, e int) ([]float64, bool) {
 // Unstable models, including poles on the stability boundary, return
 // norm = omega = +Inf and a nil error, as MATLAB hinfnorm
 // (https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfnorm.html)
-// does. Use Norm(sys, math.Inf(1)) for the L∞ peak gain of an unstable
+// does. The test is IsStable's band on the computed poles, so it holds
+// within IsStable's rounding: a model within that rounding of the band edge
+// can return +Inf although its exact poles are stable, or the finite peak
+// gain of its stored data although they are not. Use Norm(sys, math.Inf(1))
+// for the L∞ peak gain of an unstable
 // model.
 //
 // Input, output and I/O delays do not change the norm. Discrete internal
