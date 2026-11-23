@@ -511,19 +511,14 @@ func stiffPencilSplit(sys *System) (whole, slow, fast *System, zeta float64, err
 	if normA == 0 {
 		return whole, nil, nil, 0, nil, true
 	}
-	n, _, _ := sys.Dims()
-	aRaw, eRaw := sys.A.RawMatrix(), sys.E.RawMatrix()
+	nominal := normA / (normE * qzLargeRatio)
+	cut := nominal
 	var mods []float64
-	if ar, ai, be, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride); ok {
-		for i := range ar {
-			if be[i] != 0 {
-				mods = append(mods, math.Hypot(ar[i], ai[i])/math.Abs(be[i]))
-			}
-		}
-	}
-	cut := stiffCut(mods, normA/(normE*qzLargeRatio))
 	slow, fast, zeta, err = decomposeGeneralizedQZZeta(sys, func(l complex128) bool {
-		return cmplx.Abs(l) < cut
+		return cmplx.Abs(l) < nominal
+	}, func(m []float64) func(complex128) bool {
+		mods, cut = m, stiffCut(m, nominal)
+		return func(l complex128) bool { return cmplx.Abs(l) < cut }
 	})
 	if err != nil {
 		if mods != nil && !splitsBothSides(mods, cut) {

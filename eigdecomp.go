@@ -877,16 +877,18 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 	if certify {
 		mode = qzSplitCertified
 	}
-	group1, group2, _, err = decomposeGeneralizedQZCore(sys, isGroup1, mode)
+	group1, group2, _, err = decomposeGeneralizedQZCore(sys, isGroup1, nil, mode)
 	return group1, group2, err
 }
 
 // decomposeGeneralizedQZZeta is the certified decomposeGeneralizedQZ also
 // returning the split's ζ″ (descriptorBudget.zeta), 0 when the modes do not
 // split, for the stiff splits of stiffExplicitSplit, whose consumers take
-// the parts at their own ζ″ limit.
-func decomposeGeneralizedQZZeta(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, zeta float64, err error) {
-	return decomposeGeneralizedQZCore(sys, isGroup1, qzSplitZeta)
+// the parts at their own ζ″ limit. A non-nil recut maps the moduli |α/β|
+// (β ≠ 0) of the first ordered QZ to the selection actually split, which
+// reorders that QZ only when it moves a mode across the cut.
+func decomposeGeneralizedQZZeta(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool) (group1, group2 *System, zeta float64, err error) {
+	return decomposeGeneralizedQZCore(sys, isGroup1, recut, qzSplitZeta)
 }
 
 // qzSplitMode selects decomposeGeneralizedQZCore's split: uncertified,
@@ -900,7 +902,7 @@ const (
 	qzSplitZeta
 )
 
-func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, mode qzSplitMode) (group1, group2 *System, zeta float64, err error) {
+func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool, mode qzSplitMode) (group1, group2 *System, zeta float64, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, _, _ := sys.Dims()
 	s := make([]float64, n*n)
@@ -918,6 +920,29 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, mod
 	n1, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 	if !ok {
 		return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+	}
+	if recut != nil {
+		mods := make([]float64, 0, n)
+		for i := range n {
+			if beta[i] != 0 {
+				mods = append(mods, math.Hypot(alphar[i], alphai[i])/math.Abs(beta[i]))
+			}
+		}
+		next := recut(mods)
+		moved := false
+		for i := range n {
+			if !qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
+				l := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+				moved = moved || isGroup1(l) != next(l)
+			}
+		}
+		isGroup1 = next
+		if moved {
+			n1, recip, ok = orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
+			if !ok {
+				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+			}
+		}
 	}
 	ninf := 0
 	for i := range n {

@@ -78,7 +78,7 @@ func TestC2DStiffDescriptorInnerSplitRejectErrors(t *testing.T) {
 			mods = append(mods, cmplx.Abs(l))
 		}
 		cut := stiffCut(mods, qzLargeRatio*rho)
-		if _, _, _, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool { return cmplx.Abs(l) < cut }); err != nil && splitsBothSides(mods, cut) && sp.err == nil {
+		if _, _, _, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool { return cmplx.Abs(l) < cut }, nil); err != nil && splitsBothSides(mods, cut) && sp.err == nil {
 			t.Fatalf("inner split at %g fails (%v) but stiffExplicitSplit reports no error", cut, err)
 		}
 	}

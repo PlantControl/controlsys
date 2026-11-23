@@ -586,7 +586,7 @@ func splitFastPencil(fast *System) (parts []*System, zeta float64, err error, ok
 	cut := stiffCut(mods, qzLargeRatio*rho)
 	slow, rest, zeta, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool {
 		return cmplx.Abs(l) < cut
-	})
+	}, nil)
 	if err != nil {
 		if !splitsBothSides(mods, cut) {
 			return []*System{folded}, 0, nil, true
