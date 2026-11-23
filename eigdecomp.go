@@ -918,21 +918,26 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 		return !qzInfinite(ar, ai, b, infTol) && isGroup1(complex(ar/b, ai/b))
 	}
 	n1, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
-	if !ok {
-		return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
-	}
 	if recut != nil {
+		ar, ai, be := alphar, alphai, beta
+		firstFailed := !ok
+		if firstFailed {
+			a, e := sys.A.RawMatrix(), sys.E.RawMatrix()
+			if ar, ai, be, ok = qzEigenvalues(n, a.Data, a.Stride, e.Data, e.Stride); !ok {
+				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+			}
+		}
 		mods := make([]float64, 0, n)
 		for i := range n {
-			if beta[i] != 0 {
-				mods = append(mods, math.Hypot(alphar[i], alphai[i])/math.Abs(beta[i]))
+			if be[i] != 0 {
+				mods = append(mods, math.Hypot(ar[i], ai[i])/math.Abs(be[i]))
 			}
 		}
 		next := recut(mods)
-		moved := false
+		moved := firstFailed
 		for i := range n {
-			if !qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
-				l := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+			if !qzInfinite(ar[i], ai[i], be[i], infTol) {
+				l := complex(ar[i]/be[i], ai[i]/be[i])
 				moved = moved || isGroup1(l) != next(l)
 			}
 		}
@@ -943,6 +948,9 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 			}
 		}
+	}
+	if !ok {
+		return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
 	ninf := 0
 	for i := range n {
