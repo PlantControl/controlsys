@@ -259,3 +259,41 @@ func TestBalred_BelowOrderNReducesUncorrectedRealization(t *testing.T) {
 		})
 	}
 }
+
+// C4GXH2 Addendum 1: an input on IsStable's band edge may be rejected
+// (ErrUnstable, no value) or balanced, nil or with ErrAccuracyUnverified;
+// a value is exactly stable and a similarity of the stored model, and
+// Balred(n) agrees with Balreal.
+func TestBalreal_BandEdgeInputEitherVerdict(t *testing.T) {
+	for _, tc := range []balanceSimCase{balEdgeGateOn, balEdgeGateOff} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := tc.sys(t)
+			br, err := Balreal(sys)
+			red, _, errN := Balred(sys, tc.n, BalredOptions{})
+			for _, e := range []error{ErrUnstable, ErrAccuracyUnverified} {
+				if errors.Is(err, e) != errors.Is(errN, e) {
+					t.Fatalf("Balreal err %v, Balred(n) err %v", err, errN)
+				}
+			}
+			if (err == nil) != (errN == nil) || (br == nil) != (red == nil) {
+				t.Fatalf("Balreal %v, %v; Balred(n) %v, %v", br != nil, err, red != nil, errN)
+			}
+			switch {
+			case errors.Is(err, ErrUnstable):
+				if br != nil {
+					t.Fatal("ErrUnstable with a value")
+				}
+				return
+			case err != nil && !errors.Is(err, ErrAccuracyUnverified):
+				t.Fatalf("Balreal: %v", err)
+			}
+			if br == nil || !sameModel(red, br.Sys) {
+				t.Fatal("no value, or Balred(n) differs from Balreal")
+			}
+			requireBalanceSimilarity(t, "Balreal", sys, br)
+			if k := exactRootsBeyond(t, br.Sys.A, tc.dt > 0, 0); k != 0 {
+				t.Fatalf("Balreal: %d exactly unstable poles", k)
+			}
+		})
+	}
+}

@@ -150,6 +150,9 @@ func FuzzBalred(f *testing.F) {
 		br, err := Balreal(sys)
 		fzContract(t, s, "Balreal", br != nil, err)
 		if errors.Is(err, ErrAccuracyUnverified) {
+			if s.Decidable() {
+				t.Fatalf("Balreal: ErrAccuracyUnverified on a decidable model\n%s", s)
+			}
 			if st, serr := br.Sys.IsStable(); serr != nil || st {
 				t.Fatalf("Balreal: ErrAccuracyUnverified with IsStable %v (%v)\n%s", st, serr, s)
 			}
