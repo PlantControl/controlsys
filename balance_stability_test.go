@@ -75,8 +75,25 @@ var (
 	}
 )
 
-func balredModredOf(t *testing.T, br *BalrealResult, k int, proj StateProjection) (*System, error) {
+// uncorrectedBalancing is the certified balanced realization before
+// Balreal's similarity correction of TL, the source Balred reduces at order
+// < n (C4GXH2 R5).
+func uncorrectedBalancing(t *testing.T, sys *System) *BalrealResult {
 	t.Helper()
+	br, err := balanceUncertified(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newBalanceCert(br).full() {
+		t.Fatal("fixture transformation not certified")
+	}
+	return br
+}
+
+// balredModredOf is Modred of the uncorrected balanced realization of sys.
+func balredModredOf(t *testing.T, sys *System, k int, proj StateProjection) (*System, error) {
+	t.Helper()
+	br := uncorrectedBalancing(t, sys)
 	n := len(br.HSV)
 	var elim []int
 	for i := k; i < n; i++ {
@@ -95,7 +112,8 @@ func sameModel(a, b *System) bool {
 
 // balredStabilityContract checks Balred(order k) on a certified model:
 // above nmin it is ErrSingularTransform with no model; otherwise a nil
-// result passes IsStable and equals Modred of Balreal's realization,
+// result passes IsStable and equals Modred of the uncorrected balanced
+// realization (C4GXH2 R5),
 // ErrAccuracyUnverified carries that same model, which fails IsStable, and
 // the only other outcome is ErrSingularA22 (MatchDC) with no model.
 func balredStabilityContract(t *testing.T, sys *System, br *BalrealResult, k int, proj StateProjection) error {
@@ -126,9 +144,9 @@ func balredStabilityContract(t *testing.T, sys *System, br *BalrealResult, k int
 	if errors.Is(err, ErrUnstable) || errors.Is(err, ErrSingularTransform) {
 		t.Fatalf("Balred(%d, %v): err %v", k, proj, err)
 	}
-	want, werr := balredModredOf(t, br, k, proj)
+	want, werr := balredModredOf(t, sys, k, proj)
 	if werr != nil || !sameModel(red, want) {
-		t.Fatalf("Balred(%d, %v) not bit-identical to Modred of Balreal (%v)", k, proj, werr)
+		t.Fatalf("Balred(%d, %v) not bit-identical to Modred of the uncorrected realization (%v)", k, proj, werr)
 	}
 	st, serr := red.IsStable()
 	if serr != nil || st == unv {
@@ -152,9 +170,9 @@ func TestBalred_BoundaryBandReductionUnverified(t *testing.T) {
 	if red == nil || !slices.Equal(hsv, br.HSV) {
 		t.Fatalf("Balred(1): value %v, HSV %v", red != nil, hsv)
 	}
-	want, err := balredModredOf(t, br, 1, Truncate)
+	want, err := balredModredOf(t, sys, 1, Truncate)
 	if err != nil || !sameModel(red, want) {
-		t.Fatalf("Balred(1) not bit-identical to Modred of Balreal (%v)", err)
+		t.Fatalf("Balred(1) not bit-identical to Modred of the uncorrected realization (%v)", err)
 	}
 	if st, err := red.IsStable(); err != nil || st {
 		t.Fatalf("Balred(1) IsStable = %v, %v; want false", st, err)
@@ -215,9 +233,9 @@ func TestBalred_NearSingularA22AboveFloorUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := balredModredOf(t, br, 1, MatchDC)
+	want, err := balredModredOf(t, sys, 1, MatchDC)
 	if err != nil || !sameModel(red, want) {
-		t.Fatalf("Balred(1) not bit-identical to Modred of Balreal (%v)", err)
+		t.Fatalf("Balred(1) not bit-identical to Modred of the uncorrected realization (%v)", err)
 	}
 	if residualizedBlockSingular(br.Sys, 1, stabRotZ776.n) {
 		t.Fatal("block reported singular")
