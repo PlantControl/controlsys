@@ -132,7 +132,7 @@ func (c *balanceCert) pairingTerms() {
 	c.fe, c.round = scaledNorm2(p), float64(n+1)*eps()*scaledNorm2(q)
 }
 
-// compute evaluates E = TL·TR − I with compensated dot products (FMA
+// compute evaluates E = TL·TR − I with compensated dot products (exact
 // TwoProduct, TwoSum) and its leading-block norms.
 func (c *balanceCert) compute() {
 	n := c.n
@@ -152,7 +152,7 @@ func (c *balanceCert) compute() {
 			for k, x := range row {
 				y := col[k]
 				p := float64(x * y)
-				pe := math.FMA(x, y, -p)
+				pe := twoProductLo(x, y, p)
 				t := float64(s + p)
 				z := float64(t - s)
 				err += float64(float64(s-float64(t-z))+float64(p-z)) + pe
