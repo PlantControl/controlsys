@@ -442,9 +442,9 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // AB09AD and AB09BD likewise cap the order there). When it is not, Balred
 // reduces the leading balanced states it does certify, after truncating
 // the directions whose Hankel singular values are at most n·ε·σ₁ or,
-// failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC then keeps the DC gain to within twice the sum of the truncated Hankel
-// singular values. An order above the certified one returns
-// ErrSingularTransform.
+// failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC then keeps the
+// DC gain to within twice the sum of the truncated Hankel singular values.
+// An order above the certified one returns ErrSingularTransform.
 //
 // Balanced truncation and singular perturbation are stable for σ_order >
 // σ_order+1 but give no stability margin: an order splitting a near-equal
