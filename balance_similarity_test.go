@@ -137,8 +137,11 @@ func TestBalreal_RealizationIsSimilarityOfStoredModel(t *testing.T) {
 				t.Fatalf("Balreal: %v", err)
 			}
 			requireBalanceSimilarity(t, "Balreal", sys, br)
-			if f, tau := exactCertNorm(br.TL, br.TR), certTau(br.HSV); f > tau {
-				t.Fatalf("exact ‖TL·TR − I‖ = %.3g > τ = %.3g", f, tau)
+			var q mat.Dense
+			q.Mul(absDense(br.TL), absDense(br.TR))
+			n, _, _ := sys.Dims()
+			if f, r := exactCertNorm(br.TL, br.TR), float64(n+1)*eps()*mat.Norm(&q, 2); f > balanceSimilarityK*r {
+				t.Fatalf("exact ‖TL·TR − I‖ = %.3g > K·(n+1)·ε·‖|TL|·|TR|‖ = %.3g", f, balanceSimilarityK*r)
 			}
 		})
 	}
