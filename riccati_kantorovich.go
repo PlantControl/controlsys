@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -20,7 +21,9 @@ import (
 // arithmetic, the float64 step within newtonTol, and both 0.17 and 0.2
 // off the 320-bit solution. Where W is not positive definite in float64
 // (cheap control) the test is not formed and reports false: X keeps the
-// certificate it had.
+// certificate it had. P comes from DLyap's certified solve: a Stein
+// operator singular within rounding, or a P DLyap cannot certify, leaves
+// h unbounded and the test failed.
 func newtonUnproven(A, B *mat.Dense, opts *RiccatiOpts, red *reducedInputs, X, K *mat.Dense, step float64) bool {
 	h, ok := newtonKantorovich(A, B, opts, red, X, K, step)
 	return ok && !(h <= 0.5)
@@ -78,7 +81,10 @@ func newtonKantorovich(A, B *mat.Dense, opts *RiccatiOpts, red *reducedInputs, X
 		return 0, false
 	}
 	bwb.Mul(b, &wb)
-	P, err := dlyap(mat.DenseCopyOf(acl.T()), eyeDense(n), nil)
+	P, err := dlyapChecked(mat.DenseCopyOf(acl.T()), eyeDense(n), nil)
+	if errors.Is(err, ErrSingularEquation) || errors.Is(err, ErrAccuracyUnverified) {
+		return math.Inf(1), true
+	}
 	if err != nil {
 		return 0, false
 	}

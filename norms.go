@@ -62,7 +62,18 @@ func Norm(sys *System, normType float64) (float64, error) {
 // exactly; continuous strictly proper internal-delay models return
 // ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
 // A norm beyond float64 range returns ErrOverflow.
+//
+// The observability gramian comes from Lyap or DLyap and carries their
+// certificate: a gramian equation within the singular band returns
+// ErrSingularEquation, an uncertified one the norm with
+// ErrAccuracyUnverified.
 func H2Norm(sys *System) (float64, error) {
+	return h2Norm(sys, false)
+}
+
+// h2Norm is H2Norm, with the gramian's Lyapunov certificate skipped when
+// uncertified is set (H2Syn's closed-loop Gamma when H2Norm bands).
+func h2Norm(sys *System, uncertified bool) (float64, error) {
 	if err := requireFiniteSystem("H2Norm", sys); err != nil {
 		return 0, err
 	}
@@ -79,6 +90,7 @@ func H2Norm(sys *System) (float64, error) {
 		return 0, err
 	}
 	policy := newEnergyAnalysisPolicy(sys)
+	policy.uncertified = uncertified
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 || m == 0 || p == 0 {
@@ -102,6 +114,7 @@ func H2Norm(sys *System) (float64, error) {
 
 	B, eB := pow2Scaled(sys.B)
 	X, eC, err := policy.scaledGramian(GramObservability)
+	err, unv := unverifiedLyapunov(err)
 	if err != nil {
 		return 0, err
 	}
@@ -129,6 +142,9 @@ func H2Norm(sys *System) (float64, error) {
 	}
 	if math.IsInf(norm, 0) || math.IsNaN(norm) {
 		return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+	}
+	if unv != nil {
+		return norm, fmt.Errorf("H2Norm: %w", unv)
 	}
 	return norm, nil
 }
@@ -158,7 +174,9 @@ func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
 // Discrete internal delays are absorbed exactly, so the result has one value
 // per original state plus one per delay sample. Continuous internal-delay
 // models return ErrContinuousInternalDelay. A value beyond float64 range
-// returns ErrOverflow.
+// returns ErrOverflow. The gramians carry Lyap's (DLyap's) certificate: an
+// equation within its singular band returns ErrSingularEquation, an
+// uncertified gramian the values with ErrAccuracyUnverified.
 func HSV(sys *System) ([]float64, error) {
 	if err := requireFiniteSystem("HSV", sys); err != nil {
 		return nil, err
@@ -181,10 +199,12 @@ func HSV(sys *System) ([]float64, error) {
 	}
 
 	Wc, eB, err := policy.scaledGramian(GramControllability)
+	err, unvC := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, err
 	}
 	Wo, eC, err := policy.scaledGramian(GramObservability)
+	err, unvO := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +217,9 @@ func HSV(sys *System) ([]float64, error) {
 		if !isFinite(s) {
 			return nil, fmt.Errorf("HSV: Hankel singular value exceeds float64 range: %w", ErrOverflow)
 		}
+	}
+	if unv := cmp.Or(unvC, unvO); unv != nil {
+		return hsv, fmt.Errorf("HSV: %w", unv)
 	}
 	return hsv, nil
 }

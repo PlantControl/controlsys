@@ -12,6 +12,8 @@ import (
 type energyAnalysisPolicy struct {
 	sys     *System
 	n, m, p int
+	// uncertified solves the gramian equations without Lyap's certificate.
+	uncertified bool
 }
 
 func newEnergyAnalysisPolicy(sys *System) energyAnalysisPolicy {
@@ -55,16 +57,17 @@ func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, e
 }
 
 // scaledGramian returns X and e with the typ gramian of sys equal to X·4ᵉ.
+// An error wrapping ErrAccuracyUnverified comes with X (see Lyap).
 func (p energyAnalysisPolicy) scaledGramian(typ GramType) (*mat.Dense, int, error) {
 	Aarg, Q, e, err := p.gramianInputs(typ)
 	if err != nil {
 		return nil, 0, err
 	}
 	X, err := p.solveLyapunov(Aarg, Q)
-	if err != nil {
+	if X == nil {
 		return nil, 0, err
 	}
-	return X, e, nil
+	return X, e, err
 }
 
 func (p energyAnalysisPolicy) controllabilityEnergy() (*mat.Dense, int) {
@@ -123,10 +126,21 @@ func ldexpDense(M *mat.Dense, e int) {
 }
 
 func (p energyAnalysisPolicy) solveLyapunov(A, Q *mat.Dense) (*mat.Dense, error) {
-	if p.sys.IsContinuous() {
-		return Lyap(A, Q, nil)
+	op, solve, plain := "Lyap", Lyap, lyap
+	if !p.sys.IsContinuous() {
+		op, solve, plain = "DLyap", DLyap, dlyap
 	}
-	return DLyap(A, Q, nil)
+	if !p.uncertified {
+		return solve(A, Q, nil)
+	}
+	X, err := plain(A, Q, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	if err := finiteDense(op, "X", X, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return X, nil
 }
 
 func transposeSquareData(data []float64, stride, n int) []float64 {

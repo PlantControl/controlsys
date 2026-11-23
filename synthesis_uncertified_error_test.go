@@ -452,8 +452,13 @@ func TestSynthesisUnverifiedPartialResult(t *testing.T) {
 	if res.CL == nil {
 		t.Fatal("H2Syn: partial result without CL")
 	}
-	if g, err := H2Norm(res.CL); err != nil || math.Float64bits(g) != math.Float64bits(res.Gamma) {
-		t.Errorf("H2Syn: Gamma %v, H2Norm of CL %v (%v)", res.Gamma, g, err)
+	// ESR456: the cheap-control closed loop's gramian equation is within the
+	// singular band, so H2Norm errors and Gamma is the uncertified norm.
+	if g, err := h2Norm(res.CL, true); err != nil || math.Float64bits(g) != math.Float64bits(res.Gamma) {
+		t.Errorf("H2Syn: Gamma %v, uncertified H2 norm of CL %v (%v)", res.Gamma, g, err)
+	}
+	if _, err := H2Norm(res.CL); !errors.Is(err, ErrSingularEquation) {
+		t.Errorf("H2Norm of CL: %v, want ErrSingularEquation", err)
 	}
 
 	sys, qxu, _ := weakBStallPlant(t)

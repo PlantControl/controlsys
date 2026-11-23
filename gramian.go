@@ -44,7 +44,10 @@ const (
 // MATLAB gram, models with internal delays (either domain) return
 // ErrInternalDelayUnsupported; absorb or approximate the delays first. A
 // gramian (or factor) entry beyond float64 range returns ErrOverflow; the
-// factor types can succeed where the gramian itself overflows.
+// factor types can succeed where the gramian itself overflows. The gramian
+// carries Lyap's (DLyap's) certificate: an equation within its singular
+// band returns ErrSingularEquation, an uncertified gramian (or factor) is
+// returned with ErrAccuracyUnverified.
 // See https://www.mathworks.com/help/control/ref/statespacemodel.gram.html.
 func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := requireFiniteSystem("Gram", sys); err != nil {
@@ -76,15 +79,19 @@ func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 		return nil, fmt.Errorf("Gram: %w", err)
 	}
 	X, e, err := policy.scaledGramian(base)
+	err, unv := unverifiedLyapunov(err)
 	if err != nil {
 		return nil, fmt.Errorf("Gram: %w", err)
+	}
+	if unv != nil {
+		unv = fmt.Errorf("Gram: %w", unv)
 	}
 	if typ == base {
 		ldexpDense(X, 2*e)
 		if err := finiteDense("Gram", "gramian", X, ErrOverflow); err != nil {
 			return nil, err
 		}
-		return X, nil
+		return X, unv
 	}
 	R, err := gramFactor(X, n)
 	if err != nil {
@@ -94,7 +101,7 @@ func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := finiteDense("Gram", "factor", R, ErrOverflow); err != nil {
 		return nil, err
 	}
-	return R, nil
+	return R, unv
 }
 
 // gramFactor returns an upper triangular R with X = Rᵀ·R for a symmetric

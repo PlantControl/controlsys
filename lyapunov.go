@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -22,6 +23,7 @@ type LyapunovWorkspace struct {
 	blocks     []int
 	blockStart []int
 	buf        []float64
+	cmp        []float64
 }
 
 // LyapunovOpts configures Lyap and DLyap; a nil *LyapunovOpts allocates
@@ -80,54 +82,113 @@ func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 //
 // A is n×n, Q is n×n symmetric. Returns X (n×n symmetric). An Inf or NaN
 // entry of A or Q returns ErrInvalidArgument, of X ErrOverflow.
+//
+// A nil error certifies X as the unique solution to relative accuracy
+// 1e-10. As MATLAB lyap errors when the solution does not exist or is not
+// unique, Lyap returns ErrSingularEquation when the operator X ↦ A·X + X·Aᵀ
+// is singular or within K·ε·2‖A‖_F of singular (K = 4(n+5)), the rounding
+// of the stored A, both in the stored scaling and in its diagonally
+// balanced form D⁻¹·A·D (power-of-two D; the balanced equation is tried
+// only when the stored one fails and balancing shrinks ‖A‖_F by 4 or
+// more, or the stored certificate failed with eigenvalue pairs apart beyond
+// the band in the balanced units): its eigenvalues λᵢ + λⱼ = 0 for some
+// pair, or nearly so in a sense rounding can reach. A nonsingular but
+// ill-conditioned equation is refined from double-double residuals; when
+// refinement stalls above 1e-10, Lyap returns its best X with
+// ErrAccuracyUnverified.
 func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
-	X, err := lyapChecked(A, Q, opts)
-	if err != nil {
-		return nil, err
-	}
-	if err := finiteDense("Lyap", "X", X, ErrOverflow); err != nil {
-		return nil, err
-	}
-	return X, nil
+	return lyapunovExported("Lyap", A, Q, opts, false)
 }
 
-// lyapChecked is Lyap without the result check, for Covar, whose continuous
-// feedthrough entries are infinite whatever X holds.
+// lyapunovExported is Lyap or DLyap: lyapunovChecked plus the result check.
+func lyapunovExported(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bool) (*mat.Dense, error) {
+	X, err := lyapunovChecked(op, A, Q, opts, discrete)
+	if X == nil {
+		return nil, err
+	}
+	if ferr := finiteDense(op, "X", X, ErrOverflow); ferr != nil {
+		return nil, ferr
+	}
+	return X, err
+}
+
+// lyapunovChecked validates A and Q and returns the certified X (see Lyap),
+// with an error that is nil, wraps ErrAccuracyUnverified (X non-nil) or any
+// other (X nil). It skips the finiteness check of X, for Covar, whose
+// continuous feedthrough entries are infinite whatever X holds.
+func lyapunovChecked(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bool) (*mat.Dense, error) {
+	if err := requireFiniteDense(op, "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense(op, "Q", Q); err != nil {
+		return nil, err
+	}
+	X, s, err := solveLyapunov(op, A, Q, opts, discrete)
+	var rawT []float64
+	switch {
+	case err == nil && lyapunovUncertifiedBaseline:
+		return X, nil
+	case err == nil:
+		if err = certifyLyapunov(&s, A, Q, X.RawMatrix().Data, nil); err == nil {
+			return X, nil
+		}
+		rawT = s.t
+	case !errors.Is(err, ErrSingularEquation) || lyapunovUncertifiedBaseline:
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	unv := errors.Is(err, ErrAccuracyUnverified)
+	if !unv && !errors.Is(err, ErrSingularEquation) {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	if Xb, errb, ok := balancedLyapunov(A, Q, discrete, rawT); ok {
+		if errb == nil || (!unv && errors.Is(errb, ErrAccuracyUnverified)) {
+			X, err, unv = Xb, errb, errb != nil
+		}
+	}
+	if err == nil {
+		return X, nil
+	}
+	if unv {
+		return X, fmt.Errorf("%s: %w", op, err)
+	}
+	return nil, fmt.Errorf("%s: %w", op, err)
+}
+
+// lyapChecked is Lyap without the result check (see lyapunovChecked).
 func lyapChecked(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
-	if err := requireFiniteDense("Lyap", "A", A); err != nil {
-		return nil, err
-	}
-	if err := requireFiniteDense("Lyap", "Q", Q); err != nil {
-		return nil, err
-	}
-	X, err := lyap(A, Q, opts)
-	if err != nil {
-		return nil, fmt.Errorf("Lyap: %w", err)
-	}
-	return X, nil
+	return lyapunovChecked("Lyap", A, Q, opts, false)
 }
 
+// lyap is the uncertified Lyap solve, for callers that verify X themselves.
 func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
+	X, _, err := solveLyapunov("Lyap", A, Q, opts, false)
+	return X, err
+}
+
+// solveLyapunov solves A·X + X·Aᵀ + Q = 0 (discrete: A·X·Aᵀ − X + Q = 0) on
+// the real Schur form of A, which it returns for the certificate; its only
+// singularity tests are those on the Schur diagonal.
+func solveLyapunov(op string, A, Q *mat.Dense, opts *LyapunovOpts, discrete bool) (*mat.Dense, schurLyapunov, error) {
 	problem, err := newLyapunovProblem(A, Q, opts)
 	if err != nil {
-		return nil, err
+		return nil, schurLyapunov{}, err
 	}
 	n := problem.n
 	if n == 0 {
-		return nil, fmt.Errorf("Lyap: A has no rows: %w", ErrDimensionMismatch)
+		return nil, schurLyapunov{}, fmt.Errorf("%s: A has no rows: %w", op, ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
-	s, err := newSchurLyapunov(A, n, false, ws)
+	s, err := newSchurLyapunov(A, n, discrete, ws)
 	if err != nil {
-		return nil, err
+		return nil, schurLyapunov{}, err
 	}
 	w := reuseSlice(&ws, n*n, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
 	qRaw := Q.RawMatrix()
 	if err := s.solve(qRaw.Data, qRaw.Stride, w); err != nil {
-		return nil, err
+		return nil, schurLyapunov{}, err
 	}
-	return mat.NewDense(n, n, w), nil
+	return mat.NewDense(n, n, w), s, nil
 }
 
 // schurLyapunov holds the real Schur form A = U·T·Uᵀ of a Lyapunov equation,
@@ -220,53 +281,24 @@ func (s *schurLyapunov) solve(q []float64, ldq int, w []float64) error {
 //
 // A is n×n, Q is n×n symmetric. Returns X (n×n symmetric). An Inf or NaN
 // entry of A or Q returns ErrInvalidArgument, of X ErrOverflow.
+//
+// The certificate and errors are those of Lyap, for the Stein operator
+// X ↦ A·X·Aᵀ − X (singular when λᵢ·λⱼ = 1 for some eigenvalue pair) and
+// the scale ‖A‖_F² + 1 in place of 2‖A‖_F, as MATLAB dlyap errors when the
+// solution does not exist or is not unique.
 func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
-	X, err := dlyapChecked(A, Q, opts)
-	if err != nil {
-		return nil, err
-	}
-	if err := finiteDense("DLyap", "X", X, ErrOverflow); err != nil {
-		return nil, err
-	}
-	return X, nil
+	return lyapunovExported("DLyap", A, Q, opts, true)
 }
 
-// dlyapChecked is DLyap without the result check, for Covar.
+// dlyapChecked is DLyap without the result check (see lyapunovChecked).
 func dlyapChecked(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
-	if err := requireFiniteDense("DLyap", "A", A); err != nil {
-		return nil, err
-	}
-	if err := requireFiniteDense("DLyap", "Q", Q); err != nil {
-		return nil, err
-	}
-	X, err := dlyap(A, Q, opts)
-	if err != nil {
-		return nil, fmt.Errorf("DLyap: %w", err)
-	}
-	return X, nil
+	return lyapunovChecked("DLyap", A, Q, opts, true)
 }
 
+// dlyap is the uncertified DLyap solve, for callers that verify X themselves.
 func dlyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
-	problem, err := newLyapunovProblem(A, Q, opts)
-	if err != nil {
-		return nil, err
-	}
-	n := problem.n
-	if n == 0 {
-		return nil, fmt.Errorf("DLyap: A has no rows: %w", ErrDimensionMismatch)
-	}
-	ws := problem.ws
-
-	s, err := newSchurLyapunov(A, n, true, ws)
-	if err != nil {
-		return nil, err
-	}
-	w := reuseSlice(&ws, n*n, func(w *LyapunovWorkspace) *[]float64 { return &w.w })
-	qRaw := Q.RawMatrix()
-	if err := s.solve(qRaw.Data, qRaw.Stride, w); err != nil {
-		return nil, err
-	}
-	return mat.NewDense(n, n, w), nil
+	X, _, err := solveLyapunov("DLyap", A, Q, opts, true)
+	return X, err
 }
 
 // solveDiscreteSchurLyap solves T*Y*T' - Y = C in-place (C overwritten with Y).
