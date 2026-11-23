@@ -77,7 +77,9 @@ func TestD2DExponentialOverflowReturnsError(t *testing.T) {
 // F=[-1,c,1;0,-2,1;0,0,-1], W(1,1,1e-13), stream 777 at c=3e10 is the
 // undetermined pencil of 7AAOBX, whose split fails on rounding; which seeds
 // overflow depends on the arch, so the seeds are swept and only the contract
-// is asserted: value without Inf/NaN in any matrix, or ErrOverflow (4MJ46B).
+// is asserted: value without Inf/NaN in any matrix, ErrOverflow (4MJ46B),
+// or ErrSchurFailed with a nil value on the seeds whose stiff split fails
+// (SCPYGG): the pencil is undetermined, so either error is honest.
 // A fractional input delay reaches FOH overflow in the LFT matrices alone.
 func TestC2DStiffDescriptorValueIsFiniteOrError(t *testing.T) {
 	const c, dt = 3e10, 0.1
@@ -92,7 +94,7 @@ func TestC2DStiffDescriptorValueIsFiniteOrError(t *testing.T) {
 		{"foh input delay", []float64{0.25}, C2DMethodFOH},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			overflowed := 0
+			overflowed, inseparable := 0, 0
 			for seed := range uint64(60) {
 				sys := stiffRotatedDescriptor(t, rand.New(rand.NewPCG(seed, 777)),
 					[]float64{-1, c, 1, 0, -2, 1, 0, 0, -1},
@@ -100,7 +102,10 @@ func TestC2DStiffDescriptorValueIsFiniteOrError(t *testing.T) {
 				sys.InputDelay = tc.delay
 				d, err := sys.C2D(dt, C2DOptions{Method: tc.m})
 				switch {
-				case errors.Is(err, ErrOverflow):
+				case errors.Is(err, ErrOverflow), errors.Is(err, ErrSchurFailed):
+					if errors.Is(err, ErrSchurFailed) {
+						inseparable++
+					}
 					overflowed++
 					if d != nil {
 						t.Errorf("seed %d: value with error %v", seed, err)
@@ -113,9 +118,12 @@ func TestC2DStiffDescriptorValueIsFiniteOrError(t *testing.T) {
 					}
 				}
 			}
-			t.Logf("%d of 60 seeds overflow", overflowed)
+			t.Logf("%d of 60 seeds overflow or do not split (%d)", overflowed, inseparable)
 			if overflowed == 0 {
-				t.Error("no seed overflows; the sweep no longer reaches the case")
+				t.Error("no seed overflows or fails to split; the sweep no longer reaches the case")
+			}
+			if inseparable > 35 {
+				t.Errorf("%d of 60 seeds do not split, want at most 35", inseparable)
 			}
 		})
 	}
