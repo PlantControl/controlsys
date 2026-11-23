@@ -438,10 +438,9 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // balanced realization before Balreal's similarity correction of TL; the two
 // differ by at most the certified tolerance on TL·TR − I. An order that
 // would keep part of a tail of Hankel singular values at or below n·ε·σ₁
-// returns ErrSingularTransform naming the
-// numerically minimal order (SLICOT AB09AD and AB09BD likewise cap the order
-// there). When it is not, Balred reduces the leading balanced states it does
-// certify, after truncating the directions whose Hankel singular values are
+// returns ErrSingularTransform naming the numerically minimal order (SLICOT
+// AB09AD and AB09BD likewise cap the order there). When it is not, Balred
+// reduces the leading balanced states it does certify, after truncating the directions whose Hankel singular values are
 // at most n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC
 // then keeps the DC gain to within twice the sum of the truncated Hankel
 // singular values. An order above the certified one returns
