@@ -55,7 +55,8 @@ type BalrealResult struct {
 // both equal to diag(σ₁, σ₂, …, σₙ) where σᵢ are the Hankel singular values.
 //
 // Unlike MATLAB, which balances the stable part and reports Inf for unstable
-// modes, an unstable model returns ErrUnstable. Minimality is decided
+// modes, an unstable model returns ErrUnstable, decided by IsStable within
+// its rounding of the band. Minimality is decided
 // exactly on the stored data: a model whose controllability or
 // observability matrix is rank deficient over the rationals returns
 // ErrNotMinimal, and ErrMinimalityUndetermined when the exact test exceeds
@@ -366,7 +367,9 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 //
 // Balanced truncation and singular perturbation are stable for σ_order >
 // σ_order+1 but give no stability margin: an order splitting a near-equal
-// pair can keep a pole within IsStable's boundary band. For order < n, a
+// pair can keep a pole within IsStable's boundary band, or within IsStable's
+// rounding of it, as when a slow pole lies below ε·‖A‖_F beside a fast one
+// that MatchDC creates. For order < n, a
 // reduction that IsStable does not confirm is returned with
 // ErrAccuracyUnverified (with ErrSingularTransform and no model when the
 // transformation is not certified); order n returns Balreal's realization
@@ -483,7 +486,7 @@ func reductionStability(red *System, order int, hsv []float64, head bool) error 
 	if head {
 		return fmt.Errorf("Balred: order %d reduction of the certified head is not stable: %w", order, ErrSingularTransform)
 	}
-	return fmt.Errorf("Balred: order %d reduction (σ[%d] = %.17g, σ[%d] = %.17g) has a pole IsStable does not confirm, within its boundary band: %w", order, order-1, hsv[max(order-1, 0)], order, hsv[order], ErrAccuracyUnverified)
+	return fmt.Errorf("Balred: order %d reduction (σ[%d] = %.17g, σ[%d] = %.17g) has a pole IsStable does not confirm, within its boundary band or its rounding of it: %w", order, order-1, hsv[max(order-1, 0)], order, hsv[order], ErrAccuracyUnverified)
 }
 
 // balancedHead returns the leading h states of the balanced realization,

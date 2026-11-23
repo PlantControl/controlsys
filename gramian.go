@@ -39,8 +39,8 @@ const (
 // The factor types return an upper triangular R with W = Rᵀ·R; a semidefinite
 // gramian (uncontrollable or unobservable model) still has such a factor.
 //
-// An unknown type returns ErrInvalidArgument, an unstable model
-// ErrUnstableGramian and a model without states ErrDimensionMismatch. Like
+// An unknown type returns ErrInvalidArgument, an unstable model (IsStable
+// false, within its rounding of the band) ErrUnstableGramian and a model without states ErrDimensionMismatch. Like
 // MATLAB gram, models with internal delays (either domain) return
 // ErrInternalDelayUnsupported; absorb or approximate the delays first. A
 // gramian (or factor) entry beyond float64 range returns ErrOverflow; the
