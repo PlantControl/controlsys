@@ -74,8 +74,8 @@ type BalrealResult struct {
 // TL·TR = I to the rounding of its terms and Sys is the similarity of the
 // stored model by TR: ‖Sys.A − TR⁻¹·A·TR‖_F is within the rounding of the
 // products forming it. A realization that IsStable does not confirm is
-// returned with ErrAccuracyUnverified. Gramians are
-// refined against the stored data; when the Lyapunov equations are too
+// returned with ErrAccuracyUnverified. Gramians are refined against the
+// stored data; when the Lyapunov equations are too
 // ill-conditioned for that, Balreal returns ErrSingularEquation. A model
 // with no states returns ErrDimensionMismatch, since TL and TR cannot be
 // formed. A result entry beyond float64 range returns ErrOverflow.
@@ -430,14 +430,15 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // https://www.mathworks.com/help/control/ref/dynamicsystem.balred.html.
 // hsv holds the Hankel singular values (MATLAB info.HSV). order must be in
 // [0, n]; order n returns the balanced realization of Balreal, with its
-// error, and order 0 a static gain. opts.StateProjection selects MatchDC (the zero value, MATLAB
-// default) or Truncate. sys must satisfy the requirements of Balreal, except
-// its certificate of TL·TR = I.
+// error, and order 0 a static gain. opts.StateProjection selects MatchDC
+// (the zero value, MATLAB default) or Truncate. sys must satisfy the
+// requirements of Balreal, except its certificate of TL·TR = I.
 //
 // When the transformation is certified, Balred at order < n reduces the
 // balanced realization before Balreal's similarity correction of TL; the two
-// differ by at most the certified tolerance on TL·TR − I. An order that would keep part of a tail of Hankel singular
-// values at or below n·ε·σ₁ returns ErrSingularTransform naming the
+// differ by at most the certified tolerance on TL·TR − I. An order that
+// would keep part of a tail of Hankel singular values at or below n·ε·σ₁
+// returns ErrSingularTransform naming the
 // numerically minimal order (SLICOT AB09AD and AB09BD likewise cap the order
 // there). When it is not, Balred reduces the leading balanced states it does
 // certify, after truncating the directions whose Hankel singular values are
