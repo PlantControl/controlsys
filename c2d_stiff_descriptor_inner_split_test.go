@@ -2,6 +2,8 @@ package controlsys
 
 import (
 	"errors"
+	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -64,6 +66,21 @@ func TestC2DStiffDescriptorInnerSplitRejectErrors(t *testing.T) {
 	sp, ok := stiffExplicitSplit(sys)
 	if !ok {
 		t.Fatal("not on the stiff route")
+	}
+	if _, slow, fast, _, err, ok := stiffPencilSplit(sys); ok && err == nil && slow != nil && fast != nil {
+		folded, ok := svdExplicit(fast)
+		if !ok {
+			t.Fatal("svdExplicit of the fast part failed")
+		}
+		rho, mods := 0.0, []float64(nil)
+		for _, l := range eigenvaluesOf(t, folded.A) {
+			rho = math.Max(rho, cmplx.Abs(l))
+			mods = append(mods, cmplx.Abs(l))
+		}
+		cut := stiffCut(mods, qzLargeRatio*rho)
+		if _, _, _, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool { return cmplx.Abs(l) < cut }); err != nil && splitsBothSides(mods, cut) && sp.err == nil {
+			t.Fatalf("inner split at %g fails (%v) but stiffExplicitSplit reports no error", cut, err)
+		}
 	}
 	if sp.err != nil {
 		if !errors.Is(sp.err, ErrSchurFailed) {
