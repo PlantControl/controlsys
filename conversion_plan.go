@@ -28,9 +28,17 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	var err error
 	var lsSlow *System
 	if opts.Method == C2DMethodLeastSquares {
-		lsSlow = leastSquaresPencilSlow(sys)
+		if lsSlow, err = leastSquaresPencilSplit(sys); err != nil {
+			return c2dPlan{}, err
+		}
 	}
-	if !(opts.Method == C2DMethodMatched && stiffDelayedDescriptor(sys)) && lsSlow == nil {
+	matchedStiff := false
+	if opts.Method == C2DMethodMatched {
+		if matchedStiff, err = stiffDelayedDescriptor(sys); err != nil {
+			return c2dPlan{}, err
+		}
+	}
+	if !matchedStiff && lsSlow == nil {
 		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
 			return c2dPlan{}, err
 		}
@@ -138,14 +146,20 @@ func (p c2dPlan) discretizeMethod() (*System, error) {
 // and no internal ones has stiffDescriptorParts without the delays, so
 // matched C2D maps the transfer function of the pencil as without delays
 // instead of that of the LU fold E⁻¹A.
-func stiffDelayedDescriptor(sys *System) bool {
+// A split that is not certified returns its error.
+func stiffDelayedDescriptor(sys *System) (bool, error) {
 	if !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
-		return false
+		return false, nil
 	}
 	core := *sys
 	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
-	_, ok := stiffDescriptorParts(&core)
-	return ok
+	sp, ok := stiffDescriptorParts(&core)
+	if ok {
+		if err := sp.within(1); err != nil {
+			return false, err
+		}
+	}
+	return ok, nil
 }
 
 // discretizeMatchedDescriptor is discretizeMatched of the delay-free part

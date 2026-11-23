@@ -408,70 +408,172 @@ func transferStandardForm(sys *System) (_ *System, _ []*mat.Dense, reduced bool,
 // error from the fold, then a dropped pole).
 const illConditionedECond = 1e4
 
-// stiffExplicitParts returns explicit realizations, the slow part and the
-// fast parts of splitFastPencil or a single one, whose transfer functions
-// sum to that of the descriptor sys with full-rank but ill-conditioned E;
-// ok is false when E⁻¹ is safe to form, E is rank deficient by the MATLAB
-// rule, or sys has internal delays. The modes with |λ|·‖E‖/‖A‖ ≥
-// 1/qzLargeRatio are split off by the ordered generalized Schur form; each
-// part folds its E in by svdExplicit. deflated reports that the
-// generalized Schur form zeroed the E of the stiff part (σ_n of E within
-// ε‖E‖): the single part returned then holds the stiff pole near 1/ε,
-// whose fold rounding swamps the slow poles, and the Weierstrass reduction
-// is the accurate route.
+// stiffExplicitParts is stiffExplicitSplit for TransferFunction, which
+// judges the parts' sum itself: on a split that is not certified it takes
+// the parts the split falls back to (the whole fold, or the slow part and
+// the fold of the fast one).
 func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
-	whole, slow, fast, ok := stiffPencilSplit(sys)
-	if !ok {
-		return nil, false, false
-	}
-	if fast == nil {
-		return []*System{whole}, false, true
-	}
-	fastParts, ok := splitFastPencil(fast)
-	if !ok {
-		return []*System{whole}, true, true
-	}
-	return append([]*System{slow}, fastParts...), false, true
+	sp, ok := stiffExplicitSplit(sys)
+	return sp.parts, sp.deflated, ok
 }
 
-// stiffPencilSplit is the split of stiffExplicitParts before the fast part
+// stiffSplit is the result of stiffExplicitSplit. parts are explicit
+// realizations, the slow part and the fast parts of splitFastPencil or a
+// single one, whose transfer functions sum to that of the pencil. zeta is
+// the largest ζ″ (descriptorBudget) of the certified generalized Schur
+// splits that built them, 0 without a split. err, wrapping ErrSchurFailed,
+// reports that a split with modes on both sides of its cut failed or was
+// not certified; parts then hold its fallback, for TransferFunction only.
+type stiffSplit struct {
+	parts    []*System
+	deflated bool
+	zeta     float64
+	err      error
+}
+
+// within returns sp.err, or the stiff-split error when the parts are
+// certified only above the ζ″ limit.
+func (sp stiffSplit) within(limit float64) error {
+	if sp.err != nil {
+		return sp.err
+	}
+	if !(sp.zeta <= limit) {
+		return errStiffInseparable()
+	}
+	return nil
+}
+
+// stiffHoldZeta is the ζ″ limit on the parts for ZOH and FOH from C2D,
+// C2DMap and D2D: the hold of a part rounds its output relative to the
+// part, so its error grows with the parts' cancellation, which ζ″ tracks;
+// half the decoupling budget is left to the hold. Every other consumer
+// takes the parts at ζ″ ≤ 1.
+const stiffHoldZeta = 0.5
+
+func errStiffInseparable() error {
+	return fmt.Errorf("stiff and slow modes cannot be separated reliably: %w", ErrSchurFailed)
+}
+
+// stiffExplicitSplit splits the descriptor sys with full-rank but
+// ill-conditioned E into explicit parts (stiffSplit); ok is false when E⁻¹
+// is safe to form, E is rank deficient by the MATLAB rule, or sys has
+// internal delays. The ordered generalized Schur form splits off the stiff
+// modes at the cut of stiffCut, nominally |λ|·‖E‖/‖A‖ = 1/qzLargeRatio, and
+// splitFastPencil splits the fast part again; each split is certified
+// (descriptorBudget) and each part folds its E in by svdExplicit. deflated
+// reports that the generalized Schur form zeroed the E of the stiff part
+// (σ_n of E within ε‖E‖): the single part returned then holds the stiff pole
+// near 1/ε, whose fold rounding swamps the slow poles, and the Weierstrass
+// reduction is the accurate route. A pencil whose modes all lie on one side
+// of the cut is returned whole.
+func stiffExplicitSplit(sys *System) (sp stiffSplit, ok bool) {
+	whole, slow, fast, zeta, err, ok := stiffPencilSplit(sys)
+	if !ok {
+		return stiffSplit{}, false
+	}
+	if err != nil {
+		return stiffSplit{parts: []*System{whole}, err: err}, true
+	}
+	if fast == nil {
+		return stiffSplit{parts: []*System{whole}}, true
+	}
+	fastParts, fz, err, ok := splitFastPencil(fast)
+	if !ok {
+		return stiffSplit{parts: []*System{whole}, deflated: true}, true
+	}
+	return stiffSplit{parts: append([]*System{slow}, fastParts...), zeta: math.Max(zeta, fz), err: err}, true
+}
+
+// stiffPencilSplit is the split of stiffExplicitSplit before the fast part
 // is folded: whole is svdExplicit of the equilibrated sys, slow the explicit
 // slow part and fast the descriptor fast part (nil, with slow, when the
-// modes do not split).
-func stiffPencilSplit(sys *System) (whole, slow, fast *System, ok bool) {
+// modes do not split), zeta the split's ζ″. err reports a split with modes
+// on both sides that failed or was not certified.
+func stiffPencilSplit(sys *System) (whole, slow, fast *System, zeta float64, err error, ok bool) {
 	if sys.LFT != nil {
-		return nil, nil, nil, false
+		return nil, nil, nil, 0, nil, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
-		return nil, nil, nil, false
+		return nil, nil, nil, 0, nil, false
 	}
 	sys = equilibrateDescriptor(sys)
 	lu.Factorize(sys.E)
 	if lu.Cond() < illConditionedECond {
-		return nil, nil, nil, false
+		return nil, nil, nil, 0, nil, false
 	}
 	whole, ok = svdExplicit(sys)
 	if !ok {
-		return nil, nil, nil, false
+		return nil, nil, nil, 0, nil, false
 	}
 	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
 	if normA == 0 {
-		return whole, nil, nil, true
+		return whole, nil, nil, 0, nil, true
 	}
-	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
-		return cmplx.Abs(l)*normE*qzLargeRatio < normA
-	}, false)
+	n, _, _ := sys.Dims()
+	aRaw, eRaw := sys.A.RawMatrix(), sys.E.RawMatrix()
+	var mods []float64
+	if ar, ai, be, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride); ok {
+		for i := range ar {
+			if be[i] != 0 {
+				mods = append(mods, math.Hypot(ar[i], ai[i])/math.Abs(be[i]))
+			}
+		}
+	}
+	cut := stiffCut(mods, normA/(normE*qzLargeRatio))
+	slow, fast, zeta, err = decomposeGeneralizedQZZeta(sys, func(l complex128) bool {
+		return cmplx.Abs(l) < cut
+	})
 	if err != nil {
-		return whole, nil, nil, true
+		if mods != nil && !splitsBothSides(mods, cut) {
+			return whole, nil, nil, 0, nil, true
+		}
+		return whole, nil, nil, 0, errStiffInseparable(), true
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := fast.Dims()
 	if n1 == 0 || n2 == 0 {
-		return whole, nil, nil, true
+		return whole, nil, nil, 0, nil, true
 	}
-	return whole, slow, fast, true
+	return whole, slow, fast, zeta, nil, true
+}
+
+// stiffCut is the cut of the stiff splits: the geometric midpoint √lo·√hi
+// of the widest gap hi/lo > 10 between adjacent sorted moduli with
+// hi ≥ 10⁻³·thr and lo ≤ 10³·thr (lo > 0, hi finite; the lowest on a tie),
+// else the nominal cut thr. A cut in a gap never parts a cluster of nearby
+// modes, which the generalized Sylvester equation could decouple only by an
+// O(1/separation) transformation whose parts cancel; the cut is internal,
+// so any cut between the slow and the stiff modes gives the same model.
+func stiffCut(mods []float64, thr float64) float64 {
+	m := slices.Clone(mods)
+	slices.Sort(m)
+	best, cut := 10.0, thr
+	for i := 0; i+1 < len(m); i++ {
+		lo, hi := m[i], m[i+1]
+		if !(lo > 0) || math.IsInf(hi, 1) || math.IsNaN(hi) || hi < thr*1e-3 || lo > thr*1e3 {
+			continue
+		}
+		if r := hi / lo; r > best {
+			best, cut = r, math.Sqrt(lo)*math.Sqrt(hi)
+		}
+	}
+	return cut
+}
+
+// splitsBothSides reports whether some modulus lies on each side of cut
+// (slow iff below it).
+func splitsBothSides(mods []float64, cut float64) bool {
+	below, above := false, false
+	for _, v := range mods {
+		if v < cut {
+			below = true
+		} else {
+			above = true
+		}
+	}
+	return below && above
 }
 
 // equilibrateDescriptor returns sys with the rows of (A, B, E, B2) and the

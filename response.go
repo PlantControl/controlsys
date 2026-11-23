@@ -2721,7 +2721,7 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 func step(sys *System, tFinal float64) (*TimeResponse, error) {
 	var zs *System
 	var zsErr error
-	if ex, _, ok := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {
+	ex, _, ok, err := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {
 		_, dt, _ := newTimeResponsePlanner(out).grid(tFinal, 0)
 		return dt
 	}, func() bool {
@@ -2730,7 +2730,11 @@ func step(sys *System, tFinal float64) (*TimeResponse, error) {
 		}
 		t, dt, err := newTimeResponsePlanner(zs).grid(tFinal, 0)
 		return err != nil || delayChainWithinBudget(zs, dt, len(t), 1, delayShiftCount(zs))
-	}); ok {
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Step: %w", err)
+	}
+	if ok {
 		sys = ex
 	} else {
 		if zs == nil && zsErr == nil {
@@ -2772,8 +2776,11 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {
 		return nil, err
 	}
-	if parts, ok := stiffContinuousDescriptorParts(sys); ok {
-		resp, err := stiffDescriptorImpulse(sys, parts, tFinal)
+	if sp, ok := stiffContinuousDescriptorParts(sys); ok {
+		if err := sp.within(1); err != nil {
+			return nil, fmt.Errorf("Impulse: %w", err)
+		}
+		resp, err := stiffDescriptorImpulse(sys, sp.parts, tFinal)
 		if err != nil {
 			return nil, fmt.Errorf("Impulse: %w", err)
 		}
@@ -2860,9 +2867,9 @@ func explicitImpulse(sys *System, tFinal float64) (*TimeResponse, error) {
 
 // stiffContinuousDescriptorParts is stiffDescriptorParts of the
 // I/O-delay-free core of a continuous model.
-func stiffContinuousDescriptorParts(sys *System) ([]*System, bool) {
+func stiffContinuousDescriptorParts(sys *System) (stiffSplit, bool) {
 	if !sys.IsContinuous() {
-		return nil, false
+		return stiffSplit{}, false
 	}
 	return stiffDescriptorParts(ioDelayFreeCore(sys))
 }
@@ -3089,8 +3096,11 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 	if n, _, _ := sys.Dims(); x0.Len() == n {
 		if split, err := sys.splitIODelayForInitialState(x0); err == nil {
-			if parts, ok := stiffFreeParts(split, x0); ok {
-				resp, err := stiffDescriptorInitial(split, parts, x0, tFinal)
+			if sp, ok := stiffFreeParts(split, x0); ok {
+				if err := sp.within(1); err != nil {
+					return nil, fmt.Errorf("Initial: %w", err)
+				}
+				resp, err := stiffDescriptorInitial(split, sp.parts, x0, tFinal)
 				if err != nil {
 					return nil, fmt.Errorf("Initial: %w", err)
 				}
@@ -3104,7 +3114,7 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	var reduced, formRan bool
 	var err error
 	if n, _, _ := sys.Dims(); x0.Len() == n {
-		if ex, xt, ok := stiffLFTSampledAuto(sys, x0, func(out *System) float64 {
+		ex, xt, ok, serr := stiffLFTSampledAuto(sys, x0, func(out *System) float64 {
 			free := *out
 			free.InputDelay, free.Delay = nil, nil
 			_, dt, _ := newTimeResponsePlanner(&free).grid(tFinal, 0)
@@ -3118,7 +3128,11 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 			free.InputDelay, free.Delay = nil, nil
 			t, dt, err := newTimeResponsePlanner(&free).grid(tFinal, 0)
 			return err != nil || delayChainWithinBudget(&free, dt, len(t), 0, delayShiftCount(&free))
-		}); ok {
+		})
+		if serr != nil {
+			return nil, fmt.Errorf("Initial: %w", serr)
+		}
+		if ok {
 			sys, x0, stiffLFT, formRan = ex, xt, true, false
 		}
 	}
@@ -3183,9 +3197,9 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 // ignores input delays and sampleFreeParts shifts it by the output delays.
 // A model with a nonzero Delay matrix (split it first with
 // splitIODelayForInitialState) or internal delays does not split.
-func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
+func stiffFreeParts(sys *System, x0 *mat.VecDense) (stiffSplit, bool) {
 	if !sys.IsContinuous() || !sys.IsDescriptor() || delayMatrixHasNonzero(sys.Delay) {
-		return nil, false
+		return stiffSplit{}, false
 	}
 	n, _, p := sys.Dims()
 	fm := ioDelayFreeCore(sys).Copy()
@@ -3419,7 +3433,11 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		if len(t) >= 2 {
 			dt = t[1] - t[0]
 		}
-		if ex, xt, ok := stiffLFTSampled(sys, x0, dt); ok {
+		ex, xt, ok, serr := stiffLFTSampledWithin(sys, x0, dt)
+		if serr != nil {
+			return nil, fmt.Errorf("Lsim: %w", serr)
+		}
+		if ok {
 			sys, x0, stiffLFT = ex, xt, true
 		}
 	}
@@ -3489,8 +3507,11 @@ func addStiffFreeSamples(sys *System, x0 *mat.VecDense, plan timeResponsePlan, Y
 		return nil
 	}
 	var free *mat.Dense
-	if parts, ok := stiffFreeParts(sys, x0); ok {
-		free, err = sampleFreeParts(sys, parts, x0, plan.steps, plan.dt)
+	if sp, ok := stiffFreeParts(sys, x0); ok {
+		if err := sp.within(1); err != nil {
+			return err
+		}
+		free, err = sampleFreeParts(sys, sp.parts, x0, plan.steps, plan.dt)
 	} else if fold, k, ferr := sys.explicitForm("explicit form"); ferr != nil {
 		err = ferr
 	} else if x0, err = scaledInitialState(x0, k); err == nil {

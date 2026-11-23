@@ -76,7 +76,11 @@ func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit
 	if err != nil {
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
 	}
-	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder, leastSquaresPencilSlow(sys))
+	slow, err := leastSquaresPencilSplit(sys)
+	if err != nil {
+		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
+	}
+	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder, slow)
 	if errors.Is(err, errPencilFitUncertified) {
 		return out, fit, fmt.Errorf("C2DFit: %v: %w", err, ErrAccuracyUnverified)
 	}
@@ -264,16 +268,26 @@ func continuousNonStablePoleCount(sys *System, integrators int) (int, error) {
 // right there on either split, and is returned with ErrAccuracyUnverified
 // (the routed path).
 func leastSquaresPencilSlow(sys *System) *System {
+	slow, _ := leastSquaresPencilSplit(sys)
+	return slow
+}
+
+// leastSquaresPencilSplit is leastSquaresPencilSlow returning the error of
+// a split that is not certified, so the fit never falls to the fold.
+func leastSquaresPencilSplit(sys *System) (*System, error) {
 	if !sys.IsDescriptor() || sys.HasInternalDelay() {
-		return nil
+		return nil, nil
 	}
 	core := *sys
 	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
-	parts, ok := foldInaccurateParts(&core)
+	sp, ok := foldInaccurateParts(&core)
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	return parts[0]
+	if err := sp.within(1); err != nil {
+		return nil, err
+	}
+	return sp.parts[0], nil
 }
 
 func (sys *System) discretizeLeastSquares(dt float64, fitOrder int, slow *System) (*System, error) {

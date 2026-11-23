@@ -871,9 +871,36 @@ func denseOrNil(d []float64, n int) *mat.Dense {
 // decomposeGeneralizedQZ is decomposeGeneralized on the whole pencil:
 // eigenvalues with |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained
 // one that certifyFiniteRetained cannot certify finite fails closed.
-// certify applies descriptorBudget to the split (decomposeGeneralized);
-// the TransferFunction and conversion callers split uncertified.
+// certify applies descriptorBudget to the split (decomposeGeneralized).
 func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify bool) (group1, group2 *System, err error) {
+	mode := qzSplitPlain
+	if certify {
+		mode = qzSplitCertified
+	}
+	group1, group2, _, err = decomposeGeneralizedQZCore(sys, isGroup1, mode)
+	return group1, group2, err
+}
+
+// decomposeGeneralizedQZZeta is the certified decomposeGeneralizedQZ also
+// returning the split's ζ″ (descriptorBudget.zeta), 0 when the modes do not
+// split, for the stiff splits of stiffExplicitSplit, whose consumers take
+// the parts at their own ζ″ limit.
+func decomposeGeneralizedQZZeta(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, zeta float64, err error) {
+	return decomposeGeneralizedQZCore(sys, isGroup1, qzSplitZeta)
+}
+
+// qzSplitMode selects decomposeGeneralizedQZCore's split: uncertified,
+// certified (splitGeneralizedSchurCertified) or certified with ζ″
+// (splitGeneralizedSchurZeta).
+type qzSplitMode int
+
+const (
+	qzSplitPlain qzSplitMode = iota
+	qzSplitCertified
+	qzSplitZeta
+)
+
+func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, mode qzSplitMode) (group1, group2 *System, zeta float64, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, _, _ := sys.Dims()
 	s := make([]float64, n*n)
@@ -890,12 +917,12 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 	}
 	n1, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 	if !ok {
-		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+		return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
 	ninf := 0
 	for i := range n {
 		if beta[i] == 0 && alphar[i] == 0 && alphai[i] == 0 {
-			return nil, nil, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
+			return nil, nil, 0, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
 		}
 		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
 			ninf++
@@ -904,23 +931,29 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 	if n1 > 0 {
 		retol, err := certifyFiniteRetained(sys.A, sys.E, n, n1, ninf, alphar, alphai, beta, qzInfiniteTol(qzLargeRatio, normA, normE), normA)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if retol > 0 {
 			infTol = retol
 			n1, recip, ok = orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 			if !ok {
-				return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 			}
 		}
 	}
 	if n1 == 0 {
-		return modesAllInGroup2(policy, sys)
+		group1, group2, err = modesAllInGroup2(policy, sys)
+		return group1, group2, 0, err
 	}
-	if certify {
-		return splitGeneralizedSchurCertified(policy, sys, s, t, q, z, n1, recip)
+	switch mode {
+	case qzSplitZeta:
+		return splitGeneralizedSchurZeta(policy, sys, s, t, q, z, n1, recip)
+	case qzSplitCertified:
+		group1, group2, err = splitGeneralizedSchurCertified(policy, sys, s, t, q, z, n1, recip)
+	default:
+		group1, group2, err = splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, nil)
 	}
-	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, nil)
+	return group1, group2, 0, err
 }
 
 // splitGeneralizedSchur decouples the n1 leading modes of the generalized
@@ -1036,6 +1069,21 @@ func splitGeneralizedSchurCertified(policy realizationTransformPolicy, sys *Syst
 		return nil, nil, errModesInseparable()
 	}
 	return group1, group2, nil
+}
+
+// splitGeneralizedSchurZeta is splitGeneralizedSchurCertified also
+// returning ζ″, evaluated down to stiffHoldZeta (descriptorBudget.zeta).
+func splitGeneralizedSchurZeta(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool) (group1, group2 *System, zeta float64, err error) {
+	var budget descriptorBudget
+	group1, group2, err = splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, &budget)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	zeta = budget.zeta(stiffHoldZeta)
+	if !(zeta <= 1) {
+		return nil, nil, 0, errModesInseparable()
+	}
+	return group1, group2, zeta, nil
 }
 
 func errModesInseparable() error {
