@@ -139,7 +139,10 @@ var (
 	// (Stabsep and Modsep: the retained and discarded modes cannot be
 	// separated within SepTol, the cut falls inside a 2×2 block of the
 	// generalized Schur form, or the reduction to that form is not within
-	// an ε-rounding of the stored descriptor). It wraps ErrNotConverged.
+	// an ε-rounding of the stored descriptor; C2D, C2DFit, Step, Impulse,
+	// Initial and Lsim: the stiff and slow modes of a full-rank
+	// ill-conditioned E cannot be separated reliably). It wraps
+	// ErrNotConverged.
 	ErrSchurFailed error = &derivedError{"controlsys: Schur decomposition failed to converge", ErrNotConverged}
 
 	// ErrSingularEquation reports a Lyapunov, Sylvester or Riccati equation

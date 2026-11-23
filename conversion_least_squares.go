@@ -36,7 +36,9 @@ type LeastSquaresFit struct {
 // https://www.mathworks.com/help/control/ug/continuous-discrete-conversion-methods.html).
 // The source is sampled through its state-space realization; a descriptor
 // model whose LU fold E⁻¹A is inaccurate (ill-conditioned full-rank E) is
-// sampled through its pencil, (sE−A)⁻¹, for the fit and its quality.
+// sampled through its pencil, (sE−A)⁻¹, for the fit and its quality; where
+// its stiff and slow modes cannot be separated reliably C2DFit returns an
+// error wrapping ErrSchurFailed.
 // opts.FitOrder 0 ("auto", the MATLAB default) selects the source state order
 // (after eliminating the algebraic states of a singular-E descriptor model);
 // positive orders are accepted.

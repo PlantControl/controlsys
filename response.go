@@ -2678,7 +2678,10 @@ func Damp(sys *System) ([]DampInfo, error) {
 // for E⁻¹A (as in TransferFunction, with LU condition estimate 1e6 or more;
 // for Impulse from 1e4) is simulated from its generalized Schur parts, so
 // the response follows the poles of the pencil (A, E); as in MATLAB, its
-// I/O delays shift the delay-free response. Continuous models
+// I/O delays shift the delay-free response. Where the stiff and slow modes
+// of such an E cannot be separated reliably (the split is not certified),
+// Step, Impulse, Initial and Lsim return an error wrapping ErrSchurFailed
+// and no response. Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate

@@ -22,7 +22,12 @@ import (
 // its generalized Schur parts, which keep the poles of the pencil (A, E),
 // by every method but least squares (matched from the transfer function of
 // the pencil), its I/O delays as for an explicit model; the result then
-// has new state coordinates and no state names. With internal delays, all
+// has new state coordinates and no state names. The split is certified
+// against the descriptor bar: where the stiff and slow modes cannot be
+// separated reliably (a split that fails or is not certified, for ZOH and
+// FOH within half the decoupling budget), C2D returns an error wrapping
+// ErrSchurFailed and a nil model, every method alike; the discretized model
+// itself is not certified. With internal delays, all
 // methods that accept them (ZOH, FOH, Tustin) treat the descriptor part G of H = lft(G, delay) the
 // same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
