@@ -29,8 +29,14 @@ type balanceCert struct {
 	n      int
 	hsv    []float64
 	tl, tr *mat.Dense
-	// prefix[h] is ‖E[0:h,0:h]‖_F², nil until computed.
+	// e is E = TL·TR − I (row-major n×n) and prefix[h] is ‖E[0:h,0:h]‖_F²,
+	// both nil until computed.
+	e      []float64
 	prefix []float64
+	// fe is ‖fl(TL·TR) − I‖_F and round its rounding term
+	// (n+1)·ε·‖|TL|·|TR|‖_F, valid once quick is set.
+	fe, round float64
+	quick     bool
 }
 
 func newBalanceCert(br *BalrealResult) *balanceCert {
@@ -88,6 +94,23 @@ func (c *balanceCert) full() bool {
 // quickBound bounds ‖TL·TR − I‖_F from the float64 product: ‖fl(E)‖_F +
 // (n+1)·ε·‖|TL|·|TR|‖_F.
 func (c *balanceCert) quickBound() float64 {
+	c.pairingTerms()
+	return c.fe + c.round
+}
+
+// pairingInexact reports whether the float64 pairing error ‖fl(TL·TR) − I‖_F
+// exceeds its rounding term (n+1)·ε·‖|TL|·|TR|‖_F, so that TL is not TR⁻¹ to
+// the rounding of the product.
+func (c *balanceCert) pairingInexact() bool {
+	c.pairingTerms()
+	return c.fe > c.round
+}
+
+func (c *balanceCert) pairingTerms() {
+	if c.quick {
+		return
+	}
+	c.quick = true
 	n := c.n
 	tl, tr := c.tl.RawMatrix(), c.tr.RawMatrix()
 	buf := make([]float64, 4*n*n)
@@ -106,10 +129,10 @@ func (c *balanceCert) quickBound() float64 {
 	for i := range n {
 		p[i*n+i]--
 	}
-	return scaledNorm2(p) + float64(n+1)*eps()*scaledNorm2(q)
+	c.fe, c.round = scaledNorm2(p), float64(n+1)*eps()*scaledNorm2(q)
 }
 
-// compute evaluates E = TL·TR − I with compensated dot products (FMA
+// compute evaluates E = TL·TR − I with compensated dot products (exact
 // TwoProduct, TwoSum) and its leading-block norms.
 func (c *balanceCert) compute() {
 	n := c.n
@@ -129,7 +152,7 @@ func (c *balanceCert) compute() {
 			for k, x := range row {
 				y := col[k]
 				p := float64(x * y)
-				pe := math.FMA(x, y, -p)
+				pe := twoProductLo(x, y, p)
 				t := float64(s + p)
 				z := float64(t - s)
 				err += float64(float64(s-float64(t-z))+float64(p-z)) + pe
@@ -138,6 +161,7 @@ func (c *balanceCert) compute() {
 			e[i*n+j] = s + err
 		}
 	}
+	c.e = e
 	c.prefix = make([]float64, n+1)
 	for h := 1; h <= n; h++ {
 		k := h - 1

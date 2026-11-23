@@ -149,6 +149,22 @@ func FuzzBalred(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		br, err := Balreal(sys)
 		fzContract(t, s, "Balreal", br != nil, err)
+		if errors.Is(err, ErrAccuracyUnverified) {
+			if s.Decidable() {
+				t.Fatalf("Balreal: ErrAccuracyUnverified on a decidable model\n%s", s)
+			}
+			if st, serr := br.Sys.IsStable(); serr != nil || st {
+				t.Fatalf("Balreal: ErrAccuracyUnverified with IsStable %v (%v)\n%s", st, serr, s)
+			}
+			if s.N <= 6 {
+				requireBalanceSimilarity(t, "Balreal", sys, br)
+			}
+			red, _, rerr := Balred(sys, s.N, BalredOptions{})
+			if !errors.Is(rerr, ErrAccuracyUnverified) || red == nil || !sameModel(red, br.Sys) {
+				t.Fatalf("Balred(n) = %v, %v; want Balreal's realization with ErrAccuracyUnverified\n%s", red != nil, rerr, s)
+			}
+			fzSkip(t, "Balreal: realization not confirmed stable")
+		}
 		if s.N == 0 {
 			fzErr(t, s, "Balreal", err, ErrDimensionMismatch)
 		}
@@ -173,6 +189,9 @@ func FuzzBalred(f *testing.F) {
 		}
 		fzErr(t, s, "Balreal", err, ErrNotMinimal, ErrSingularEquation, ErrSingularTransform, ErrMinimalityUndetermined)
 		balanceCertHolds(t, br, "Balreal")
+		if s.N <= 6 {
+			requireBalanceSimilarity(t, "Balreal", sys, br)
+		}
 		n := s.N
 		hsv, tol2, ok := fzHSVOracle(s)
 		if !ok || tol2 > 1e-6*hsv[0]*hsv[0] {
@@ -220,11 +239,14 @@ func FuzzBalred(f *testing.F) {
 		gap := order == 0 || order == n || br.HSV[order-1] > br.HSV[order]*(1+1e-6)
 		red, hsvR, err := Balred(sys, order, BalredOptions{StateProjection: method})
 		fzContract(t, s, "Balred", red != nil, err)
+		if order == n && (err != nil || !sameModel(red, br.Sys)) {
+			t.Fatalf("Balred(n) = %v, %v; want Balreal's realization\n%s", red != nil, err, s)
+		}
 		if !gap {
 			fzErr(t, s, "Balred", err, ErrSingularA22, ErrNotMinimal)
 		}
 		if errors.Is(err, ErrSingularA22) && method == MatchDC {
-			if st := fzResidualizedSigmaMin(br.Sys, order); st > 8*balanceA22K*float64(n)*eps {
+			if st := fzResidualizedSigmaMin(fzUncorrectedBalancing(t, s, sys).Sys, order); st > 8*balanceA22K*float64(n)*eps {
 				t.Fatalf("Balred: ErrSingularA22 with σmin(M22)/‖M‖_F = %.3g·n·ε\n%s", st/(float64(n)*eps), s)
 			}
 			fzSkip(t, "Balred: residualized block singular within rounding")
@@ -359,4 +381,15 @@ func fzResidualizedSigmaMin(sys *System, order int) float64 {
 	}
 	v := svd.Values(nil)
 	return v[len(v)-1] / mat.Norm(M, 2)
+}
+
+// fzUncorrectedBalancing is the balanced realization Balred reduces below
+// order n, before Balreal's similarity correction (C4GXH2 R5).
+func fzUncorrectedBalancing(t *testing.T, s *fzSpec, sys *System) *BalrealResult {
+	t.Helper()
+	br, err := balanceUncertified(sys)
+	if err != nil {
+		t.Fatalf("balanceUncertified after a certified Balreal: %v\n%s", err, s)
+	}
+	return br
 }

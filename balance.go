@@ -39,8 +39,8 @@ type BalredOptions struct {
 
 // BalrealResult holds the outputs of MATLAB [sysb,g,TL,TR] = balreal(sys):
 // Sys.A = TL·A·TR, Sys.B = TL·B, Sys.C = C·TR, and TL·TR = I to the
-// tolerance Balreal certifies, so the balanced state is x̄ = TL·x and
-// x = TR·x̄. HSV holds the Hankel singular values in decreasing order.
+// rounding of its terms, so the balanced state is x̄ = TL·x and x = TR·x̄.
+// HSV holds the Hankel singular values in decreasing order.
 type BalrealResult struct {
 	Sys *System
 	HSV []float64
@@ -51,8 +51,11 @@ type BalrealResult struct {
 // Balreal computes the balanced realization of a stable, minimal LTI system,
 // as MATLAB balreal; see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.balreal.html.
-// The returned system has equal controllability and observability gramians,
-// both equal to diag(σ₁, σ₂, …, σₙ) where σᵢ are the Hankel singular values.
+// The returned system has controllability and observability gramians equal
+// to diag(σ₁, σ₂, …, σₙ), σᵢ the Hankel singular values, to within the
+// certified pairing tolerance below relative to σ₁ and the rounding of the
+// returned matrices, which a pole within δ of the stability boundary
+// amplifies by about 1/δ.
 //
 // Unlike MATLAB, which balances the stable part and reports Inf for unstable
 // modes, an unstable model returns ErrUnstable, decided by IsStable within
@@ -63,11 +66,16 @@ type BalrealResult struct {
 // its work bound. The Hankel singular values are accurate relative to σ₁;
 // a minimal model can still have some below the float64 rounding of σ₁,
 // whose singular directions are known only to that rounding. Balreal
-// certifies the transformation: with E = TL·TR − I evaluated exactly,
-// ‖E‖_F ≤ min(2⁻¹⁰, max(10⁻⁸, 4·n·ε·σ₁/σₙ)). A model whose transformation
-// fails this, being numerically non-minimal, returns ErrSingularTransform;
-// Balred can still reduce it to a certified order. Gramians are
-// refined against the stored data; when the Lyapunov equations are too
+// certifies the pairing error E of the computed balancing vectors, with
+// E = TL·TR − I evaluated exactly: ‖E‖_F ≤ min(2⁻¹⁰, max(10⁻⁸,
+// 4·n·ε·σ₁/σₙ)). A model whose transformation fails this, being numerically
+// non-minimal, returns ErrSingularTransform; Balred can still reduce it to a
+// certified order. Balreal then returns TL corrected to (I+E)⁻¹·TL, so that
+// TL·TR = I to the rounding of its terms and Sys is the similarity of the
+// stored model by TR: ‖Sys.A − TR⁻¹·A·TR‖_F is within the rounding of the
+// products forming it. A realization that IsStable does not confirm is
+// returned with ErrAccuracyUnverified. Gramians are refined against the
+// stored data; when the Lyapunov equations are too
 // ill-conditioned for that, Balreal returns ErrSingularEquation. A model
 // with no states returns ErrDimensionMismatch, since TL and TR cannot be
 // formed. A result entry beyond float64 range returns ErrOverflow.
@@ -76,8 +84,80 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !newBalanceCert(br).full() {
+	cert := newBalanceCert(br)
+	if !cert.full() {
 		return nil, fmt.Errorf("Balreal: balancing transformation numerically singular, TL·TR − I above tolerance (model numerically non-minimal): %w", ErrSingularTransform)
+	}
+	return balancedSimilarity("Balreal", sys, br, cert)
+}
+
+// balancedSimilarity returns the certified balancing br of sys as a
+// similarity of sys (similarityCorrected), with ErrAccuracyUnverified when
+// IsStable does not confirm it (confirmBalancedStable).
+func balancedSimilarity(op string, sys *System, br *BalrealResult, cert *balanceCert) (*BalrealResult, error) {
+	br, err := similarityCorrected(op, sys, br, cert)
+	if err != nil {
+		return nil, err
+	}
+	return confirmBalancedStable(op, br)
+}
+
+// similarityCorrected returns br unchanged when the float64 pairing error of
+// TL·TR is within its rounding term. Otherwise it returns TL′ = (I+E)⁻¹·TL,
+// E = TL·TR − I from compensated products, with Sys.A = TL′·A·TR and
+// Sys.B = TL′·B; TR, Sys.C, Sys.D and HSV are unchanged.
+func similarityCorrected(op string, sys *System, br *BalrealResult, cert *balanceCert) (*BalrealResult, error) {
+	if !cert.pairingInexact() {
+		return br, nil
+	}
+	if cert.e == nil {
+		cert.compute()
+	}
+	n, m, _ := br.Sys.Dims()
+	buf := make([]float64, 3*n*n+n*m)
+	lu, tl, tmp, bb := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:]
+	copy(lu, cert.e)
+	for i := range n {
+		lu[i*n+i]++
+	}
+	copyStrided(tl, n, br.TL.RawMatrix().Data, br.TL.RawMatrix().Stride, n, n)
+	ipiv := make([]int, n)
+	if !impl.Dgetrf(n, n, lu, n, ipiv) {
+		return nil, fmt.Errorf("%s: balancing pairing I + TL·TR − I singular: %w", op, ErrSingularTransform)
+	}
+	impl.Dgetrs(blas.NoTrans, n, n, lu, n, ipiv, tl, n)
+	tlGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: tl}
+	aRaw, bRaw := sys.A.RawMatrix(), sys.B.RawMatrix()
+	ab := make([]float64, n*n)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tlGen, aRaw, 0, blas64.General{Rows: n, Cols: n, Stride: n, Data: tmp})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: n, Stride: n, Data: tmp}, br.TR.RawMatrix(),
+		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: ab})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tlGen, bRaw, 0, blas64.General{Rows: n, Cols: m, Stride: m, Data: bb})
+	TL, Ab, Bb := mat.NewDense(n, n, tl), mat.NewDense(n, n, ab), mat.NewDense(n, m, bb)
+	for _, out := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", Ab}, {"B", Bb}, {"TL", TL}} {
+		if err := finiteDense(op, out.name, out.m, ErrOverflow); err != nil {
+			return nil, err
+		}
+	}
+	res, err := newRealizationTransformPolicy(sys).result(Ab, Bb, br.Sys.C, br.Sys.D)
+	if err != nil {
+		return nil, err
+	}
+	return &BalrealResult{Sys: res, HSV: br.HSV, TL: TL, TR: br.TR}, nil
+}
+
+// confirmBalancedStable returns br, with ErrAccuracyUnverified when IsStable
+// does not confirm br.Sys.
+func confirmBalancedStable(op string, br *BalrealResult) (*BalrealResult, error) {
+	st, err := br.Sys.IsStable()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	if !st {
+		return br, fmt.Errorf("%s: balanced realization has a pole IsStable does not confirm, within its boundary band: %w", op, ErrAccuracyUnverified)
 	}
 	return br, nil
 }
@@ -349,21 +429,22 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // [rsys,info] = balred(sys,order,opts); see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.balred.html.
 // hsv holds the Hankel singular values (MATLAB info.HSV). order must be in
-// [0, n]; order n returns the balanced realization of Balreal and order 0 a
-// static gain. opts.StateProjection selects MatchDC (the zero value, MATLAB
-// default) or Truncate. sys must satisfy the requirements of Balreal, except
-// its certificate of TL·TR = I.
+// [0, n]; order n returns the balanced realization of Balreal, with its
+// error, and order 0 a static gain. opts.StateProjection selects MatchDC
+// (the zero value, MATLAB default) or Truncate. sys must satisfy the
+// requirements of Balreal, except its certificate of TL·TR = I.
 //
-// When the transformation is certified, Balred reduces Balreal's balanced
-// realization; an order that would keep part of a tail of Hankel singular
-// values at or below n·ε·σ₁ returns ErrSingularTransform naming the
-// numerically minimal order (SLICOT AB09AD and AB09BD likewise cap the order
-// there). When it is not, Balred reduces the leading balanced states it does
-// certify, after truncating the directions whose Hankel singular values are
-// at most n·ε·σ₁ or, failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC
-// then keeps the DC gain to within twice the sum of the truncated Hankel
-// singular values. An order above the certified one returns
-// ErrSingularTransform.
+// When the transformation is certified, Balred at order < n reduces the
+// balanced realization before Balreal's similarity correction of TL; the two
+// differ by at most the certified tolerance on TL·TR − I. An order that
+// would keep part of a tail of Hankel singular values at or below n·ε·σ₁
+// returns ErrSingularTransform naming the numerically minimal order (SLICOT
+// AB09AD and AB09BD likewise cap the order there). When it is not, Balred
+// reduces the leading balanced states it does certify, after truncating
+// the directions whose Hankel singular values are at most n·ε·σ₁ or,
+// failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC then keeps the
+// DC gain to within twice the sum of the truncated Hankel singular values.
+// An order above the certified one returns ErrSingularTransform.
 //
 // Balanced truncation and singular perturbation are stable for σ_order >
 // σ_order+1 but give no stability margin: an order splitting a near-equal
@@ -372,11 +453,11 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // that MatchDC creates. For order < n, a
 // reduction that IsStable does not confirm is returned with
 // ErrAccuracyUnverified (with ErrSingularTransform and no model when the
-// transformation is not certified); order n returns Balreal's realization
-// without that check. MatchDC returns ErrSingularA22 when the residualized block
-// (A22, or A22 − I for discrete models) of the balanced realization is
-// singular within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular
-// values equal to rounding.
+// transformation is not certified), as is Balreal's realization at order
+// n. MatchDC returns ErrSingularA22 when the residualized block (A22, or
+// A22 − I for discrete models) of the balanced realization is singular
+// within its rounding, σmin ≤ 4·n·ε·‖A‖_F, as for Hankel singular values
+// equal to rounding.
 func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, error) {
 	if err := requireFiniteSystem("Balred", sys); err != nil {
 		return nil, nil, err
@@ -398,7 +479,11 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 		if !full {
 			return nil, nil, fmt.Errorf("Balred: balancing transformation numerically singular, TL·TR − I above tolerance (model numerically non-minimal): %w", ErrSingularTransform)
 		}
-		return br.Sys, br.HSV, nil
+		res, err := balancedSimilarity("Balred", sys, br, cert)
+		if res == nil {
+			return nil, nil, err
+		}
+		return res.Sys, res.HSV, err
 	}
 	src := br.Sys
 	h := n

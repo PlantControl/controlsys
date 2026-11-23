@@ -280,7 +280,8 @@ func TestBalreal_NumericallyNonMinimalErrors(t *testing.T) {
 	}
 }
 
-// JV4E3K: transformations within τ_n of TL·TR = I stay nil, including the
+// JV4E3K: transformations within τ_n of TL·TR = I stay nil, the response
+// within the certified pairing error of the uncorrected pair, including the
 // lightly damped pairs fixture (rotZ/855) whose float64 balancing is off by
 // 1e-5 but whose HSV are far above the rounding of σ₁.
 func TestBalreal_CertifiedTransformation(t *testing.T) {
@@ -291,9 +292,13 @@ func TestBalreal_CertifiedTransformation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Balreal: %v", err)
 			}
-			f, tau := exactCertNorm(br.TL, br.TR), certTau(br.HSV)
+			u := uncorrectedBalancing(t, sys)
+			f, tau := exactCertNorm(u.TL, u.TR), certTau(u.HSV)
 			if !(8*f <= tau) {
 				t.Fatalf("exact ‖TL·TR−I‖ = %.3g, τ = %.3g: under 8× margin", f, tau)
+			}
+			if g := exactCertNorm(br.TL, br.TR); g > tau {
+				t.Fatalf("corrected exact ‖TL·TR−I‖ = %.3g > τ = %.3g", g, tau)
 			}
 			balrealHSVWithin(t, br.HSV, tc.ref, 1e-12)
 			certFidelity(t, sys, br.Sys, f)
@@ -406,7 +411,7 @@ func TestBalred_NoiseTailCertifiedOrder(t *testing.T) {
 }
 
 // JV4E3K: on a certified, numerically minimal model Balred is bit-identical
-// to Modred of Balreal, passes IsStable at every order (M3HDEP), and
+// to Modred of the uncorrected balanced realization (C4GXH2 R5), passes IsStable at every order (M3HDEP), and
 // Balred(n) is Balreal.
 func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 	sys, err := NewFromSlices(4, 2, 2,
@@ -425,6 +430,7 @@ func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 	if err != nil || !mat.Equal(full.A, br.Sys.A) || !mat.Equal(full.B, br.Sys.B) || !mat.Equal(full.C, br.Sys.C) || hsv[3] != br.HSV[3] {
 		t.Fatalf("Balred(n) differs from Balreal: %v", err)
 	}
+	src := uncorrectedBalancing(t, sys)
 	for _, proj := range []StateProjection{MatchDC, Truncate} {
 		for k := range 4 {
 			red, _, err := Balred(sys, k, BalredOptions{StateProjection: proj})
@@ -435,7 +441,7 @@ func TestBalred_CertifiedPathUnchanged(t *testing.T) {
 			for i := k; i < 4; i++ {
 				elim = append(elim, i)
 			}
-			want, err := Modred(br.Sys, elim, proj)
+			want, err := Modred(src.Sys, elim, proj)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -473,31 +479,31 @@ func balanceCertHolds(t *testing.T, br *BalrealResult, what string) {
 	requireStable(t, what, br.Sys)
 }
 
-// JV4E3K: a certified transformation with a sub-floor tail reduces Balreal's
-// realization unchanged, even where the order splits the near-equal σ₅, σ₆
-// (rotZ/153).
+// JV4E3K: a certified transformation with a sub-floor tail reduces the
+// uncorrected balanced realization (C4GXH2 R5) unchanged, even where the
+// order splits the near-equal σ₅, σ₆ (rotZ/153).
 func TestBalred_CertifiedSubFloorTailUnchanged(t *testing.T) {
 	sys := certRotZ153.sys(t)
-	br, err := Balreal(sys)
-	if err != nil {
+	if _, err := Balreal(sys); err != nil {
 		t.Fatal(err)
 	}
 	red, _, err := Balred(sys, 5, BalredOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := Modred(br.Sys, []int{5, 6, 7}, MatchDC)
+	want, err := Modred(uncorrectedBalancing(t, sys).Sys, []int{5, 6, 7}, MatchDC)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !mat.Equal(red.A, want.A) || !mat.Equal(red.B, want.B) || !mat.Equal(red.C, want.C) || !mat.Equal(red.D, want.D) {
-		t.Fatal("Balred(5) not bit-identical to Modred of Balreal")
+		t.Fatal("Balred(5) not bit-identical to Modred of the uncorrected realization")
 	}
 	requireStable(t, "Balred(5)", red)
 }
 
 // JV4E3K: whenever Balreal certifies, Balred errs exactly for orders that
-// split the tail below n·ε·σ₁ and otherwise reduces Balreal's realization,
+// split the tail below n·ε·σ₁ and otherwise reduces the uncorrected
+// balanced realization (C4GXH2 R5),
 // returned with ErrAccuracyUnverified when IsStable does not confirm it
 // (M3HDEP: rotZ/697 order 1 Truncate).
 func TestBalred_CertifiedOrderInvariant(t *testing.T) {
