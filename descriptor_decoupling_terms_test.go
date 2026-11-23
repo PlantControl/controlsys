@@ -689,3 +689,36 @@ func hbFro(m hbMat) float64 {
 	f, _ := s.Float64()
 	return math.Sqrt(f)
 }
+
+// TestDescriptorDecouplingCertifiedAcceptBoundary pins production's accept
+// rule ζ″ ≤ 1 (both tiers) through splitGeneralizedSchurCertified. The
+// triangular form (γ = 4, Q = Z = I) has negligible decoupling terms; its
+// stored A differs from the form S by δ in one entry, so the measured A
+// form residual fa (weight 1/β in zS, which neither tier sharpens) sets
+// ζ″ ≈ fa/9. δ = 2⁻⁴⁵ gives ζ″ ≈ 0.1 and a nil split; δ = 1.5·2⁻⁴¹ gives
+// ζ″ ≈ 2.4 at tier 1 and tier 2 alike and ErrSchurFailed.
+func TestDescriptorDecouplingCertifiedAcceptBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		delta    float64
+		lo, hi   float64
+		rejected bool
+	}{
+		{0x1p-45, 0, 0.5, false},
+		{1.5 * 0x1p-41, 1.5, 3, true},
+	} {
+		f := descTriangularForm(t, 4)
+		f.sys.A.Set(2, 2, 1+tc.delta)
+		var d descriptorBudget
+		if _, _, err := splitGeneralizedSchur(newRealizationTransformPolicy(f.sys), f.sys, slices.Clone(f.s), slices.Clone(f.t), f.q, f.z, 1, false, &d); err != nil {
+			t.Fatal(err)
+		}
+		plain, sharp := d.tiers()
+		if !(plain > tc.lo && plain <= tc.hi) || !(sharp > tc.lo && sharp <= tc.hi) {
+			t.Fatalf("δ = %g: ζ″ plain %.3g sharp %.3g, want both in (%g, %g]", tc.delta, plain, sharp, tc.lo, tc.hi)
+		}
+		_, _, err := splitGeneralizedSchurCertified(newRealizationTransformPolicy(f.sys), f.sys, slices.Clone(f.s), slices.Clone(f.t), f.q, f.z, 1, false)
+		if tc.rejected != errors.Is(err, ErrSchurFailed) || (!tc.rejected && err != nil) {
+			t.Errorf("δ = %g (ζ″ %.3g): err = %v, want rejected %v", tc.delta, plain, err, tc.rejected)
+		}
+	}
+}
