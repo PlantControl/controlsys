@@ -35,8 +35,17 @@ type StabsepResult struct {
 // Stabsep returns ErrSchurFailed ("cannot be separated reliably"), even
 // when the split would have been accurate. MATLAB instead warns and keeps
 // such modes together, and offers a SepTol option this API does not.
-// Singular-E descriptors are split with the generalized Schur form, which
-// this certificate does not cover.
+// For descriptors split by the generalized Schur form (singular E, or
+// cond₁(E) ≥ 1e4), a nil error means
+// ‖G − Stable − Unstable‖_F(s) ≤ 10·u·(‖C‖‖M‖(‖A‖ + |s|‖E‖)‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + ‖D‖),
+// M = (sE − A)⁻¹, u = 4(n+5)ε, Frobenius norms of the stored data, to
+// first order, at every s with u·(‖A‖ + |s|‖E‖)·‖M(s)‖ ≤ 0.1. Stabsep returns
+// ErrSchurFailed instead when (i) the coupling of the retained and
+// discarded modes, weighted by ‖C̃1‖‖B̃2‖/(‖C‖‖B‖), exceeds that budget,
+// (ii) the cut falls inside a 2×2 block of the generalized Schur form (a
+// near-defective real pair on the stability boundary), or (iii) the reduction to that
+// form, including the staircase rank decisions and the stiff-mode β edit,
+// is not within the budget of an ε-rounding of (A, E).
 // A part without states on a model with no inputs or no outputs would be a
 // p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.stabsep.html.

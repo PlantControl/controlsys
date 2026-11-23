@@ -32,7 +32,18 @@ type ModsepResult struct {
 // straddling cutoff) returns ErrSchurFailed ("cannot be separated
 // reliably"), even when the split would have been accurate; MATLAB warns
 // and keeps such modes together instead, and has a SepTol option this API
-// does not. Singular-E descriptors are not covered by the certificate.
+// does not.
+// For descriptors split by the generalized Schur form (singular E, or
+// cond₁(E) ≥ 1e4), a nil error means
+// ‖G − Slow − Fast‖_F(s) ≤ 10·u·(‖C‖‖M‖(‖A‖ + |s|‖E‖)‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + ‖D‖),
+// M = (sE − A)⁻¹, u = 4(n+5)ε, Frobenius norms of the stored data, to
+// first order, at every s with u·(‖A‖ + |s|‖E‖)·‖M(s)‖ ≤ 0.1. Modsep returns
+// ErrSchurFailed instead when (i) the coupling of the retained and
+// discarded modes, weighted by ‖C̃1‖‖B̃2‖/(‖C‖‖B‖), exceeds that budget,
+// (ii) the cut falls inside a 2×2 block of the generalized Schur form (a
+// near-defective real pair on the cutoff), or (iii) the reduction to that
+// form, including the staircase rank decisions and the stiff-mode β edit,
+// is not within the budget of an ε-rounding of (A, E).
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 	if err := requireFiniteSystem("Modsep", sys); err != nil {

@@ -551,7 +551,7 @@ func splitFastPencil(fast *System) ([]*System, bool) {
 	}
 	slow, rest, err := decomposeGeneralizedQZ(fast, func(l complex128) bool {
 		return cmplx.Abs(l) < qzLargeRatio*rho
-	})
+	}, false)
 	if err != nil {
 		return []*System{folded}, true
 	}

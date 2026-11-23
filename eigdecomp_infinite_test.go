@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -224,8 +225,11 @@ func TestStabsep_SingularERoundingBetaInfinite(t *testing.T) {
 // infinite mode with rounding-level β as a huge stable pole (silently
 // wrong Stable), 2–9% more failed with "cannot be separated reliably"
 // because that mode made the split ill-conditioned, and with general U, V
-// an infinite β just above rounding also leaked.
+// an infinite β just above rounding also leaked. A split the descriptor
+// decoupling certificate cannot certify returns ErrSchurFailed, allowed for
+// at most 4 of the 800 models (EUNKOP ruling 3).
 func TestStabsep_SingularEIndexOne(t *testing.T) {
+	uncertified := 0
 	for _, orth := range []bool{true, false} {
 		for seed := range uint64(400) {
 			rng := rand.New(rand.NewPCG(seed, 5))
@@ -235,6 +239,10 @@ func TestStabsep_SingularEIndexOne(t *testing.T) {
 				continue
 			}
 			res, err := Stabsep(w.sys)
+			if errors.Is(err, ErrSchurFailed) {
+				uncertified++
+				continue
+			}
 			if err != nil {
 				t.Fatalf("orth %v seed %d: %v", orth, seed, err)
 			}
@@ -243,6 +251,10 @@ func TestStabsep_SingularEIndexOne(t *testing.T) {
 				t.Fatalf("orth %v seed %d", orth, seed)
 			}
 		}
+	}
+	t.Logf("%d of 800 splits uncertified", uncertified)
+	if uncertified > 4 {
+		t.Errorf("%d of 800 splits uncertified, want at most 4", uncertified)
 	}
 }
 
@@ -275,8 +287,11 @@ func higherIndexTol(w weierstrassDescriptor, k int) float64 {
 // still kept a few wrong. The infinite structure is now deflated before
 // QZ (staircase on E, then on the matching rows of A), as MATLAB stabsep
 // splits any regular descriptor. The oracle is eig(J⁻¹H), the real-Schur
-// Stabsep of the explicit finite part and (sE − A)⁻¹. 7YDREH.
+// Stabsep of the explicit finite part and (sE − A)⁻¹. 7YDREH. A split the
+// descriptor decoupling certificate cannot certify returns ErrSchurFailed,
+// allowed for at most 8 of the 1440 models (EUNKOP ruling 3).
 func TestStabsep_SingularEHigherIndex(t *testing.T) {
+	uncertified := 0
 	for _, chains := range higherIndexChains {
 		k := slices.Max(chains)
 		for _, orth := range []bool{true, false} {
@@ -285,6 +300,10 @@ func TestStabsep_SingularEHigherIndex(t *testing.T) {
 				w := newWeierstrassChains(seed, 2+rng.IntN(5), chains, orth)
 				label := fmt.Sprintf("chains %v orth %v seed %d", chains, orth, seed)
 				res, err := Stabsep(w.sys)
+				if errors.Is(err, ErrSchurFailed) {
+					uncertified++
+					continue
+				}
 				if err != nil {
 					t.Fatalf("%s: %v", label, err)
 				}
@@ -295,14 +314,21 @@ func TestStabsep_SingularEHigherIndex(t *testing.T) {
 			}
 		}
 	}
+	t.Logf("%d of 1440 splits uncertified", uncertified)
+	if uncertified > 8 {
+		t.Errorf("%d of 1440 splits uncertified, want at most 8", uncertified)
+	}
 }
 
 // TestModsep_SingularEHigherIndex: Modsep of index ≥ 2 descriptors keeps
 // the finite modes below the cutoff in Slow and the infinite chains in
 // Fast. With cutoff 1e10 every finite mode is slow, and the chain members
 // QZ left at moduli ~1e5–1e8 were retained too, failing closed. Oracle:
-// eig(J⁻¹H) and (sE − A)⁻¹. 7YDREH.
+// eig(J⁻¹H) and (sE − A)⁻¹. 7YDREH. A split the descriptor decoupling
+// certificate cannot certify returns ErrSchurFailed, allowed for at most 6
+// of the 960 splits (EUNKOP ruling 3).
 func TestModsep_SingularEHigherIndex(t *testing.T) {
+	uncertified := 0
 	for _, chains := range higherIndexChains {
 		for _, orth := range []bool{true, false} {
 			for seed := range uint64(40) {
@@ -322,6 +348,10 @@ func TestModsep_SingularEHigherIndex(t *testing.T) {
 						}
 					}
 					res, err := Modsep(w.sys, cutoff)
+					if errors.Is(err, ErrSchurFailed) {
+						uncertified++
+						continue
+					}
 					if err != nil {
 						t.Fatalf("%s: %v", label, err)
 					}
@@ -340,6 +370,10 @@ func TestModsep_SingularEHigherIndex(t *testing.T) {
 				}
 			}
 		}
+	}
+	t.Logf("%d of 960 splits uncertified", uncertified)
+	if uncertified > 6 {
+		t.Errorf("%d of 960 splits uncertified, want at most 6", uncertified)
 	}
 }
 
