@@ -305,22 +305,24 @@ func TestC2DDescriptorDCGateErrorBounds(t *testing.T) {
 	}
 }
 
-// A pole at DC that no exactly zero pivot shows (A's 3×3 block is the
-// singular [1 2 3; 4 5 6; 7 8 9], its float LU pivots nonzero) leaves the
-// finite entry without a bar: the descriptor bar of an ill-conditioned LU
+// A pole at DC that no exactly zero pivot shows (A's 2×2 block is the
+// singular [3 6; 1 2], whose float LU pivot 2 − fl(1/3)·6 is 2⁻⁵² and not
+// 0) leaves the finite entry without a bar: the descriptor bar of that LU
 // would pass anything, so the result is unverified.
 func TestC2DDescriptorDCContractPoleBesideFiniteEntry(t *testing.T) {
-	A := mat.NewDense(4, 4, []float64{
-		-1, -2, -3, 0,
-		-4, -5, -6, 0,
-		-7, -8, -9, 0,
-		0, 0, 0, -1.5})
-	E := mat.NewDense(4, 4, []float64{1, 0.25, 0, 0, 0, 1, 0.5, 0, 0, 0, 1, 0, 0, 0, 0, 0x1p-20})
-	B := mat.NewDense(4, 1, []float64{1, -0.5, 0.25, 0.75})
-	C := mat.NewDense(2, 4, []float64{1, 0.5, -0.25, 0, 0, 0, 0, 1})
+	A := mat.NewDense(3, 3, []float64{
+		-3, -6, 0,
+		-1, -2, 0,
+		0, 0, -1.5})
+	E := mat.NewDense(3, 3, []float64{1, 0.25, 0, 0, 1, 0, 0, 0, 0x1p-20})
+	B := mat.NewDense(3, 1, []float64{1, -0.5, 0.75})
+	C := mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 0, 1})
 	sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 1, nil), E, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if b := newDCBar(sys); b.lu == nil {
+		t.Fatal("setup: LU of A meets an exact zero pivot")
 	}
 	g, err := sys.DCGain()
 	if err != nil || !math.IsInf(g.At(0, 0), 0) || math.IsInf(g.At(1, 0), 0) {
