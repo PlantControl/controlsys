@@ -618,8 +618,10 @@ func stiffDescriptorParts(sys *System) (stiffSplit, bool) {
 }
 
 // foldAccurateECond is the 1-norm condition estimate of E below which C2D
-// (other than matched) and the zero-state Step and Lsim take the LU fold E⁻¹A
-// (ToExplicit) of a full-rank E even when stiffDescriptorParts applies: its
+// impulse, C2D with I/O delays and the zero-state Step and Lsim take the LU
+// fold E⁻¹A (ToExplicit) of a full-rank E even when stiffDescriptorParts
+// applies (delay-free ZOH, FOH and Tustin C2D, certified at DC, take the
+// parts from illConditionedECond; c2dDescriptorGated): its
 // cond(E)·ε error then stays under 1e-9 relative in the discrete response
 // and 1e-7 in the step response, where the pencil parts cost a generalized
 // Schur split and several matrix exponentials. Impulse routes at the
