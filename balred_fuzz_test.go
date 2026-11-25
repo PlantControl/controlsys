@@ -130,8 +130,31 @@ func fzMatsSpec(s *fzSpec, g [4][]float64, n int) *fzSpec {
 	return &fzSpec{N: n, M: s.M, P: s.P, A: g[0], B: g[1], C: g[2], D: g[3], Dt: s.Dt, Discrete: s.Discrete}
 }
 
+// hsvFuzzContract checks HSV on a decidably stable delay-free model with
+// at most 6 states: a nil result is within the contract of the 320-bit
+// reference, and a result comes with an error only as ErrAccuracyUnverified.
+func hsvFuzzContract(t *testing.T, s *fzSpec, sys *System) {
+	t.Helper()
+	if s.N == 0 || s.N > 6 {
+		return
+	}
+	h, err := HSV(sys)
+	fzContract(t, s, "HSV", h != nil, err)
+	if err != nil {
+		return
+	}
+	ref, T, ok := hsvExactReference(sys)
+	if !ok {
+		return
+	}
+	if v := hsvContractViolation(h, ref, T); v > 1 {
+		t.Fatalf("HSV %v nil, 320-bit reference %v (T %.3g): %.3g × the contract bar\n%s", h, ref, T, v, s)
+	}
+}
+
 // FuzzBalred: on decidable delay-free models Balreal/Balred reject exactly
-// the unstable ones; otherwise HSV match the Kronecker-gramian oracle,
+// the unstable ones; otherwise HSV() with n ≤ 6 is nil only within its
+// contract of a 320-bit reference, Balreal's HSV match the Kronecker-gramian oracle,
 // a nil Balreal meets its exact TL·TR = I certificate and is stable,
 // TL·TR = I, the balanced model has the original response, and the order-r
 // reduction (v[14] → r = ⌊clamp((v+3)/6,0,1)·(n+1)⌋; v[13] ≥ 0 MatchDC
@@ -181,13 +204,14 @@ func FuzzBalred(f *testing.F) {
 		if errors.Is(err, ErrUnstable) {
 			t.Fatalf("Balreal: ErrUnstable on a decidably stable model\n%s", s)
 		}
+		hsvFuzzContract(t, s, sys)
 		if s.N > 0 && s.M > 0 && s.P > 0 {
 			minimal := ratKalmanRank(sys.A, sys.B) == s.N && ratKalmanRank(mat.DenseCopyOf(sys.A.T()), mat.DenseCopyOf(sys.C.T())) == s.N
 			if minimal && errors.Is(err, ErrNotMinimal) || !minimal && err == nil {
 				t.Fatalf("Balreal: exactly minimal %v, err %v\n%s", minimal, err, s)
 			}
 		}
-		fzErr(t, s, "Balreal", err, ErrNotMinimal, ErrSingularEquation, ErrSingularTransform, ErrMinimalityUndetermined)
+		fzErr(t, s, "Balreal", err, ErrNotMinimal, ErrSingularEquation, ErrSingularTransform, ErrMinimalityUndetermined, ErrAccuracyUnverified)
 		balanceCertHolds(t, br, "Balreal")
 		if s.N <= 6 {
 			requireBalanceSimilarity(t, "Balreal", sys, br)

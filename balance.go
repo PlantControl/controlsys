@@ -40,7 +40,10 @@ type BalredOptions struct {
 // BalrealResult holds the outputs of MATLAB [sysb,g,TL,TR] = balreal(sys):
 // Sys.A = TL·A·TR, Sys.B = TL·B, Sys.C = C·TR, and TL·TR = I to the
 // rounding of its terms, so the balanced state is x̄ = TL·x and x = TR·x̄.
-// HSV holds the Hankel singular values in decreasing order.
+// HSV holds the Hankel singular values in decreasing order, to HSV's
+// contract: σ₁ within 10⁻⁵ relative and every value within
+// max(10⁻⁵·σ₁, 4·√n·2⁻⁵⁰·T); Balreal returns ErrAccuracyUnverified with the
+// result when σ₁ is below the resolution of its gramians.
 type BalrealResult struct {
 	Sys *System
 	HSV []float64
@@ -63,9 +66,12 @@ type BalrealResult struct {
 // exactly on the stored data: a model whose controllability or
 // observability matrix is rank deficient over the rationals returns
 // ErrNotMinimal, and ErrMinimalityUndetermined when the exact test exceeds
-// its work bound. The Hankel singular values are accurate relative to σ₁;
-// a minimal model can still have some below the float64 rounding of σ₁,
-// whose singular directions are known only to that rounding. Balreal
+// its work bound. The Hankel singular values carry HSV's contract: σ₁ to
+// 10⁻⁵ relative and every value to max(10⁻⁵·σ₁, 4·√n·2⁻⁵⁰·T), T the
+// gramian scale √(‖Wc‖_F·‖Wo‖_F); values below 2⁻⁵⁰·T have singular
+// directions known only to that rounding. When σ₁ is below the
+// double-double resolution of the gramians, about 1.6·10⁻¹²·√(n/4)·T, a
+// certified result is returned with ErrAccuracyUnverified. Balreal
 // certifies the pairing error E of the computed balancing vectors, with
 // E = TL·TR − I evaluated exactly: ‖E‖_F ≤ min(2⁻¹⁰, max(10⁻⁸,
 // 4·n·ε·σ₁/σₙ)). A model whose transformation fails this, being numerically
@@ -80,7 +86,7 @@ type BalrealResult struct {
 // with no states returns ErrDimensionMismatch, since TL and TR cannot be
 // formed. A result entry beyond float64 range returns ErrOverflow.
 func Balreal(sys *System) (*BalrealResult, error) {
-	br, err := balanceUncertified(sys)
+	br, unresolved, err := balanceResolved(sys)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +94,11 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	if !cert.full() {
 		return nil, fmt.Errorf("Balreal: balancing transformation numerically singular, TL·TR − I above tolerance (model numerically non-minimal): %w", ErrSingularTransform)
 	}
-	return balancedSimilarity("Balreal", sys, br, cert)
+	res, err := balancedSimilarity("Balreal", sys, br, cert)
+	if err == nil && unresolved {
+		return res, unresolvedSigma1("Balreal")
+	}
+	return res, err
 }
 
 // balancedSimilarity returns the certified balancing br of sys as a
@@ -162,143 +172,78 @@ func confirmBalancedStable(op string, br *BalrealResult) (*BalrealResult, error)
 	return br, nil
 }
 
+// unresolvedSigma1 is the error of a certified balancing whose σ̃₁ is below
+// the double-double resolution of the gramians.
+func unresolvedSigma1(op string) error {
+	return fmt.Errorf("%s: σ₁ below the double-double resolution of the gramians, Hankel singular values not resolved to %g relative: %w", op, hsvTau, ErrAccuracyUnverified)
+}
+
 // balanceUncertified is Balreal without the certificate of TL·TR = I.
 func balanceUncertified(sys *System) (*BalrealResult, error) {
+	br, _, err := balanceResolved(sys)
+	return br, err
+}
+
+// balanceResolved is balanceUncertified that also reports whether σ̃₁ is
+// below the double-double resolution of the gramians (hsvDDResolved).
+func balanceResolved(sys *System) (br *BalrealResult, unresolved bool, err error) {
 	if err := requireFiniteSystem("Balreal", sys); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Balreal"); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := policy.requireDelayFree("Balreal"); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	n, m, p := policy.n, policy.m, policy.p
 	if n == 0 {
-		return nil, fmt.Errorf("Balreal: system has no states: %w", ErrDimensionMismatch)
+		return nil, false, fmt.Errorf("Balreal: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	stable, err := sys.IsStable()
 	if err != nil {
-		return nil, fmt.Errorf("Balreal: %w", err)
+		return nil, false, fmt.Errorf("Balreal: %w", err)
 	}
 	if !stable {
-		return nil, fmt.Errorf("Balreal: %w", ErrUnstable)
+		return nil, false, fmt.Errorf("Balreal: %w", ErrUnstable)
 	}
 	if m == 0 || p == 0 {
-		return nil, fmt.Errorf("Balreal: model has no inputs or no outputs, so all Hankel singular values are zero: %w", ErrNotMinimal)
+		return nil, false, fmt.Errorf("Balreal: model has no inputs or no outputs, so all Hankel singular values are zero: %w", ErrNotMinimal)
 	}
 
 	switch exactMinimality(sys.A, sys.B, sys.C) {
 	case notMinimalExact:
-		return nil, fmt.Errorf("Balreal: %w", ErrNotMinimal)
+		return nil, false, fmt.Errorf("Balreal: %w", ErrNotMinimal)
 	case minimalityUndetermined:
-		return nil, fmt.Errorf("Balreal: %w", ErrMinimalityUndetermined)
+		return nil, false, fmt.Errorf("Balreal: %w", ErrMinimalityUndetermined)
 	}
 
+	f, err := newBalancedFactors("Balreal", sys, hsvDDGate, true)
+	if err != nil {
+		return nil, false, err
+	}
 	aRaw := sys.A.RawMatrix()
 	bRaw := sys.B.RawMatrix()
 	cRaw := sys.C.RawMatrix()
-	bScaled, eB := pow2Scaled(sys.B)
-	cScaled, eC := pow2Scaled(sys.C)
-	bsRaw := bScaled.RawMatrix()
-	csRaw := cScaled.RawMatrix()
+	lc, lo, s, uData, vtData, eB, eC := f.lc, f.lo, f.s, f.u, f.vt, f.eB, f.eC
+	unresolved = !f.resolved()
 
-	bufSize := 10*n*n + 2*n*m + 2*p*n + n
-	ws := make([]float64, bufSize)
+	ws := make([]float64, 5*n*n+n*m+p*n)
 	wi := 0
-
 	alloc := func(size int) []float64 {
 		res := ws[wi : wi+size : wi+size]
 		wi += size
 		return res
 	}
-
-	aData := alloc(n * n)
-	at := alloc(n * n)
-	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
-	for i := range n {
-		for j := range n {
-			at[i*n+j] = aRaw.Data[j*aRaw.Stride+i]
-		}
-	}
-	fb := alloc(n * m)
-	copyStrided(fb, m, bsRaw.Data, bsRaw.Stride, n, m)
-	fc := alloc(n * p)
-	for i := range n {
-		for j := range p {
-			fc[i*p+j] = csRaw.Data[j*csRaw.Stride+i]
-		}
-	}
-
-	A := mat.NewDense(n, n, aData)
-	At := mat.NewDense(n, n, at)
-	discrete := !sys.IsContinuous()
-	gc, err := balrealGramian(A, fb, m, discrete, "controllability", nil)
-	if err != nil {
-		return nil, err
-	}
-	gob, err := balrealGramian(At, fc, p, discrete, "observability", &gc.schur)
-	if err != nil {
-		return nil, err
-	}
-	lc, err := semidefiniteFactor(gc.x, n)
-	if err != nil {
-		return nil, fmt.Errorf("Balreal: controllability gramian factor: %w", err)
-	}
-	lo, err := semidefiniteFactor(gob.x, n)
-	if err != nil {
-		return nil, fmt.Errorf("Balreal: observability gramian factor: %w", err)
-	}
-
-	mData := alloc(n * n)
-	s := alloc(n)
-	uData := alloc(n * n)
-	vtData := alloc(n * n)
-	gemmTN(lo, lc, mData, n)
-	svd := func() error {
-		wq := make([]float64, 1)
-		impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
-			uData, n, vtData, n, wq, -1)
-		svdWork := make([]float64, int(wq[0]))
-		if !impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
-			uData, n, vtData, n, svdWork, len(svdWork)) {
-			return fmt.Errorf("Balreal: SVD of gramian factors did not converge: %w", ErrSchurFailed)
-		}
-		return nil
-	}
-	if err := svd(); err != nil {
-		return nil, err
-	}
-	if s[0] > 0 && eps()*scaledNorm2(gc.x)*scaledNorm2(gob.x)/(s[0]*s[0]) > hsvDDGate {
-		ddc, ok, err := gc.ddCholesky()
-		if err != nil {
-			return nil, fmt.Errorf("Balreal: controllability gramian: %w", err)
-		}
-		ddo, ok2, err := gob.ddCholesky()
-		if err != nil {
-			return nil, fmt.Errorf("Balreal: observability gramian: %w", err)
-		}
-		if !ok || !ok2 {
-			return nil, fmt.Errorf("Balreal: gramians too unbalanced for accurate Hankel singular values: %w", ErrSingularEquation)
-		}
-		ddProductTN(ddo, ddc, mData, n)
-		for i := range lc {
-			lc[i] = ddc[i].hi + ddc[i].lo
-			lo[i] = ddo[i].hi + ddo[i].lo
-		}
-		if err := svd(); err != nil {
-			return nil, err
-		}
-	}
 	lcGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lc}
 	loGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: lo}
 	if !ldexpFinite(lc, eB) || !ldexpFinite(lo, eC) || !ldexpFinite(s, eB+eC) {
-		return nil, fmt.Errorf("Balreal: gramian factors exceed float64 range: %w", ErrOverflow)
+		return nil, false, fmt.Errorf("Balreal: gramian factors exceed float64 range: %w", ErrOverflow)
 	}
 	if !(s[0] > 0) {
-		return nil, fmt.Errorf("Balreal: Hankel singular values of the minimal model underflow to zero: %w", ErrSingularTransform)
+		return nil, false, fmt.Errorf("Balreal: Hankel singular values of the minimal model underflow to zero: %w", ErrSingularTransform)
 	}
 	// Guards the division for Hankel singular values that round to 0.
 	sFloor := math.Ldexp(s[0], -106)
@@ -368,16 +313,16 @@ func balanceUncertified(sys *System) (*BalrealResult, error) {
 		m    *mat.Dense
 	}{{"A", Ab}, {"B", Bb}, {"C", Cb}, {"TL", Tinv}, {"TR", T}} {
 		if err := finiteDense("Balreal", out.name, out.m, ErrOverflow); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	balSys, err := policy.result(Ab, Bb, Cb, Db)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return &BalrealResult{Sys: balSys, HSV: s, TL: Tinv, TR: T}, nil
+	return &BalrealResult{Sys: balSys, HSV: s, TL: Tinv, TR: T}, unresolved, nil
 }
 
 // hsvDDGate is the bound on ε·‖Wc‖·‖Wo‖/σ₁², the size of the float64
@@ -444,7 +389,9 @@ func ddProductTN(lo, lc []dd, dst []float64, n int) {
 // the directions whose Hankel singular values are at most n·ε·σ₁ or,
 // failing their certificate, at most 2¹²·n·ε·σ₁; MatchDC then keeps the
 // DC gain to within twice the sum of the truncated Hankel singular values.
-// An order above the certified one returns ErrSingularTransform.
+// An order above the certified one returns ErrSingularTransform. When σ₁
+// is below the double-double resolution of the gramians, as for Balreal,
+// a reduction on either path is returned with ErrAccuracyUnverified.
 //
 // Balanced truncation and singular perturbation are stable for σ_order >
 // σ_order+1 but give no stability margin: an order splitting a near-equal
@@ -465,7 +412,7 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	if err := opts.StateProjection.validate("Balred"); err != nil {
 		return nil, nil, err
 	}
-	br, err := balanceUncertified(sys)
+	br, unresolved, err := balanceResolved(sys)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -482,6 +429,9 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 		res, err := balancedSimilarity("Balred", sys, br, cert)
 		if res == nil {
 			return nil, nil, err
+		}
+		if err == nil && unresolved {
+			return res.Sys, res.HSV, unresolvedSigma1("Balred")
 		}
 		return res.Sys, res.HSV, err
 	}
@@ -524,6 +474,9 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 			return red, br.HSV, err
 		}
 		return nil, nil, err
+	}
+	if unresolved {
+		return red, br.HSV, unresolvedSigma1("Balred")
 	}
 	return red, br.HSV, nil
 }
