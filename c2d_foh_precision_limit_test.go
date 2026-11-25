@@ -76,7 +76,9 @@ func fohBigResponse(sys *System, z complex128) complex128 {
 // With (Ad, C) fixed, Bd and Dd are unique, so the gap is the realization's,
 // not the algorithm's; only a non-MATLAB state basis (e.g. modal, ≈ 5e-11)
 // gets below it. The test checks the computed Bd/Dd equal the exact ones to
-// float64 and the response stays at the floor.
+// float64 and the response stays at the floor. The descriptor's FOH fails
+// the DC check of C2D in those coordinates and is discretized in the real
+// Schur coordinates of E⁻¹A (EJDS3U R2), below the floor.
 func TestC2DFOHFastUnstablePoleAtRealizationFloor(t *testing.T) {
 	A := mat.NewDense(4, 4, []float64{0.4772379316723846, -0.34242695208978235, 3.0044535097805705, 1.0637520253071637, -1.2420874299569429, -0.20003188408120062, 0.11473274499822719, 0.16959349801662824, -1.0047774264355196, -1.3851841703443815, 0.27218107556972498, -0.44627300141694909, -1.4307811032381565, 0.41811665441134566, -0.018699223791052828, -0.035841990052581166})
 	B := mat.NewDense(4, 1, []float64{1.3199170244111194, -0.44278772947457523, 1.2622973904592818, 0.78160796332474647})
@@ -152,6 +154,12 @@ func TestC2DFOHFastUnstablePoleAtRealizationFloor(t *testing.T) {
 			}
 			if fohWorst > 4*floor {
 				t.Errorf("FOH response error %.3g > 4·realization floor %.3g", fohWorst, floor)
+			}
+			if tc.sys.IsDescriptor() {
+				if foh.StateName != nil || !(fohWorst < floor/100) {
+					t.Errorf("descriptor FOH: StateName %v, error %.3g, want Schur coordinates below floor/100", foh.StateName, fohWorst)
+				}
+				return
 			}
 			var diff mat.Dense
 			diff.Sub(foh.B, exact.B)

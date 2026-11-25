@@ -19,6 +19,9 @@ type c2dPlan struct {
 	workSys         *System
 	lsSlow          *System
 	matchedRef      *System
+	// gate judges the result of a public ZOH, FOH or Tustin C2D of a
+	// descriptor (holdGate); nil otherwise.
+	gate *holdGate
 }
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
@@ -94,7 +97,11 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 func (p c2dPlan) run() (*System, error) {
 	if !p.sys.HasInternalDelay() && (p.method == C2DMethodZOH || p.method == C2DMethodFOH || p.method == C2DMethodImpulse) {
 		if conversionHasFractionalPathDelay(p.workSys.Delay, p.dt) || ((p.method == C2DMethodFOH || p.method == C2DMethodImpulse) && conversionHasFractionalExternalDelay(p.sys, p.dt)) {
-			return discretizeDelayedChannels(p.sys, p.dt, p.opts)
+			out, err := discretizeDelayedChannels(p.sys, p.dt, p.opts)
+			if err != nil || p.gate == nil {
+				return out, err
+			}
+			return out, p.gate.checkCore(p.discretizeWith(ioDelayFree(p.sys)))
 		}
 	}
 	if p.workSys.HasInternalDelay() {
@@ -122,23 +129,49 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 	return p.applyExternalDelays(disc)
 }
 
+// discretizeMethod discretizes workSys by the method; with a gate, a
+// ZOH or FOH result of a dense workSys that fails it is discretized again
+// from the real Schur form of workSys, in those coordinates and without
+// state names, and the first result that passes is returned, else the
+// first with the gate's error. A fold of a dense, non-normal E⁻¹A with
+// ‖A·dt‖ ≫ 1 holds DC poorly in its own coordinates, where even its
+// rounded exact hold is far off; orthogonal ones keep it.
 func (p c2dPlan) discretizeMethod() (*System, error) {
+	disc, err := p.discretizeWith(p.workSys)
+	if p.gate == nil || err != nil {
+		return disc, err
+	}
+	gerr := p.gate.check(disc)
+	if gerr == nil || p.gate.refused != nil || (p.method != C2DMethodZOH && p.method != C2DMethodFOH) || upperQuasiTriangular(p.workSys.A) {
+		return disc, gerr
+	}
+	schur, ok := realSchurPart(p.workSys)
+	if !ok {
+		return disc, gerr
+	}
+	if sd, err := p.discretizeWith(schur); err == nil && p.gate.check(sd) == nil {
+		return sd, nil
+	}
+	return disc, gerr
+}
+
+func (p c2dPlan) discretizeWith(sys *System) (*System, error) {
 	switch p.method {
 	case C2DMethodZOH:
-		return p.workSys.discretizeZOH(p.dt)
+		return sys.discretizeZOH(p.dt)
 	case C2DMethodTustin:
-		return p.workSys.discretizeTustin(p.dt, p.opts.PrewarpFrequency)
+		return sys.discretizeTustin(p.dt, p.opts.PrewarpFrequency)
 	case C2DMethodFOH:
-		return p.workSys.discretizeModifiedFOH(p.dt)
+		return sys.discretizeModifiedFOH(p.dt)
 	case C2DMethodLeastSquares:
-		return p.workSys.discretizeLeastSquares(p.dt, p.opts.FitOrder, p.lsSlow)
+		return sys.discretizeLeastSquares(p.dt, p.opts.FitOrder, p.lsSlow)
 	case C2DMethodImpulse:
-		return p.workSys.discretizeImpulseParity(p.dt)
+		return sys.discretizeImpulseParity(p.dt)
 	case C2DMethodMatched:
-		if p.workSys.IsDescriptor() {
-			return discretizeMatchedDescriptor(p.workSys, p.dt, p.matchedRef)
+		if sys.IsDescriptor() {
+			return discretizeMatchedDescriptor(sys, p.dt, p.matchedRef)
 		}
-		return p.workSys.discretizeMatched(p.dt, p.matchedRef)
+		return sys.discretizeMatched(p.dt, p.matchedRef)
 	default:
 		panic("unvalidated C2D method")
 	}

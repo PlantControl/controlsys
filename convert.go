@@ -16,23 +16,45 @@ import (
 // and I/O delays become sample delays (fractional ones per opts), internal
 // delays stay internal, and a singular-E descriptor model is first reduced as
 // MATLAB dss2ss does. A model without internal delays whose full-rank E
-// is too ill-conditioned for E⁻¹A (as in TransferFunction; for all methods
-// but matched, also LU condition estimate 1e6 or more) is discretized from
-// its generalized Schur parts, which keep the poles of the pencil (A, E),
-// by every method but least squares (matched from the transfer function of
-// the pencil), its I/O delays as for an explicit model; the result then
-// has new state coordinates and no state names. The split is certified
-// against the descriptor bar: where the stiff and slow modes cannot be
-// separated reliably (a split that fails or is not certified, for ZOH and
-// FOH within half the decoupling budget), C2D returns an error wrapping
-// ErrSchurFailed and a nil model, every method alike; the discretized model
-// itself is not certified. With internal delays, all
+// is too ill-conditioned for E⁻¹A (as in TransferFunction; for impulse and
+// for a model with I/O delays, also LU condition estimate 1e6 or more) is
+// discretized from its generalized Schur parts, which keep the poles of the
+// pencil (A, E), by every method but least squares (matched from the
+// transfer function of the pencil), its I/O delays as for an explicit
+// model; the result then has new state coordinates and no state names. The
+// split is certified against the descriptor bar: where the stiff and slow
+// modes cannot be separated reliably (a split that fails or is not
+// certified, for ZOH and FOH within half the decoupling budget), C2D
+// returns an error wrapping ErrSchurFailed and a nil model, every method
+// alike, except that ZOH, FOH and Tustin of a delay-free model whose LU
+// condition estimate is below 1e6 return the model of E⁻¹A with an error
+// wrapping ErrAccuracyUnverified. With internal delays, all
 // methods that accept them (ZOH, FOH, Tustin) treat the descriptor part G of H = lft(G, delay) the
 // same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions; a result with an Inf or
-// NaN entry in any matrix returns ErrOverflow. A least-squares fit of a
+// NaN entry in any matrix returns ErrOverflow.
+//
+// ZOH, FOH and Tustin of a continuous descriptor model (without internal
+// delays) are certified at DC: a nil error means that the DC gain of the
+// result, exact for its stored entries, lies entry by entry within the
+// descriptor bar u·(‖C_i‖‖M‖‖A‖‖M‖‖B_j‖ + ‖C_i‖‖M‖‖B_j‖ + |D_ij|),
+// M = A⁻¹, u = 4(n+5)ε (Frobenius norms of the delay-free sys, row i of C,
+// column j of B) of g0 = DCGain of the delay-free sys, plus ε·S_ij, the
+// rounding of the result's own entries (Ad, Bd, Cd, Dd):
+// S = |Dd| + Σ|Cd||X| + |Cd(I − Ad)⁻¹|·(|Ad||X| + |Bd|), X = (I − Ad)⁻¹Bd,
+// counted only where ε·S_ij ≤ √ε·max(|g0_ij|, Σ|C_i||A⁻¹B_j| + |D_ij|).
+// An entry where g0 is infinite (a pole at DC) is not checked; where other
+// entries are, there is no bar and the model is unverified. Where the model
+// of a dense E⁻¹A fails that check, ZOH and FOH discretize its real Schur
+// form instead, whose result has new state coordinates and no state names.
+// The model is returned with an error wrapping ErrAccuracyUnverified where
+// its DC gain is not within the bar, DCGain fails or is unverified, or the
+// split was refused as above. Neither the response away from DC nor the
+// state coordinates are certified.
+//
+// A least-squares fit of a
 // descriptor sampled through its pencil is not certified (see C2DFit) and is
 // returned with an error wrapping ErrAccuracyUnverified.
 //
@@ -108,6 +130,9 @@ func stiffSplitLimit(method C2DMethod, public bool) float64 {
 // c2dUnchecked is C2D without the check of its result; public reports a
 // call from C2D, C2DMap or D2D (stiffSplitLimit).
 func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*System, error) {
+	if public && holdGated(sys, opts.Method) {
+		return sys.c2dDescriptorGated(dt, opts)
+	}
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
 		limit := stiffSplitLimit(opts.Method, public)
 		route := foldInaccurateParts
@@ -157,6 +182,54 @@ func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*Syst
 	if err != nil {
 		return nil, err
 	}
+	return plan.run()
+}
+
+// c2dDescriptorGated is c2dUnchecked of a public C2D that holdGate judges.
+// A delay-free sys takes its stiffDescriptorParts at the stiffPencilSplit
+// gate (cond(E) 1e4): the LU fold there is off by cond(E)·ε, beyond the
+// descriptor bar, and no hold of the fold recovers it. A split refused at
+// an LU condition estimate below foldAccurateECond takes the fold, always
+// unverified (its DC can pass while the response off DC is O(1) wrong);
+// above it the error stays. Every result is gated (holdGate); a dense
+// standard form failing the gate is discretized again in real Schur
+// coordinates (c2dPlan.discretizeMethod).
+func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions) (*System, error) {
+	gate := newHoldGate(sys)
+	limit := stiffSplitLimit(opts.Method, true)
+	if !sys.HasDelay() {
+		if sp, ok := stiffDescriptorParts(sys); ok {
+			err := sp.within(limit)
+			switch {
+			case err == nil:
+				normalized, err := normalizeC2DOptions(dt, opts)
+				if err != nil {
+					return nil, err
+				}
+				out, err := discretizeStiffDescriptor(sys, sp.parts, dt, normalized)
+				if err != nil {
+					return nil, err
+				}
+				return out, gate.check(out)
+			case sp.eCond >= foldAccurateECond:
+				return nil, err
+			}
+			gate.refused = err
+		}
+	} else {
+		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			sys = px
+		}
+	}
+	plan, err := newC2DPlan(sys, dt, opts)
+	if err != nil {
+		return nil, err
+	}
+	plan.gate = gate
 	return plan.run()
 }
 

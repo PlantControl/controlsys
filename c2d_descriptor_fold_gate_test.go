@@ -92,10 +92,11 @@ func foldGateC2DError(t *testing.T, d *System, modes stepOracleModes, method C2D
 }
 
 // A full-rank E with LU cond(E) in [1e4, 1e6) (WOIVWF narrowing, wave 38)
-// takes the LU fold in C2D and Step: its error is cond(E)·ε-sized, so the
-// explicit result already matches the 320-bit pencil oracle and keeps the
-// state coordinates and names, at the cost of the explicit C2D.
-func TestC2DMildConditionedEKeepsLUFold(t *testing.T) {
+// takes the LU fold in C2D impulse and Step, whose cond(E)·ε error stays
+// within their lines there, keeping the state coordinates and names. ZOH,
+// FOH and Tustin, certified at DC against the descriptor bar, take the
+// pencil parts from cond 1e4 and drop the names (EJDS3U R4).
+func TestC2DMildConditionedERoutes(t *testing.T) {
 	sys := mildConditionedEDescriptor(t)
 	var lu mat.LU
 	lu.Factorize(sys.E)
@@ -112,8 +113,12 @@ func TestC2DMildConditionedEKeepsLUFold(t *testing.T) {
 		if err != nil {
 			t.Fatalf("method %v: %v", method, err)
 		}
-		if len(d.StateName) != len(sys.StateName) || d.StateName[0] != "x0" {
-			t.Errorf("method %v: StateName %v, want the LU fold's state names", method, d.StateName)
+		if method == C2DMethodImpulse {
+			if len(d.StateName) != len(sys.StateName) || d.StateName[0] != "x0" {
+				t.Errorf("method %v: StateName %v, want the LU fold's state names", method, d.StateName)
+			}
+		} else if d.StateName != nil {
+			t.Errorf("method %v: StateName %v, want none (pencil parts)", method, d.StateName)
 		}
 		if e := foldGateC2DError(t, d, modes, method, dt); e > 1e-9 {
 			t.Errorf("method %v: response error %.3g vs pencil oracle, want <= 1e-9", method, e)
