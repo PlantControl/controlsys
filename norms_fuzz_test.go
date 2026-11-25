@@ -14,7 +14,8 @@ import (
 // Norm(·,2) +Inf) exactly when an intended pole is unstable, +Inf for a
 // continuous model with D ≠ 0, and otherwise the energy √tr(BᵀXB) (+‖D‖²_F
 // when discrete) with X the exact rational observability gramian of the
-// float64 model.
+// float64 model: within 1e-5 relative when nil, Norm(·,2) returning the same
+// value and error, and ErrAccuracyUnverified the only error with a value.
 func FuzzH2Norm(f *testing.F) {
 	for _, s := range fzH2NormSeeds() {
 		fzAddSeed(f, s)
@@ -23,7 +24,7 @@ func FuzzH2Norm(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		h2, err := H2Norm(sys)
 		nrm, nerr := Norm(sys, NormH2)
-		fzContract(t, s, "Norm(2)", nerr == nil, nerr)
+		fzContract(t, s, "Norm(2)", nerr == nil || errors.Is(nerr, ErrAccuracyUnverified), nerr)
 		if math.IsNaN(nrm) || nrm < 0 || err == nil && (math.IsNaN(h2) || h2 < 0) {
 			t.Fatalf("H2Norm = %v, Norm(2) = %v\n%s", h2, nrm, s)
 		}
@@ -62,24 +63,26 @@ func FuzzH2Norm(f *testing.F) {
 			}
 			return
 		}
-		fzErr(t, s, "Norm(2)", nerr)
-		fzErr(t, s, "H2Norm", err)
-		if nrm != h2 {
-			t.Fatalf("Norm(2) = %v, H2Norm = %v\n%s", nrm, h2, s)
+		if nrm != h2 || (err == nil) != (nerr == nil) || err != nil && err.Error() != nerr.Error() {
+			t.Fatalf("Norm(2) = %v, %v; H2Norm = %v, %v\n%s", nrm, nerr, h2, err, s)
 		}
+		fzErr(t, s, "H2Norm", err, ErrAccuracyUnverified)
 		if !s.Discrete && !dZero {
 			if !math.IsInf(h2, 1) {
 				t.Fatalf("H2Norm = %v for a continuous model with D ≠ 0, want +Inf\n%s", h2, s)
 			}
 			return
 		}
-		tol := fzNormTol(s)
-		if tol > 1e-3 {
-			fzSkip(t, "H2: gramian ill-conditioned")
-		}
 		want, ok := fzH2Exact(s)
 		if !ok {
 			fzSkip(t, "H2: exact Lyapunov system singular")
+		}
+		if math.Abs(h2-want) > hsvTau*want {
+			t.Fatalf("H2Norm = %v nil, exact gramian gives %v: relative %.3g above the contract's 1e-5\n%s", h2, want, math.Abs(h2-want)/want, s)
+		}
+		tol := fzNormTol(s)
+		if tol > 1e-3 {
+			fzSkip(t, "H2: gramian ill-conditioned")
 		}
 		if math.IsInf(h2, 0) || math.Abs(h2-want) > tol*want+1e-300 {
 			t.Fatalf("H2Norm = %v, exact gramian gives %v (rel %.3g, tol %.3g)\n%s", h2, want, math.Abs(h2-want)/want, tol, s)
