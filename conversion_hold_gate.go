@@ -57,13 +57,22 @@ type holdGate struct {
 
 func newHoldGate(sys *System) *holdGate {
 	free := ioDelayFree(sys)
-	n, _, _ := free.Dims()
+	n, m, p := free.Dims()
+	if m == 0 || p == 0 {
+		return &holdGate{}
+	}
 	var solved []dd
-	g0, err := (*mat.Dense)(nil), error(nil)
-	if r := solveDCRegular(nil, free.A, free.B, free.C, free.D, 0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
-		g0, solved = r.g, r.x
-	} else if g0, err = free.DCGain(); err != nil {
-		return &holdGate{err: holdUnverified("DCGain of the model: %v", err)}
+	var g0 *mat.Dense
+	if n > 0 {
+		if r := solveDCRegular(nil, free.A, free.B, free.C, free.D, 0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
+			g0, solved = r.g, r.x
+		}
+	}
+	if g0 == nil {
+		var err error
+		if g0, err = free.DCGain(); err != nil {
+			return &holdGate{err: holdUnverified("DCGain of the model: %v", err)}
+		}
 	}
 	gate := &holdGate{g0: g0}
 	for _, v := range g0.RawMatrix().Data {
@@ -92,11 +101,11 @@ func (g *holdGate) check(out *System) error {
 	if g.refused != nil {
 		return holdUnverified("%v", g.refused)
 	}
-	if !g.gated {
-		return nil
-	}
 	if g.err != nil {
 		return g.err
+	}
+	if !g.gated {
+		return nil
 	}
 	if out.LFT != nil {
 		return holdUnverified("DC gain of a result with internal delays (fractional I/O delays) is not checked")

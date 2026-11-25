@@ -12,30 +12,65 @@ import (
 // descriptorDCBars is the worst entry of |ĥ − g0|/(bar₀ + allowance) for
 // the discrete result out of the continuous descriptor sys: ĥ and g0 exact
 // for the stored entries (fraction-free solves), bar₀ the descriptor bar
-// and the allowance ε·S of out where it is within √ε·max(|g0|, T0) (the
-// C2D DC contract). ok is false where an exact gain is singular.
+// u·(‖C_i‖‖M‖‖A‖‖M‖‖B_j‖ + ‖C_i‖‖M‖‖B_j‖ + |D_ij|), M = A⁻¹, and the
+// allowance ε·S of out, S = |D| + Σ|C||X| + |C(I−Φ)⁻¹|(|Φ||X| + |Γ|),
+// where it is within √ε·max(|g0|, T0) (the C2D DC contract), both formed
+// here in float64 from mat's inverse. ok is false where an exact gain or an
+// inverse is singular.
 func descriptorDCBars(t *testing.T, sys, out *System) (float64, bool) {
 	t.Helper()
-	g0, _, ok0 := exactDCGainAtNonsingular(nil, sys.A, sys.B, sys.C, sys.D, 0)
+	free := ioDelayFree(sys)
+	g0, _, ok0 := exactDCGainAtNonsingular(nil, free.A, free.B, free.C, free.D, 0)
 	h, _, ok := exactDCGainAtNonsingular(nil, out.A, out.B, out.C, out.D, 1)
 	if !ok0 || !ok {
 		return 0, false
 	}
-	b := newDCBar(ioDelayFree(sys))
-	allow := holdAllowance(out)
-	p, m := g0.Dims()
+	n, m, p := free.Dims()
+	nd, _, _ := out.Dims()
+	var M, X0, W, X, Y mat.Dense
+	if M.Inverse(free.A) != nil {
+		return 0, false
+	}
+	X0.Mul(&M, free.B)
+	ip := mat.NewDense(nd, nd, nil)
+	for i := range nd {
+		for j := range nd {
+			ip.Set(i, j, -out.A.At(i, j))
+		}
+		ip.Set(i, i, ip.At(i, i)+1)
+	}
+	if W.Inverse(ip) != nil {
+		return 0, false
+	}
+	X.Mul(&W, out.B)
+	Y.Mul(out.C, &W)
+	u := 4 * float64(n+5) * 0x1p-52
+	normM, normA := mat.Norm(&M, 2), mat.Norm(free.A, 2)
 	worst := 0.0
-	for k := range p * m {
-		i, j := k/m, k%m
-		a := 0.0
-		if allow != nil && allow[k] <= math.Sqrt(0x1p-52)*math.Max(math.Abs(g0.At(i, j)), b.terms[k]) {
-			a = allow[k]
+	for i := range p {
+		ci := mat.Norm(free.C.Slice(i, i+1, 0, n), 2)
+		for j := range m {
+			bj := mat.Norm(free.B.Slice(0, n, j, j+1), 2)
+			d := math.Abs(free.D.At(i, j))
+			bar := u * (ci*normM*normA*normM*bj + ci*normM*bj + d)
+			t0 := d
+			for l := range n {
+				t0 += math.Abs(free.C.At(i, l) * X0.At(l, j))
+			}
+			s := math.Abs(out.D.At(i, j))
+			for l := range nd {
+				w := math.Abs(out.B.At(l, j))
+				for k := range nd {
+					w += math.Abs(out.A.At(l, k) * X.At(k, j))
+				}
+				s += math.Abs(out.C.At(i, l)*X.At(l, j)) + math.Abs(Y.At(i, l))*w
+			}
+			a := 0x1p-52 * s
+			if !(a <= math.Sqrt(0x1p-52)*math.Max(math.Abs(g0.At(i, j)), t0)) {
+				a = 0
+			}
+			worst = math.Max(worst, math.Abs(h.At(i, j)-g0.At(i, j))/(bar+a))
 		}
-		bar := b.fullBar(k)
-		if b.lu == nil {
-			bar = b.bar[k]
-		}
-		worst = math.Max(worst, math.Abs(h.At(i, j)-g0.At(i, j))/(bar+a))
 	}
 	return worst, true
 }
@@ -267,5 +302,77 @@ func TestC2DDescriptorDCGateErrorBounds(t *testing.T) {
 	limit := bar + holdAllowance(edge)[0] - herr[0] - 0x1p-52*1 - halfUlp(1)
 	if !(accepted <= limit+0x1p-53) || !(accepted+0x1p-52 > limit-0x1p-53) {
 		t.Errorf("largest δ accepted %.4g, want the bar less both rounding bounds, %.4g", accepted, limit)
+	}
+}
+
+// A pole at DC that no exactly zero pivot shows (A's 3×3 block is the
+// singular [1 2 3; 4 5 6; 7 8 9], its float LU pivots nonzero) leaves the
+// finite entry without a bar: the descriptor bar of an ill-conditioned LU
+// would pass anything, so the result is unverified.
+func TestC2DDescriptorDCContractPoleBesideFiniteEntry(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		-1, -2, -3, 0,
+		-4, -5, -6, 0,
+		-7, -8, -9, 0,
+		0, 0, 0, -1.5})
+	E := mat.NewDense(4, 4, []float64{1, 0.25, 0, 0, 0, 1, 0.5, 0, 0, 0, 1, 0, 0, 0, 0, 0x1p-20})
+	B := mat.NewDense(4, 1, []float64{1, -0.5, 0.25, 0.75})
+	C := mat.NewDense(2, 4, []float64{1, 0.5, -0.25, 0, 0, 0, 0, 1})
+	sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 1, nil), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil || !math.IsInf(g.At(0, 0), 0) || math.IsInf(g.At(1, 0), 0) {
+		t.Fatalf("setup: DCGain %v, %v; want ±Inf and a finite entry", g, err)
+	}
+	for _, m := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		if out, err := sys.C2D(0.1, C2DOptions{Method: m}); !errors.Is(err, ErrAccuracyUnverified) || out == nil {
+			t.Errorf("%s: %v, want a model with ErrAccuracyUnverified", m, err)
+		}
+	}
+}
+
+// Where DCGain of the model is unverified (a pole within rounding of DC
+// whose exact limit is finite), C2D cannot check the result: a model with
+// ErrAccuracyUnverified, never nil.
+func TestC2DDescriptorDCContractDCGainUnverified(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-1, 0.3, 0.2, 0.4, -2, 0.1, 0, 0, 0})
+	for j := range 3 {
+		A.Set(2, j, 0.3*A.At(0, j)+0.7*A.At(1, j))
+	}
+	E := mat.NewDense(3, 3, []float64{1, 0.2, 0, 0, 1, 0, 0, 0, 1e-6})
+	B := mat.NewDense(3, 2, []float64{1, 0.5, -0.3, 0.8, 0.2, -0.4})
+	C := mat.NewDense(2, 3, []float64{1, 0, 0.5, 0, 1, -0.2})
+	sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 2, nil), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.DCGain(); !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("setup: DCGain error %v, want ErrAccuracyUnverified", err)
+	}
+	for _, m := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		if _, err := sys.C2D(0.1, C2DOptions{Method: m}); err == nil {
+			t.Errorf("%s: nil with DCGain unverified", m)
+		}
+	}
+}
+
+// A descriptor without inputs or outputs has no DC gain to check (DCGain
+// returns ErrDimensionMismatch): C2D stays nil.
+func TestC2DDescriptorDCContractNoChannels(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-1, 0.3, 0.2, 0.4, -2, 0.1, 0, 0, -0.5})
+	E := mat.NewDense(3, 3, []float64{1, 0.2, 0, 0, 1, 0, 0, 0, 1e-6})
+	for _, d := range [][2]int{{0, 1}, {1, 0}} {
+		m, p := d[0], d[1]
+		sys, err := NewDescriptor(A, newDense(3, m), newDense(p, 3), newDense(p, m), E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+			if out, err := sys.C2D(0.1, C2DOptions{Method: meth}); err != nil || out == nil {
+				t.Errorf("m=%d p=%d %s: %v", m, p, meth, err)
+			}
+		}
 	}
 }
