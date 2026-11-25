@@ -258,7 +258,9 @@ func TestScalarStableInfiniteExponentKeepsFiniteValues(t *testing.T) {
 				t.Fatal(err)
 			}
 			p, err := Covar(sys, mat.NewDense(2, 2, []float64{1, 0, 0, 1}))
-			if err != nil {
+			// With a = −1e308 the exact P ≈ 1e-308 underflows to 0 below the
+			// delayed gate's terms, so the 0 comes flagged unverified (D5BGNA).
+			if err != nil && !(tc.want == 0 && p != nil && errors.Is(err, ErrAccuracyUnverified)) {
 				t.Fatal(err)
 			}
 			if got := p.At(0, 0); got != tc.want {

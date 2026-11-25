@@ -261,6 +261,9 @@ const (
 	hsvRouteZero
 	// hsvRouteCoreFailed: the refined gramian path returned an error.
 	hsvRouteCoreFailed
+	// hsvRouteDelayed: Covar of a continuous model with external delays
+	// below the plain gate; it has no refined path.
+	hsvRouteDelayed
 )
 
 func hsvRouted(sys *System) ([]float64, hsvRoute, error) {
