@@ -275,3 +275,4 @@
 {"type":"snapshot_dependency","from_id":"GW7IRR","to_id":"DP5QM3"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-25T20:43:52.896241Z","data":{"id":"AQU6M7","agent_id":"coordinator@aqu6m7","ts":"2026-11-25T20:43:52.896241Z"}},{"type":"state","ts":"2026-11-25T20:43:52.896241Z","data":{"id":"AQU6M7","state":"doing","ts":"2026-11-25T20:43:52.896241Z"}}]}
