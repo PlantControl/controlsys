@@ -144,10 +144,16 @@ type gramianOperands struct {
 }
 
 func newGramianOperands(sys *System) gramianOperands {
-	n, m, p := sys.Dims()
-	aRaw := sys.A.RawMatrix()
-	bScaled, eB := pow2Scaled(sys.B)
-	cScaled, eC := pow2Scaled(sys.C)
+	return newGramianOperandsOf(sys.A, sys.B, sys.C)
+}
+
+// newGramianOperandsOf is newGramianOperands for the n×n A, n×m B and p×n C.
+func newGramianOperandsOf(Am, Bm, Cm *mat.Dense) gramianOperands {
+	n, m := Bm.Dims()
+	p, _ := Cm.Dims()
+	aRaw := Am.RawMatrix()
+	bScaled, eB := pow2Scaled(Bm)
+	cScaled, eC := pow2Scaled(Cm)
 	bsRaw := bScaled.RawMatrix()
 	csRaw := cScaled.RawMatrix()
 
@@ -190,16 +196,9 @@ func h2PlainResolved(n int, h, terms float64) bool {
 func refinedH2(sys *System) (h, terms float64, e int, err error) {
 	n, m, p := sys.Dims()
 	g := newGramianOperands(sys)
-	gob, err := balrealGramian(g.At, g.fc, p, !sys.IsContinuous(), "observability", nil)
+	l, xn, err := refinedFactor(g.At, g.fc, p, !sys.IsContinuous(), "observability")
 	if err != nil {
 		return 0, 0, 0, err
-	}
-	l, ok, err := gob.ddCholesky()
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	if !ok {
-		return 0, 0, 0, fmt.Errorf("H2Norm: observability gramian refinement stalled: %w", ErrSingularEquation)
 	}
 	var sum dd
 	for j := range m {
@@ -212,7 +211,25 @@ func refinedH2(sys *System) (h, terms float64, e int, err error) {
 		}
 	}
 	bn := scaledNorm2(g.fb)
-	return math.Sqrt(sum.hi + sum.lo), bn * bn * scaledNorm2(gob.x), g.eB + g.eC, nil
+	return math.Sqrt(sum.hi + sum.lo), bn * bn * xn, g.eB + g.eC, nil
+}
+
+// refinedFactor returns the double-double lower Cholesky factor L (n×n,
+// row-major) of the refined gramian of A and the n×k factor f, and ‖X‖_F of
+// that gramian; a stalled refinement returns ErrSingularEquation.
+func refinedFactor(A *mat.Dense, f []float64, k int, discrete bool, name string) ([]dd, float64, error) {
+	g, err := balrealGramian(A, f, k, discrete, name, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	l, ok, err := g.ddCholesky()
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok {
+		return nil, 0, fmt.Errorf("%s gramian refinement stalled: %w", name, ErrSingularEquation)
+	}
+	return l, scaledNorm2(g.x), nil
 }
 
 // exactZeroVerdict is the exact verdict on C·Aᵏ·B = 0 for k = 0..n−1.
@@ -231,12 +248,20 @@ const (
 // proves a nonzero, otherwise the products are formed exactly. Models with
 // more than exactZeroMaxN states are undetermined.
 func exactZeroTransfer(A, B, C *mat.Dense) exactZeroVerdict {
+	n, _ := B.Dims()
+	return exactZeroTransferSteps(A, B, C, n, n)
+}
+
+// exactZeroTransferSteps is exactZeroTransfer testing C·Aᵏ·B = 0 for
+// k = 0..steps−1, with the state-count cap applied to order instead of the
+// dimension of A.
+func exactZeroTransferSteps(A, B, C *mat.Dense, order, steps int) exactZeroVerdict {
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	if n == 0 || m == 0 || p == 0 || zeroDense(B) || zeroDense(C) {
 		return transferZero
 	}
-	if n > exactZeroMaxN {
+	if order > exactZeroMaxN {
 		return transferUndetermined
 	}
 	trans := m < p
@@ -244,10 +269,10 @@ func exactZeroTransfer(A, B, C *mat.Dense) exactZeroVerdict {
 	if trans {
 		b, c = c, b
 	}
-	if markovNonzeroModP(a, b, c, modPPrime) {
+	if markovNonzeroModP(a, b, c, modPPrime, steps) {
 		return transferNonzero
 	}
-	return markovExact(a, b, c)
+	return markovExactSteps(a, b, c, steps)
 }
 
 func zeroDense(M *mat.Dense) bool {
@@ -264,7 +289,7 @@ func zeroDense(M *mat.Dense) bool {
 
 // markovNonzeroModP reports whether some entry of c·aᵏ·b, k < n, is nonzero
 // modulo the prime q, which proves it nonzero over ℚ.
-func markovNonzeroModP(a, b, c dyadicImage, q uint64) bool {
+func markovNonzeroModP(a, b, c dyadicImage, q uint64, steps int) bool {
 	n, m, p := a.rows, b.cols, c.rows
 	top := max(a.maxShift, b.maxShift, c.maxShift)
 	pow2 := make([]uint64, top+1)
@@ -277,7 +302,7 @@ func markovNonzeroModP(a, b, c dyadicImage, q uint64) bool {
 	a.modP(q, pow2, am)
 	b.modP(q, pow2, bm)
 	c.modP(q, pow2, w)
-	for k := range n {
+	for k := range steps {
 		for i := range p {
 			for j := range m {
 				s := uint64(0)
@@ -289,7 +314,7 @@ func markovNonzeroModP(a, b, c dyadicImage, q uint64) bool {
 				}
 			}
 		}
-		if k == n-1 {
+		if k == steps-1 {
 			break
 		}
 		for i := range p {
@@ -319,6 +344,11 @@ func addModP(s, x, q uint64) uint64 {
 // divided by the largest power of two common to its entries, which keeps
 // every product's zero pattern.
 func markovExact(a, b, c dyadicImage) exactZeroVerdict {
+	return markovExactSteps(a, b, c, a.rows)
+}
+
+// markovExactSteps is markovExact for k < steps.
+func markovExactSteps(a, b, c dyadicImage, steps int) exactZeroVerdict {
 	n, m, p := a.rows, b.cols, c.rows
 	toBig := func(d dyadicImage) []*big.Int {
 		out := make([]*big.Int, len(d.mant))
@@ -339,7 +369,7 @@ func markovExact(a, b, c dyadicImage) exactZeroVerdict {
 		nw[i] = new(big.Int)
 	}
 	s, t := new(big.Int), new(big.Int)
-	for k := range n {
+	for k := range steps {
 		live := false
 		for i := range p {
 			row := w[i*n : i*n+n]
@@ -373,7 +403,7 @@ func markovExact(a, b, c dyadicImage) exactZeroVerdict {
 		if !live {
 			return transferZero
 		}
-		if k == n-1 {
+		if k == steps-1 {
 			break
 		}
 		for i := range p {

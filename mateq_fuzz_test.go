@@ -315,7 +315,9 @@ func FuzzGram(f *testing.F) {
 	})
 }
 
-// FuzzCovar: Covar of the delay-free spec model with PSD W = LLᵀ.
+// FuzzCovar: Covar of the delay-free spec model with PSD W = LLᵀ. A nil
+// result with n ≤ 6 is within 1e-5 relative (Frobenius) of the 320-bit
+// reference; ErrAccuracyUnverified is the only error with a value.
 // Decidably unstable models must return ErrUnstable; stable ones
 // C·X·Cᵀ (+ D·W·Dᵀ discrete) from the Kronecker X, with ±Inf exactly
 // where D·W·Dᵀ is nonzero for continuous models.
@@ -345,7 +347,14 @@ func FuzzCovar(f *testing.F) {
 			}
 			return
 		}
-		fzErr(t, s, "Covar", err, ErrSchurFailed)
+		if err == nil && n > 0 && n <= 6 {
+			if want, ok := covarExactReference(sys, W); ok {
+				if e := covarRelError(P, want); e > hsvTau {
+					t.Fatalf("Covar nil, relative error %.3g against the 320-bit reference above the contract's 1e-5\nP=%v\nref=%v\n%s", e, mqRaw(P), mqRaw(want), s)
+				}
+			}
+		}
+		fzErr(t, s, "Covar", err, ErrSchurFailed, ErrAccuracyUnverified)
 		var dw, dwd mat.Dense
 		D := mqDense(p, m, s.D)
 		dw.Mul(D, W)
