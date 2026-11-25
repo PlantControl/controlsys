@@ -110,6 +110,8 @@ type dcBar struct {
 	lu           []float64
 	ipiv         []int
 	normM        float64
+	// factor reports lu holding x0·E − A not yet factored.
+	factor       bool
 	normA, normE float64
 	normC, normB []float64
 	absD         []float64
@@ -117,7 +119,12 @@ type dcBar struct {
 	reason       string
 }
 
-func newDCBar(free *System) dcBar {
+func newDCBar(free *System) dcBar { return newDCBarSolved(free, nil) }
+
+// newDCBarSolved is newDCBar from X = M·B already solved (DCGain's
+// certified solve) where solved is not nil; x0·E − A is then factored only
+// where fullBar needs it.
+func newDCBarSolved(free *System, solved []dd) dcBar {
 	n, m, p := free.Dims()
 	b := dcBar{m: m, u: 4 * float64(n+5) * 0x1p-52, terms: make([]float64, p*m), absD: make([]float64, p*m)}
 	for i := range p {
@@ -169,15 +176,22 @@ func newDCBar(free *System) dcBar {
 		b.normB[j] = mat.Norm(free.B.Slice(0, n, j, j+1), 2)
 	}
 	ipiv := make([]int, n)
-	if !impl.Dgetrf(n, n, lu, n, ipiv) {
-		return b.singular(free)
+	if solved != nil {
+		for k := range x {
+			x[k] = solved[k].hi
+		}
+		b.lu, b.ipiv, b.factor = lu, ipiv, true
+	} else {
+		if !impl.Dgetrf(n, n, lu, n, ipiv) {
+			return b.singular(free)
+		}
+		br := free.B.RawMatrix()
+		for i := range n {
+			copy(x[i*m:i*m+m], br.Data[i*br.Stride:i*br.Stride+m])
+		}
+		impl.Dgetrs(blas.NoTrans, n, m, lu, n, ipiv, x, max(m, 1))
+		b.lu, b.ipiv = lu, ipiv
 	}
-	br := free.B.RawMatrix()
-	for i := range n {
-		copy(x[i*m:i*m+m], br.Data[i*br.Stride:i*br.Stride+m])
-	}
-	impl.Dgetrs(blas.NoTrans, n, m, lu, n, ipiv, x, max(m, 1))
-	b.lu, b.ipiv = lu, ipiv
 	cScale := 1.0
 	if !finiteSlice(x) {
 		cScale = b.balance(free, x)
@@ -220,6 +234,10 @@ func newDCBar(free *System) dcBar {
 // unchanged; it returns 2ˢ and scales normB and normC to match.
 func (b *dcBar) balance(free *System, x []float64) float64 {
 	n, m, _ := free.Dims()
+	if b.factor {
+		b.factor = false
+		impl.Dgetrf(n, n, b.lu, n, b.ipiv)
+	}
 	_, eb := math.Frexp(mat.Norm(free.B, math.Inf(1)))
 	_, ec := math.Frexp(mat.Norm(free.C, math.Inf(1)))
 	sh := (eb - ec) / 2
@@ -248,6 +266,12 @@ func (b dcBar) barOf(k int, normM float64) float64 {
 // fullBar is the bar of entry k with ‖M‖ formed from the LU factors,
 // computed once.
 func (b *dcBar) fullBar(k int) float64 {
+	if b.factor {
+		b.factor = false
+		if !impl.Dgetrf(len(b.ipiv), len(b.ipiv), b.lu, len(b.ipiv), b.ipiv) {
+			b.normM = math.Inf(1)
+		}
+	}
 	if b.normM == 0 {
 		n := len(b.ipiv)
 		inv := make([]float64, n*n)

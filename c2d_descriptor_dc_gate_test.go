@@ -261,7 +261,7 @@ func TestC2DDescriptorDCGateErrorBounds(t *testing.T) {
 		t.Fatal("the exact gain is rejected")
 	}
 	edge := &System{A: one(0.5), B: one((1 + accepted) / 2), C: one(1), D: one(0), Dt: 0.1}
-	_, herr, _ := holdDC(edge)
+	_, herr, _, _ := holdDC(edge)
 	limit := bar + holdAllowance(edge)[0] - herr[0] - 0x1p-52*1 - halfUlp(1)
 	if !(accepted <= limit+0x1p-53) || !(accepted+0x1p-52 > limit-0x1p-53) {
 		t.Errorf("largest δ accepted %.4g, want the bar less both rounding bounds, %.4g", accepted, limit)

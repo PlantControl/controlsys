@@ -17,6 +17,9 @@ type dcRegularSolve struct {
 	g *mat.Dense
 	// x is the refined X, row-major n×m, where g is.
 	x []dd
+	// lu and ipiv are the LU factors of the double P, where the solve ran.
+	lu   []float64
+	ipiv []int
 	// cond is the LU condition estimate of the double P.
 	cond float64
 	// solveErr is the LU solve's failure (an ill-conditioned or exactly
@@ -195,6 +198,7 @@ func solveDCRegular(E, A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegular
 		res.solveErr = mat.Condition(res.cond)
 		return res
 	}
+	res.lu, res.ipiv = luf, ipiv
 	X := blas64.General{Rows: n, Cols: m, Stride: m, Data: xd}
 	for i := range n {
 		copy(xd[i*m:i*m+m], br.Data[i*br.Stride:i*br.Stride+m])
