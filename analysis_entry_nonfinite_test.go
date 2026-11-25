@@ -132,7 +132,7 @@ func analysisCases() []analysisCase {
 		}},
 		{"Lqi", modelOpsFinite, func(s *System) error { return analysisErr(Lqi(s, analysisEye(3), analysisEye(1), nil)) }},
 		{"Lqg", modelOpsFinite, func(s *System) error { return analysisErr(Lqg(s, analysisEye(3), analysisEye(3), nil)) }},
-		{"H2Syn", analysisGenPlant, func(s *System) error { return analysisErr(H2Syn(s, 1, 1)) }},
+		{"H2Syn", analysisGenPlant, func(s *System) error { return analysisUnverifiedKept(H2Syn(s, 1, 1)) }},
 		{"HinfSyn", analysisGenPlant, func(s *System) error { return analysisErr(HinfSyn(s, 1, 1)) }},
 		{"Mixsyn/G", modelOpsFinite, func(s *System) error {
 			return analysisErr(Mixsyn(s, modelOpsGain(0.5), modelOpsGain(0.1), nil))
@@ -206,6 +206,17 @@ func analysisCases() []analysisCase {
 // counts as no error (GAV3BD).
 func analysisHardGoalsKept(res *SystuneResult, err error) error {
 	if res != nil && errors.Is(err, ErrHardGoalsNotMet) {
+		return nil
+	}
+	return err
+}
+
+// analysisUnverifiedKept is analysisErr for H2Syn on analysisGenPlant, whose
+// closed loop has an exact H2 norm of 2.2·10⁻¹⁷, below the double-double
+// resolution of its gramian: the full result with ErrAccuracyUnverified
+// counts as no error (D5BGNA).
+func analysisUnverifiedKept(res *H2SynResult, err error) error {
+	if res != nil && errors.Is(err, ErrAccuracyUnverified) {
 		return nil
 	}
 	return err

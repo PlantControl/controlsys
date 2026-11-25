@@ -68,29 +68,8 @@ func (f *balancedFactors) resolved() bool { return hsvDDResolved(f.n, f.t, f.s[0
 // double-double Cholesky factors when ε·‖Wc‖_F·‖Wo‖_F/σ̃₁² exceeds gate.
 func newBalancedFactors(op string, sys *System, gate float64, vectors bool) (*balancedFactors, error) {
 	n, m, p := sys.Dims()
-	aRaw := sys.A.RawMatrix()
-	bScaled, eB := pow2Scaled(sys.B)
-	cScaled, eC := pow2Scaled(sys.C)
-	bsRaw := bScaled.RawMatrix()
-	csRaw := cScaled.RawMatrix()
-
-	ws := make([]float64, 2*n*n+n*m+p*n)
-	aData, at, fb, fc := ws[:n*n], ws[n*n:2*n*n], ws[2*n*n:2*n*n+n*m], ws[2*n*n+n*m:]
-	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
-	for i := range n {
-		for j := range n {
-			at[i*n+j] = aRaw.Data[j*aRaw.Stride+i]
-		}
-	}
-	copyStrided(fb, m, bsRaw.Data, bsRaw.Stride, n, m)
-	for i := range n {
-		for j := range p {
-			fc[i*p+j] = csRaw.Data[j*csRaw.Stride+i]
-		}
-	}
-
-	A := mat.NewDense(n, n, aData)
-	At := mat.NewDense(n, n, at)
+	g := newGramianOperands(sys)
+	A, At, fb, fc, eB, eC := g.A, g.At, g.fb, g.fc, g.eB, g.eC
 	discrete := !sys.IsContinuous()
 	gc, err := balrealGramian(A, fb, m, discrete, "controllability", nil)
 	if err != nil {
@@ -153,6 +132,87 @@ func newBalancedFactors(op string, sys *System, gate float64, vectors bool) (*ba
 	}
 	f.t = math.Sqrt(nc) * math.Sqrt(no)
 	return f, nil
+}
+
+// gramianOperands holds the operands of the refined gramians of a standard
+// state-space model: A and Aᵀ (row stride n) and the right-hand factors
+// fb = B·2⁻ᵉᴮ (n×m) and fc = Cᵀ·2⁻ᵉᶜ (n×p), scaled as pow2Scaled.
+type gramianOperands struct {
+	A, At  *mat.Dense
+	fb, fc []float64
+	eB, eC int
+}
+
+func newGramianOperands(sys *System) gramianOperands {
+	n, m, p := sys.Dims()
+	aRaw := sys.A.RawMatrix()
+	bScaled, eB := pow2Scaled(sys.B)
+	cScaled, eC := pow2Scaled(sys.C)
+	bsRaw := bScaled.RawMatrix()
+	csRaw := cScaled.RawMatrix()
+
+	ws := make([]float64, 2*n*n+n*m+p*n)
+	aData, at, fb, fc := ws[:n*n], ws[n*n:2*n*n], ws[2*n*n:2*n*n+n*m], ws[2*n*n+n*m:]
+	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
+	for i := range n {
+		for j := range n {
+			at[i*n+j] = aRaw.Data[j*aRaw.Stride+i]
+		}
+	}
+	copyStrided(fb, m, bsRaw.Data, bsRaw.Stride, n, m)
+	for i := range n {
+		for j := range p {
+			fc[i*p+j] = csRaw.Data[j*csRaw.Stride+i]
+		}
+	}
+	return gramianOperands{A: mat.NewDense(n, n, aData), At: mat.NewDense(n, n, at), fb: fb, fc: fc, eB: eB, eC: eC}
+}
+
+// h2DDResolved reports whether h² ≥ 16·n·2⁻¹⁰⁰·terms/(2τ), h resolved to τ
+// against the double-double rounding of the observability gramian terms.
+// A zero or non-finite ratio fails.
+func h2DDResolved(n int, h, terms float64) bool {
+	r := math.Sqrt(terms) / h
+	return h > 0 && hsvDDK*float64(n)*0x1p-100*r*r <= 2*hsvTau
+}
+
+// h2PlainResolved reports whether h² ≥ 16·n·ε·terms/(2τ), the float64
+// rounding of the Lyapunov gramian terms within τ of h. A zero or
+// non-finite ratio fails.
+func h2PlainResolved(n int, h, terms float64) bool {
+	r := math.Sqrt(terms) / h
+	return h > 0 && hsvTier1K*float64(n)*eps()*r*r <= 2*hsvTau
+}
+
+// refinedH2 returns, in the coordinates B·2⁻ᵉᴮ, C·2⁻ᶜ with e = eB+eC,
+// h = ‖Lᵀ·B‖_F accumulated in double-double from the double-double Cholesky
+// factor L of the refined observability gramian Wo, and terms = ‖B‖_F²·‖Wo‖_F.
+func refinedH2(sys *System) (h, terms float64, e int, err error) {
+	n, m, p := sys.Dims()
+	g := newGramianOperands(sys)
+	gob, err := balrealGramian(g.At, g.fc, p, !sys.IsContinuous(), "observability", nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	l, ok, err := gob.ddCholesky()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("H2Norm: observability gramian refinement stalled: %w", ErrSingularEquation)
+	}
+	var sum dd
+	for j := range m {
+		for k := range n {
+			var t dd
+			for i := k; i < n; i++ {
+				t = t.add(l[i*n+k].mul(dd{g.fb[i*m+j], 0}))
+			}
+			sum = sum.add(t.mul(t))
+		}
+	}
+	bn := scaledNorm2(g.fb)
+	return math.Sqrt(sum.hi + sum.lo), bn * bn * scaledNorm2(gob.x), g.eB + g.eC, nil
 }
 
 // exactZeroVerdict is the exact verdict on C·Aᵏ·B = 0 for k = 0..n−1.

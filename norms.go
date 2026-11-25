@@ -23,8 +23,10 @@ const NormH2 = 2
 // sys, following MATLAB norm
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.norm.html).
 //
-// The H2 norm of an unstable model is +Inf, with a nil error, where unstable
-// means IsStable is false, which holds within rounding of its band: a model
+// For a stable model the H2 norm is H2Norm's, with its error, so it carries
+// H2Norm's accuracy contract. The H2 norm of an unstable model is +Inf,
+// with a nil error, where unstable means IsStable is false, which holds
+// within rounding of its band: a model
 // within that rounding of the band edge can return +Inf although its exact
 // poles are stable, or a finite norm although they are not. The L∞ norm is the peak gain
 // over frequency without regard to stability; it equals the H∞ norm for
@@ -71,6 +73,15 @@ func Norm(sys *System, normType float64) (float64, error) {
 // certificate: a gramian equation within the singular band returns
 // ErrSingularEquation, an uncertified one the norm with
 // ErrAccuracyUnverified.
+//
+// With a nil error the norm is accurate to 10⁻⁵ relative. A norm that the
+// float64 gramian cannot resolve is recomputed from the refined
+// double-double observability gramian; when it is below that resolution
+// too, about 1.6·10⁻¹²·√(n/4)·‖B‖_F·‖Wo‖_F^½, or the refined gramian fails,
+// the value is returned with ErrAccuracyUnverified. A model whose strictly
+// proper part C·(sI − A)⁻¹·B is exactly zero on the stored data, decided in
+// exact arithmetic for up to 32 states, returns 0 (‖D‖_F when discrete)
+// with a nil error.
 func H2Norm(sys *System) (float64, error) {
 	return h2Norm(sys, false)
 }
@@ -78,20 +89,28 @@ func H2Norm(sys *System) (float64, error) {
 // h2Norm is H2Norm, with the gramian's Lyapunov certificate skipped when
 // uncertified is set (H2Syn's closed-loop Gamma when H2Norm bands).
 func h2Norm(sys *System, uncertified bool) (float64, error) {
+	h, _, err := h2NormRouted(sys, uncertified)
+	return h, err
+}
+
+// h2NormRouted is h2Norm with the route of its result (hsvRoute values:
+// the tiers are HSV's). The uncertified path keeps the plain computation.
+func h2NormRouted(sys *System, uncertified bool) (float64, hsvRoute, error) {
+	base := hsvRouteBase
 	if err := requireFiniteSystem("H2Norm", sys); err != nil {
-		return 0, err
+		return 0, base, err
 	}
 	sys, err := normExplicitForm(sys, "H2Norm")
 	if err != nil {
-		return 0, err
+		return 0, base, err
 	}
 	if sys.HasInternalDelay() && sys.IsContinuous() &&
 		(!allZeroDense(sys.D) || lftHasDirectFeedthrough(sys.LFT)) {
-		return math.Inf(1), nil
+		return math.Inf(1), base, nil
 	}
 	sys, err = finiteDimensionalModel(sys, "H2Norm")
 	if err != nil {
-		return 0, err
+		return 0, base, err
 	}
 	policy := newEnergyAnalysisPolicy(sys)
 	policy.uncertified = uncertified
@@ -99,28 +118,28 @@ func h2Norm(sys *System, uncertified bool) (float64, error) {
 
 	if n == 0 || m == 0 || p == 0 {
 		if sys.IsContinuous() && !allZeroDense(sys.D) {
-			return math.Inf(1), nil
+			return math.Inf(1), base, nil
 		}
 		norm := frobNormD(sys.D, p, m)
 		if math.IsInf(norm, 0) {
-			return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+			return 0, base, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
 		}
-		return norm, nil
+		return norm, base, nil
 	}
 
 	if err := policy.requireStable(ErrUnstable); err != nil {
-		return 0, err
+		return 0, base, err
 	}
 
 	if sys.IsContinuous() && !allZeroDense(sys.D) {
-		return math.Inf(1), nil
+		return math.Inf(1), base, nil
 	}
 
 	B, eB := pow2Scaled(sys.B)
 	X, eC, err := policy.scaledGramian(GramObservability)
 	err, unv := unverifiedLyapunov(err)
 	if err != nil {
-		return 0, err
+		return 0, base, err
 	}
 
 	xb := make([]float64, n*m)
@@ -145,12 +164,41 @@ func h2Norm(sys *System, uncertified bool) (float64, error) {
 		norm = math.Hypot(norm, frobNormD(sys.D, p, m))
 	}
 	if math.IsInf(norm, 0) || math.IsNaN(norm) {
-		return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+		return 0, base, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
 	}
 	if unv != nil {
-		return norm, fmt.Errorf("H2Norm: %w", unv)
+		return norm, base, fmt.Errorf("H2Norm: %w", unv)
 	}
-	return norm, nil
+	if uncertified {
+		return norm, base, nil
+	}
+	if zeroDense(sys.B) || zeroDense(sys.C) {
+		return norm, hsvRouteZero, nil
+	}
+	e := eB + eC
+	bn := mat.Norm(B, 2)
+	dn := frobNormD(sys.D, p, m)
+	if !sys.IsDiscrete() {
+		dn = 0
+	}
+	if h2PlainResolved(n, math.Ldexp(norm, -e), bn*bn*mat.Norm(X, 2)) {
+		return norm, hsvRoutePlain, nil
+	}
+	hs, terms, eR, err := refinedH2(sys)
+	if err != nil {
+		return norm, hsvRouteCoreFailed, fmt.Errorf("H2Norm: refined gramian failed (%v), plain-path value not verified: %w", err, ErrAccuracyUnverified)
+	}
+	refined := math.Hypot(math.Ldexp(hs, eR), dn)
+	if math.IsInf(refined, 0) || math.IsNaN(refined) {
+		return 0, base, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+	}
+	if h2DDResolved(n, math.Hypot(hs, math.Ldexp(dn, -eR)), terms) {
+		return refined, hsvRouteCore, nil
+	}
+	if exactZeroTransfer(sys.A, sys.B, sys.C) == transferZero {
+		return dn, hsvRouteZero, nil
+	}
+	return refined, hsvRouteFloor, fmt.Errorf("H2Norm: norm below the double-double resolution of the observability gramian, not resolved to %g relative: %w", hsvTau, ErrAccuracyUnverified)
 }
 
 // pow2Scaled returns M·2⁻ᵉ and e, with 2ᵉ the power of two just above
