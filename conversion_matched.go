@@ -14,7 +14,11 @@ import (
 // are interpreted as the artificial zeros of matched discretization and removed.
 // Other nonpositive real roots are rejected rather than inventing a complex model.
 // Gain matches the leading low-frequency term, including poles or zeros at DC.
-func (sys *System) d2cMatched() (*System, error) {
+// The gain is set from the DCGain of ref, the caller's model, where no root
+// lies in that window; the result is returned with errMatchedUnverified
+// unless the discrete roots' own DC product and the result's DC gain agree
+// with it (matchedReference).
+func (sys *System) d2cMatched(ref *System) (*System, error) {
 	if sys.IsContinuous() {
 		return nil, fmt.Errorf("matched: %w", ErrWrongDomain)
 	}
@@ -43,30 +47,47 @@ func (sys *System) d2cMatched() (*System, error) {
 	}
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
 	var out *System
+	var unverified error
 	if z, p, g, ok := matchedD2CPencilRoots(sys, numerator, dz, dp, k, artificial); ok {
-		out, _ = matchedD2CModel(z, p, g, artificial, sys.Dt)
+		out, unverified, err = matchedD2CModel(z, p, g, artificial, sys.Dt, ref, nil, nil)
+		if err != nil {
+			out = nil
+		}
 	}
 	if out == nil {
-		if out, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt); err != nil {
+		if out, unverified, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt, ref, numerator, result.TF.Den[0]); err != nil {
 			return nil, err
 		}
 	}
 	newDelayConversionPolicy(sys.Dt).applyContinuousDelayFields(out, sys)
 	propagateNames(out, sys)
 	out.StateName = nil
-	return out, nil
+	return out, unverified
 }
 
 // matchedD2CModel realizes the continuous matched model of the discrete
-// roots dz (less the artificial zeros at −1), dp and gain k.
-func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64) (*System, error) {
+// roots dz (less the artificial zeros at −1), dp and gain k. Outside the
+// DC window (matchedDCWindow) the roots of the transfer function (num and
+// den non-nil) are first polished on their polynomials, and the gain
+// matches the DCGain of ref; the second result is the verdict of the root
+// and DC gates against it.
+func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64, ref *System, num, den []float64) (*System, error, error) {
 	cz, err := matchedLogRoots(dz, dt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cp, err := matchedLogRoots(dp, dt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	window := matchedDCWindow(dz, dp, cz, cp, dt)
+	if !window && num != nil {
+		pz, pp := matchedPolish(num, dz), matchedPolish(den, dp)
+		if lz, err := matchedLogRoots(pz, dt); err == nil {
+			if lp, err := matchedLogRoots(pp, dt); err == nil && !matchedDCWindow(pz, pp, lz, lp, dt) {
+				dz, dp, cz, cp = pz, pp, lz, lp
+			}
+		}
 	}
 	all := slices.Clone(dz)
 	for range artificial {
@@ -74,9 +95,22 @@ func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64)
 	}
 	gain, err := matchedContinuousGain(all, dp, cz, cp, k, dt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return matchedCascade(cz, cp, gain, 0)
+	if window {
+		out, _, _, err := matchedCascadeDC(cz, cp, gain, 0)
+		return out, nil, err
+	}
+	r := newMatchedReference(ref)
+	gain, unverified := r.matchedGain(matchedDiscreteProduct(k, dz, dp, artificial), matchedContinuousProduct(1, cz, cp), gain)
+	out, dc, dcOK, err := matchedCascadeDC(cz, cp, gain, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	if unverified == nil && !r.dcAgrees(dc, dcOK) {
+		unverified = matchedUnverified("DC gain of the result is not within the descriptor bar of DCGain")
+	}
+	return out, unverified, nil
 }
 
 // matchedD2CPencilRoots returns the poles eig(A), as MATLAB
@@ -288,7 +322,15 @@ func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float
 	return real(ratio), nil
 }
 
-func (sys *System) discretizeMatched(dt float64) (*System, error) {
+// discretizeMatched is matched C2D of sys, the model the route hands over,
+// with the DC gain matched to the DCGain of ref, the caller's model, where
+// no root lies in the DC window (matchedDCWindow; there the leading term of
+// the roots is matched as before). The roots of the transfer function, when
+// they are the ones mapped, are polished on their polynomials. The result
+// comes with errMatchedUnverified when DCGain of ref is unavailable, the
+// roots' own DC product is not within terms of it, or the result's DC gain
+// is not within the descriptor bar of it (matchedReference).
+func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
@@ -321,25 +363,50 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	}
 	cz, cp, k := source.Zeros[0][0], source.Poles[0][0], source.Gain[0][0]
 	dz, dp, gain, err := matchedDiscreteRoots(cz, cp, k, dt)
+	transfer := true
 	if pz, pp, pk, ok := matchedPencilRoots(sys, cz, cp, k); ok {
 		if z, p, g, perr := matchedDiscreteRoots(pz, pp, pk, dt); perr == nil {
 			dz, dp, gain, err = z, p, g, nil
+			cz, cp, k = pz, pp, pk
+			transfer = false
 		}
 	}
 	if err != nil {
 		return nil, err
 	}
-	realized, err := matchedCascade(dz, dp, gain, dt)
+	if matchedDCWindow(dz, dp, cz, cp, dt) {
+		realized, _, _, err := matchedCascadeDC(dz, dp, gain, dt)
+		if err != nil {
+			return nil, err
+		}
+		return matchedDiscreteResult(realized, sys, dt, nil)
+	}
+	if transfer {
+		pz, pp := matchedPolish(rational.TF.Num[0][0], cz), matchedPolish(rational.TF.Den[0], cp)
+		if z, p, g, perr := matchedDiscreteRoots(pz, pp, k, dt); perr == nil {
+			cz, cp, dz, dp, gain = pz, pp, z, p, g
+		}
+	}
+	r := newMatchedReference(ref)
+	gain, unverified := r.matchedGain(matchedContinuousProduct(k, cz, cp), matchedDiscreteProduct(1, dz, dp, 0), gain)
+	realized, dc, dcOK, err := matchedCascadeDC(dz, dp, gain, dt)
 	if err != nil {
 		return nil, err
 	}
+	if unverified == nil && !r.dcAgrees(dc, dcOK) {
+		unverified = matchedUnverified("DC gain of the result is not within the descriptor bar of DCGain")
+	}
+	return matchedDiscreteResult(realized, sys, dt, unverified)
+}
+
+func matchedDiscreteResult(realized, sys *System, dt float64, unverified error) (*System, error) {
 	out, err := newDelayConversionPolicy(dt).applyDiscreteDelayFields(realized, sys)
 	if err != nil {
 		return nil, err
 	}
 	propagateNames(out, sys)
 	out.StateName = nil
-	return out, nil
+	return out, unverified
 }
 
 // matchedDiscreteRoots maps continuous roots to exp(root·dt), adds zeros at
@@ -541,34 +608,60 @@ type matchedSection struct {
 // poles to rounding; a companion realization loses clustered poles. Models
 // the cascade cannot hold in finite float64 keep the companion realization.
 func matchedCascade(zeros, poles []complex128, gain, dt float64) (*System, error) {
-	if sys := matchedCascadeFinite(zeros, poles, gain, dt); sys != nil {
-		return sys, nil
+	sys, _, _, err := matchedCascadeDC(zeros, poles, gain, dt)
+	return sys, err
+}
+
+// matchedCascadeDC is matchedCascade with the DC gain of the cascade (at
+// z = 1, or s = 0 for dt = 0) and its bound against the exact gain of the
+// stored entries; ok is false for the companion realization or a section
+// whose DC is not resolved.
+func matchedCascadeDC(zeros, poles []complex128, gain, dt float64) (*System, matchedDC, bool, error) {
+	if sys, dc, ok := matchedCascadeSections(zeros, poles, gain, dt); sys != nil {
+		return sys, dc, ok, nil
 	}
 	discrete, err := NewZPK(zeros, poles, gain, dt)
 	if err != nil {
-		return nil, err
+		return nil, matchedDC{}, false, err
 	}
 	res, err := discrete.StateSpace()
 	if err != nil {
-		return nil, err
+		return nil, matchedDC{}, false, err
 	}
-	return res.Sys, nil
+	if len(zeros) == 0 && len(poles) == 0 {
+		return res.Sys, mddFloat(gain), true, nil
+	}
+	return res.Sys, matchedDC{}, false, nil
 }
 
 func matchedCascadeFinite(zeros, poles []complex128, gain, dt float64) *System {
+	sys, _, _ := matchedCascadeSections(zeros, poles, gain, dt)
+	return sys
+}
+
+// matchedCascadeSections realizes the cascade with the gain on B and D, so
+// every other entry is a copy of a section entry (B and D factors 0 or 1)
+// and the stored model is gain·ΠSᵢ exactly; discrete two-zero sections
+// take realizeAtOne. It also returns gain·ΠSᵢ(x0) by matchedSectionDC.
+func matchedCascadeSections(zeros, poles []complex128, gain, dt float64) (*System, matchedDC, bool) {
 	if len(zeros) > len(poles) || len(poles) == 0 || !finiteSlice([]float64{gain}) {
-		return nil
+		return nil, matchedDC{}, false
 	}
 	for _, r := range zeros {
 		if cmplx.IsNaN(r) || cmplx.IsInf(r) {
-			return nil
+			return nil, matchedDC{}, false
 		}
 	}
 	for _, r := range poles {
 		if cmplx.IsNaN(r) || cmplx.IsInf(r) {
-			return nil
+			return nil, matchedDC{}, false
 		}
 	}
+	x0 := 0.0
+	if dt > 0 {
+		x0 = 1
+	}
+	dc, dcOK := mddFloat(gain), true
 	n := len(poles)
 	a := make([]float64, n*n)
 	b := make([]float64, n)
@@ -577,6 +670,15 @@ func matchedCascadeFinite(zeros, poles []complex128, gain, dt float64) *System {
 	off := n
 	for _, s := range matchedSections(zeros, poles) {
 		as, bs, cs, ds := s.realize()
+		if dt > 0 {
+			as, bs, cs, ds = s.realizeAtOne()
+		}
+		if dcOK {
+			var sd matchedDC
+			if sd, dcOK = matchedSectionDC(as, bs, cs, ds, x0); dcOK {
+				dc = matchedDCTimes(dc, sd)
+			}
+		}
 		q := s.order
 		off -= q
 		for i := range q {
@@ -595,18 +697,18 @@ func matchedCascadeFinite(zeros, poles []complex128, gain, dt float64) *System {
 		copy(c[off:off+q], cs)
 		d *= ds
 	}
-	for j := range c {
-		c[j] *= gain
+	for j := range b {
+		b[j] *= gain
 	}
 	d *= gain
 	if !finiteSlice(a) || !finiteSlice(b) || !finiteSlice(c) || !finiteSlice([]float64{d}) {
-		return nil
+		return nil, matchedDC{}, false
 	}
 	sys, err := newDerived(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{d}), dt)
 	if err != nil {
-		return nil
+		return nil, matchedDC{}, false
 	}
-	return sys
+	return sys, dc, dcOK
 }
 
 // matchedSections groups conjugate pairs and real roots into sections of
@@ -741,4 +843,24 @@ func (s matchedSection) realize() (a, b, c []float64, d float64) {
 	}
 	p1, p2 := real(s.p1), real(s.p2)
 	return []float64{p1, 1, 0, p2}, b, []float64{r0 + p1*r1, r1}, d
+}
+
+// realizeAtOne is realize for a discrete section, with the residual
+// r(z) = num − den of a two-zero section set from
+// r(1) = (1−z₁)(1−z₂) − (1−p₁)(1−p₂), formed from the differences 1 − root,
+// so the section's gain at z = 1 does not cancel r₁ + r₀.
+func (s matchedSection) realizeAtOne() (a, b, c []float64, d float64) {
+	if s.order != 2 || len(s.zeros) != 2 {
+		return s.realize()
+	}
+	z1, z2 := s.zeros[0], s.zeros[1]
+	r1 := real((s.p1 - z1) + (s.p2 - z2))
+	r1at := real((1-z1)*(1-z2) - (1-s.p1)*(1-s.p2))
+	b = []float64{0, 1}
+	if imag(s.p1) != 0 {
+		re, im := real(s.p1), math.Abs(imag(s.p1))
+		return []float64{re, im, -im, re}, b, []float64{(r1at - (1-re)*r1) / im, r1}, 1
+	}
+	p1, p2 := real(s.p1), real(s.p2)
+	return []float64{p1, 1, 0, p2}, b, []float64{r1at - (1-p1)*r1, r1}, 1
 }

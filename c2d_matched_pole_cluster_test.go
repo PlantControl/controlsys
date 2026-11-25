@@ -292,7 +292,7 @@ func TestMatchedCascadeFinite_OverflowReturnsNil(t *testing.T) {
 		zeros, poles []complex128
 		gain         float64
 	}{
-		{"gain times section C", []complex128{-1e155}, []complex128{1e155}, 1e160},
+		{"section C", nil, []complex128{complex(0.5, 1e-310), complex(0.5, -1e-310)}, 1},
 		{"complex section C", []complex128{complex(-1e155, 1e155), complex(-1e155, -1e155)}, []complex128{complex(1e155, 1e154), complex(1e155, -1e154)}, 1},
 	}
 	for _, tc := range cases {

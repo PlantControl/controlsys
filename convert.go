@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -35,8 +34,24 @@ import (
 // invalid options return ErrInvalidConversionOptions; a result with an Inf or
 // NaN entry in any matrix returns ErrOverflow. A least-squares fit of a
 // descriptor sampled through its pencil is not certified (see C2DFit) and is
-// returned with an error wrapping ErrAccuracyUnverified; every other error
-// comes with a nil model.
+// returned with an error wrapping ErrAccuracyUnverified.
+//
+// Matched (SISO) maps poles and zeros by z = e^{s·dt}, adds zeros at z = −1
+// up to relative degree one, and matches the DC gain to DCGain of sys, as
+// MATLAB matches the DC gains; a root within 1e-9 of z = 1 (1e-9/dt of
+// s = 0) is taken for a pole or zero at DC and its leading term is matched
+// instead. Elsewhere a nil error certifies that the DC gain of the result,
+// exact for its stored entries, lies within the descriptor bar
+// u·(‖C‖‖M‖‖A‖‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + |D|), M = A⁻¹, u = 4(n+5)ε (Frobenius
+// norms of the delay-free sys) of that DCGain. Neither the response away
+// from DC nor the root locations are certified. The model is returned with
+// an error wrapping ErrAccuracyUnverified when DCGain fails, is unverified,
+// or is 0 or infinite (a pole or zero at DC outside that window); when the
+// DC product of the roots mapped is not within √ε·max(|DCGain|, |product|,
+// Σ|C||X| + |D|) of it; or when the DC gain of the result is not within the
+// bar. That model is the best available but can be poor.
+//
+// Every other error comes with a nil model.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
@@ -47,7 +62,7 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 // c2dExit maps the result of c2d to that of C2D: errPencilFitUncertified,
 // which comes with the fit, becomes ErrAccuracyUnverified.
 func c2dExit(out *System, err error) (*System, error) {
-	if errors.Is(err, errPencilFitUncertified) {
+	if carriesModel(err) {
 		return out, fmt.Errorf("C2D: %v: %w", err, ErrAccuracyUnverified)
 	}
 	if err != nil {
@@ -61,7 +76,7 @@ func c2dExit(out *System, err error) (*System, error) {
 // model; only C2D (least squares) reaches it.
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 	out, err := sys.c2dUnchecked(dt, opts, true)
-	if err != nil && !errors.Is(err, errPencilFitUncertified) {
+	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
@@ -135,7 +150,7 @@ func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*Syst
 			}
 			return sys.discretizeImpulseParity(dt)
 		case C2DMethodMatched:
-			return sys.discretizeMatched(dt)
+			return sys.discretizeMatched(dt, sys)
 		}
 	}
 	plan, err := newC2DPlan(sys, dt, opts)
@@ -613,7 +628,7 @@ func splitFastPencil(fast *System) (parts []*System, zeta float64, err error, ok
 // maps the poles and zeros of the transfer function of the pencil.
 func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2DOptions) (*System, error) {
 	if opts.Method == C2DMethodMatched {
-		return sys.discretizeMatched(dt)
+		return sys.discretizeMatched(dt, sys)
 	}
 	disc := make([]*System, len(parts))
 	for i, part := range parts {
@@ -791,13 +806,21 @@ type D2COptions struct {
 // Methods are zoh (the zero-value default), tustin, foh and matched.
 // Delays of k samples become delays of k·Ts seconds; internal delays stay
 // internal, inverting C2D, except that matched rejects them as MATLAB does.
-// An already continuous model returns ErrWrongDomain; a result with an Inf or
-// NaN entry in any matrix returns ErrOverflow.
+// Matched maps poles and zeros by s = log(z)/Ts and matches the DC gain to
+// DCGain of sys at z = 1 under the contract of C2D's matched method, with
+// M = (I − A)⁻¹ and the pencil term ‖A‖ + ‖E‖ (‖E‖ = √n for E = I) in the
+// bar; the model is returned with an error wrapping ErrAccuracyUnverified
+// in the cases C2D lists. An already continuous model returns
+// ErrWrongDomain; a result with an Inf or NaN entry in any matrix returns
+// ErrOverflow. Every other error comes with a nil model.
 func (sys *System) D2C(opts D2COptions) (*System, error) {
 	if err := requireFiniteSystem("D2C", sys); err != nil {
 		return nil, err
 	}
 	out, err := sys.d2c(opts)
+	if carriesModel(err) {
+		return out, fmt.Errorf("D2C: %v: %w", err, ErrAccuracyUnverified)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("D2C: %w", err)
 	}
@@ -811,13 +834,13 @@ func (sys *System) d2c(opts D2COptions) (*System, error) {
 		return nil, err
 	}
 	out, err := plan.run()
-	if err != nil {
+	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return out, err
 }
 
 func (sys *System) d2cZOH() (*System, error) {
