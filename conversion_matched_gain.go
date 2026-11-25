@@ -106,10 +106,10 @@ type dcBar struct {
 	barLow []float64
 	// bar is the bar itself where lu is nil; otherwise barLow ≤ bar takes
 	// ‖X_j‖/‖B_j‖ for ‖M‖ and fullBar forms ‖M‖ from the LU factors.
-	bar          []float64
-	lu           []float64
-	ipiv         []int
-	normM        float64
+	bar   []float64
+	lu    []float64
+	ipiv  []int
+	normM float64
 	// factor reports lu holding x0·E − A not yet factored.
 	factor       bool
 	normA, normE float64
