@@ -234,3 +234,36 @@ func TestC2DDescriptorDCContractIntegrator(t *testing.T) {
 		}
 	}
 }
+
+// The DC check reserves the rounding bounds of both gains: for a result
+// whose DC exceeds g0 by δ, nil requires δ + err(ĥ) + err(g0) ≤ bar +
+// allowance, so the largest δ it accepts leaves that room. Caller ẋ = −x + u
+// (E = I as a descriptor, g0 = 1, T0 = 1); result Φ = 1/2, Γ = (1+δ)/2,
+// whose DC 1 + δ is exact.
+func TestC2DDescriptorDCGateErrorBounds(t *testing.T) {
+	one := func(v float64) *mat.Dense { return mat.NewDense(1, 1, []float64{v}) }
+	sys, err := NewDescriptor(one(-1), one(1), one(1), one(0), one(1), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := newHoldGate(sys)
+	bar := gate.bar.fullBar(0)
+	accepted := -1.0
+	for k := range 200 {
+		delta := float64(k) * 0x1p-52
+		out := &System{A: one(0.5), B: one((1 + delta) / 2), C: one(1), D: one(0), Dt: 0.1}
+		if gate.check(out) != nil {
+			break
+		}
+		accepted = delta
+	}
+	if accepted < 0 {
+		t.Fatal("the exact gain is rejected")
+	}
+	edge := &System{A: one(0.5), B: one((1 + accepted) / 2), C: one(1), D: one(0), Dt: 0.1}
+	_, herr, _ := holdDC(edge)
+	limit := bar + holdAllowance(edge)[0] - herr[0] - 0x1p-52*1 - halfUlp(1)
+	if !(accepted <= limit+0x1p-53) || !(accepted+0x1p-52 > limit-0x1p-53) {
+		t.Errorf("largest δ accepted %.4g, want the bar less both rounding bounds, %.4g", accepted, limit)
+	}
+}
