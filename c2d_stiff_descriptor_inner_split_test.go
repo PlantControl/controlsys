@@ -67,7 +67,7 @@ func TestC2DStiffDescriptorInnerSplitRejectErrors(t *testing.T) {
 	if !ok {
 		t.Fatal("not on the stiff route")
 	}
-	if _, slow, fast, _, err, ok := stiffPencilSplit(sys); ok && err == nil && slow != nil && fast != nil {
+	if _, slow, fast, _, _, err, ok := stiffPencilSplit(sys); ok && err == nil && slow != nil && fast != nil {
 		folded, ok := svdExplicit(fast)
 		if !ok {
 			t.Fatal("svdExplicit of the fast part failed")

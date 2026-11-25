@@ -424,11 +424,13 @@ func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
 // splits that built them, 0 without a split. err, wrapping ErrSchurFailed,
 // reports that a split with modes on both sides of its cut failed or was
 // not certified; parts then hold its fallback, for TransferFunction only.
+// eCond is the LU condition estimate of the E of sys.
 type stiffSplit struct {
 	parts    []*System
 	deflated bool
 	zeta     float64
 	err      error
+	eCond    float64
 }
 
 // within returns sp.err, or the stiff-split error when the parts are
@@ -467,54 +469,60 @@ func errStiffInseparable() error {
 // reduction is the accurate route. A pencil whose modes all lie on one side
 // of the cut is returned whole.
 func stiffExplicitSplit(sys *System) (sp stiffSplit, ok bool) {
-	whole, slow, fast, zeta, err, ok := stiffPencilSplit(sys)
+	eq, slow, fast, zeta, eCond, err, ok := stiffPencilSplit(sys)
 	if !ok {
 		return stiffSplit{}, false
 	}
+	whole := func(sp stiffSplit) (stiffSplit, bool) {
+		w, ok := svdExplicit(eq)
+		if !ok {
+			return stiffSplit{}, false
+		}
+		sp.parts, sp.eCond = []*System{w}, eCond
+		return sp, true
+	}
 	if err != nil {
-		return stiffSplit{parts: []*System{whole}, err: err}, true
+		return whole(stiffSplit{err: err})
 	}
 	if fast == nil {
-		return stiffSplit{parts: []*System{whole}}, true
+		return whole(stiffSplit{})
 	}
 	fastParts, fz, err, ok := splitFastPencil(fast)
 	if !ok {
-		return stiffSplit{parts: []*System{whole}, deflated: true}, true
+		return whole(stiffSplit{deflated: true})
 	}
-	return stiffSplit{parts: append([]*System{slow}, fastParts...), zeta: math.Max(zeta, fz), err: err}, true
+	return stiffSplit{parts: append([]*System{slow}, fastParts...), zeta: math.Max(zeta, fz), err: err, eCond: eCond}, true
 }
 
 // stiffPencilSplit is the split of stiffExplicitSplit before the fast part
-// is folded: whole is svdExplicit of the equilibrated sys, slow the explicit
-// slow part and fast the descriptor fast part (nil, with slow, when the
-// modes do not split), zeta the split's ζ″. err reports a split with modes
-// on both sides that failed or was not certified.
-func stiffPencilSplit(sys *System) (whole, slow, fast *System, zeta float64, err error, ok bool) {
+// is folded: eq is the equilibrated sys, whose svdExplicit is the whole
+// fold, slow the explicit slow part and fast the descriptor fast part (nil
+// when the modes do not split), zeta the split's ζ″ and eCond the LU
+// condition estimate of the E of sys. err reports a split with modes on
+// both sides that failed or was not certified.
+func stiffPencilSplit(sys *System) (eq, slow, fast *System, zeta, eCond float64, err error, ok bool) {
 	if sys.LFT != nil {
-		return nil, nil, nil, 0, nil, false
+		return nil, nil, nil, 0, 0, nil, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
-		return nil, nil, nil, 0, nil, false
+	eCond = lu.Cond()
+	if eCond < illConditionedECond || eRankDeficient(sys.E, &lu) {
+		return nil, nil, nil, 0, 0, nil, false
 	}
-	sys = equilibrateDescriptor(sys)
-	lu.Factorize(sys.E)
+	eq = equilibrateDescriptor(sys)
+	lu.Factorize(eq.E)
 	if lu.Cond() < illConditionedECond {
-		return nil, nil, nil, 0, nil, false
+		return nil, nil, nil, 0, 0, nil, false
 	}
-	whole, ok = svdExplicit(sys)
-	if !ok {
-		return nil, nil, nil, 0, nil, false
-	}
-	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	normA, normE := mat.Norm(eq.A, 2), mat.Norm(eq.E, 2)
 	if normA == 0 {
-		return whole, nil, nil, 0, nil, true
+		return eq, nil, nil, 0, eCond, nil, true
 	}
 	nominal := normA / (normE * qzLargeRatio)
 	cut := nominal
 	var mods []float64
-	slow, fast, zeta, err = decomposeGeneralizedQZZeta(sys, func(l complex128) bool {
+	slow, fast, zeta, err = decomposeGeneralizedQZZeta(eq, func(l complex128) bool {
 		return cmplx.Abs(l) < nominal
 	}, func(m []float64) func(complex128) bool {
 		mods, cut = m, stiffCut(m, nominal)
@@ -522,16 +530,16 @@ func stiffPencilSplit(sys *System) (whole, slow, fast *System, zeta float64, err
 	})
 	if err != nil {
 		if mods != nil && !splitsBothSides(mods, cut) {
-			return whole, nil, nil, 0, nil, true
+			return eq, nil, nil, 0, eCond, nil, true
 		}
-		return whole, nil, nil, 0, errStiffInseparable(), true
+		return eq, nil, nil, 0, eCond, errStiffInseparable(), true
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := fast.Dims()
 	if n1 == 0 || n2 == 0 {
-		return whole, nil, nil, 0, nil, true
+		return eq, nil, nil, 0, eCond, nil, true
 	}
-	return whole, slow, fast, zeta, nil, true
+	return eq, slow, fast, zeta, eCond, nil, true
 }
 
 // stiffCut is the cut of the stiff splits: the geometric midpoint √lo·√hi
