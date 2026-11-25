@@ -99,7 +99,7 @@ func (g *holdGate) check(out *System) error {
 		return g.err
 	}
 	if out.LFT != nil {
-		return holdUnverified("DC gain of the result with internal delays is not checked")
+		return holdUnverified("DC gain of a result with internal delays (fractional I/O delays) is not checked")
 	}
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
 		return holdUnverified("%v", err)
@@ -122,18 +122,6 @@ func (g *holdGate) check(out *System) error {
 		}
 	}
 	return nil
-}
-
-// checkCore is check of the discretized delay-free core of a result whose
-// fractional I/O delays the hold absorbs, which has the same DC gain.
-func (g *holdGate) checkCore(core *System, err error) error {
-	if err != nil && (g.gated || g.refused != nil) {
-		return holdUnverified("delay-free core: %v", err)
-	}
-	if err != nil {
-		return nil
-	}
-	return g.check(core)
 }
 
 func halfUlp(v float64) float64 {
