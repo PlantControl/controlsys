@@ -77,7 +77,9 @@ func checkDescriptorDCContract(t *testing.T, name string, sys, out *System, err 
 //   - cond/111 at dt = 0.01: 13.9 bars in fold and 41 in Schur
 //     coordinates, unverified (R5);
 //   - strad1m/47, /283 (band, split refused): the fold, always unverified
-//     (U-2).
+//     (U-2);
+//   - stfr/3408, /4980 as generated on amd64 (‖B‖ ≫ ‖A‖ reductions whose
+//     augmented exponential loses Γ, O8): nil only inside the bar.
 func TestC2DDescriptorDCContractFrozenRows(t *testing.T) {
 	want := map[string]string{
 		"stfr/45@0.01/zoh": "nil", "stfr/45@0.01/foh": "nil", "stfr/45@1/zoh": "nil",
