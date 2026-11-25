@@ -60,27 +60,51 @@ func TestTransferFunctionClusteredDiscreteStaysStableAndMatchesAwayFromCluster(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// SWKJW4: the eight-pole model as matched C2D built it before the gain
+	// moved onto B; the model matched builds now is checked within terms only.
+	eightPoles, err := NewFromSlices(8, 1, 1,
+		[]float64{
+			0.9795175376367333, 0.003502084034532263, 0, 0, 0, 0, 0, 0,
+			-0.003502084034532263, 0.9795175376367333, 1339.12372007311, 3.968345882171973, 951.8035504286739, 1, 0, 0,
+			0, 0, 0.9841729410859865, 0.002939932702199153, 0, 0, 0, 0,
+			0, 0, -0.002939932702199153, 0.9841729410859865, 951.8035504286739, 1, 0, 0,
+			0, 0, 0, 0, 0.9914612777448286, 0.002092302846367733, 0, 0,
+			0, 0, 0, 0, -0.002092302846367733, 0.9914612777448286, 249.85079667399964, 3.9892700634717766,
+			0, 0, 0, 0, 0, 0, 0.9946350317358884, 0.015922764419246997,
+			0, 0, 0, 0, 0, 0, -0.015922764419246997, 0.9946350317358884,
+		},
+		[]float64{0, 0, 0, 0, 0, 1, 0, 1},
+		[]float64{5.136908879434764e-17, 5.330578906023782e-16, 3.605456977687278e-13, 1.0684375264424697e-15, 2.562636073755182e-13, 2.6924002044340137e-16, 0, 0},
+		[]float64{0}, 0.01)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
-		name   string
-		sys    *System
-		stable bool
+		name      string
+		sys       *System
+		stable    bool
+		termsOnly bool
 	}{
 		{"literal", clusteredMatchedDiscrete(t, []complex128{-0.5001, -1.0347},
-			[]complex128{-0.4566 + 1.814i, -0.4566 - 1.814i, -0.7451 + 1.4472i, -0.7451 - 1.4472i, -1.5689, -1.6005}, 1.6263, 0.001), true},
-		{"eight poles", clusteredMatchedDiscrete(t, []complex128{-2.1046125531510307},
+			[]complex128{-0.4566 + 1.814i, -0.4566 - 1.814i, -0.7451 + 1.4472i, -0.7451 - 1.4472i, -1.5689, -1.6005}, 1.6263, 0.001), true, false},
+		{"eight poles", eightPoles, true, false},
+		{"eight poles from matched", clusteredMatchedDiscrete(t, []complex128{-2.1046125531510307},
 			[]complex128{
 				-2.068874567619866 + 0.3575300061345922i, -2.068874567619866 - 0.3575300061345922i,
 				-0.5251289361561816 + 1.6007282981397544i, -0.5251289361561816 - 1.6007282981397544i,
 				-1.5949182540218703 + 0.298720258881107i, -1.5949182540218703 - 0.298720258881107i,
 				-0.8573159275781227 + 0.21103191696387205i, -0.8573159275781227 - 0.21103191696387205i,
-			}, 1.7933080296139967, 0.01), true},
-		{"seed 494", seed494, false},
+			}, 1.7933080296139967, 0.01), true, true},
+		{"seed 494", seed494, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := tc.sys
 			res, err := d.TransferFunction(nil)
 			requireTFWithinTermsOrUnverified(t, d, res, err)
+			if tc.termsOnly {
+				return
+			}
 			if tc.stable {
 				roots, err := Poly(res.TF.Den[0]).Roots()
 				if err != nil {

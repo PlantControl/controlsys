@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 
@@ -19,6 +18,7 @@ type c2dPlan struct {
 	pathDelay       *mat.Dense
 	workSys         *System
 	lsSlow          *System
+	matchedRef      *System
 }
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
@@ -27,6 +27,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	}
 	var err error
 	var lsSlow *System
+	ref := sys
 	if opts.Method == C2DMethodLeastSquares {
 		if lsSlow, err = leastSquaresPencilSplit(sys); err != nil {
 			return c2dPlan{}, err
@@ -61,6 +62,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		contOutputDelay: sys.OutputDelay,
 		workSys:         cp,
 		lsSlow:          lsSlow,
+		matchedRef:      ref,
 	}
 	plan.workSys.InputDelay = nil
 	plan.workSys.OutputDelay = nil
@@ -99,7 +101,7 @@ func (p c2dPlan) run() (*System, error) {
 		return p.discretizeInternalDelay()
 	}
 	disc, err := p.discretizeMethod()
-	if err != nil && !errors.Is(err, errPencilFitUncertified) {
+	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
 	out, derr := p.applyExternalDelays(disc)
@@ -134,9 +136,9 @@ func (p c2dPlan) discretizeMethod() (*System, error) {
 		return p.workSys.discretizeImpulseParity(p.dt)
 	case C2DMethodMatched:
 		if p.workSys.IsDescriptor() {
-			return discretizeMatchedDescriptor(p.workSys, p.dt)
+			return discretizeMatchedDescriptor(p.workSys, p.dt, p.matchedRef)
 		}
-		return p.workSys.discretizeMatched(p.dt)
+		return p.workSys.discretizeMatched(p.dt, p.matchedRef)
 	default:
 		panic("unvalidated C2D method")
 	}
@@ -163,15 +165,20 @@ func stiffDelayedDescriptor(sys *System) (bool, error) {
 }
 
 // discretizeMatchedDescriptor is discretizeMatched of the delay-free part
-// of the stiffDelayedDescriptor sys, with the I/O delay of sys in samples.
-func discretizeMatchedDescriptor(sys *System, dt float64) (*System, error) {
+// of the stiffDelayedDescriptor sys, with the I/O delay of sys in samples;
+// ref is the caller's model.
+func discretizeMatchedDescriptor(sys *System, dt float64, ref *System) (*System, error) {
 	core := *sys
 	core.Delay = nil
-	out, err := core.discretizeMatched(dt)
-	if err != nil {
+	out, err := core.discretizeMatched(dt, ref)
+	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
-	return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
+	delayed, derr := newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
+	if derr != nil {
+		return nil, derr
+	}
+	return delayed, err
 }
 
 func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
@@ -186,6 +193,7 @@ func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
 
 type d2cPlan struct {
 	sys    *System
+	ref    *System
 	method C2DMethod
 	opts   D2COptions
 }
@@ -208,11 +216,12 @@ func newD2CPlan(sys *System, opts D2COptions) (d2cPlan, error) {
 	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
 		return d2cPlan{}, err
 	}
+	ref := sys
 	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return d2cPlan{}, err
 	}
-	return d2cPlan{sys: sys, method: opts.Method, opts: opts}, nil
+	return d2cPlan{sys: sys, ref: ref, method: opts.Method, opts: opts}, nil
 }
 
 func (p d2cPlan) run() (*System, error) {
@@ -224,7 +233,7 @@ func (p d2cPlan) run() (*System, error) {
 	case C2DMethodFOH:
 		return p.sys.d2cFOH()
 	case C2DMethodMatched:
-		return p.sys.d2cMatched()
+		return p.sys.d2cMatched(p.ref)
 	default:
 		panic("unvalidated D2C method")
 	}

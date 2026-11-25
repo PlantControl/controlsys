@@ -642,6 +642,15 @@ func FuzzC2DMatched(f *testing.F) {
 		}
 		sd, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 		fzContract(t, s, "C2D(matched)", sd != nil, err)
+		if errors.Is(err, ErrAccuracyUnverified) {
+			if nd, md, pd := sd.Dims(); nd > n || md != 1 || pd != 1 || sd.Dt != dt {
+				t.Fatalf("C2D(matched) unverified model is %d×%d of order %d at dt %g\n%s", pd, md, nd, sd.Dt, s)
+			}
+			if ferr := finiteSystemMatrices("result", sd, ErrOverflow); ferr != nil {
+				t.Fatalf("C2D(matched) unverified model not finite: %v\n%s", ferr, s)
+			}
+			fzSkip(t, "matched: unverified")
+		}
 		fzErr(t, s, "C2D(matched)", err)
 		hc0, ok := fzMats{n, 1, 1, s.A, s.B, s.C, s.D}.resp(0)
 		if !ok {

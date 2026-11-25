@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -37,7 +38,7 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 		return nil, nil, fmt.Errorf("C2DMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
 	}
 	out, err := std.c2d(dt, opts)
-	if err != nil {
+	if err != nil && !errors.Is(err, errMatchedUnverified) {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
 	if !conversionCanMapState(std, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(std, dt)) {
@@ -75,7 +76,7 @@ func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
 		return nil, nil, fmt.Errorf("D2CMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
 	}
 	out, err := std.d2c(opts)
-	if err != nil {
+	if err != nil && !errors.Is(err, errMatchedUnverified) {
 		return nil, nil, fmt.Errorf("D2CMap: %w", err)
 	}
 	if !conversionCanMapState(std, out, opts.Method, std.Dt) {
