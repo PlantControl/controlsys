@@ -181,62 +181,121 @@ func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
 // returns ErrOverflow. The gramians carry Lyap's (DLyap's) certificate: an
 // equation within its singular band returns ErrSingularEquation, an
 // uncertified gramian the values with ErrAccuracyUnverified.
+//
+// With a nil error σ₁ is accurate to 10⁻⁵ relative, and every value to
+// max(10⁻⁵·σ₁, 4·√n·2⁻⁵⁰·T), T = √(‖Wc‖_F·‖Wo‖_F) the gramian scale in the
+// stored coordinates. Values that float64 gramians cannot resolve are
+// recomputed from Balreal's refined double-double gramians; when σ₁ is
+// below their resolution too, about 1.6·10⁻¹²·√(n/4)·T, or the refined
+// gramians fail, the values are returned with ErrAccuracyUnverified. A
+// model whose transfer function is exactly zero on the stored data,
+// decided in exact arithmetic for up to 32 states, returns zeros with a
+// nil error.
 func HSV(sys *System) ([]float64, error) {
+	hsv, _, err := hsvRouted(sys)
+	return hsv, err
+}
+
+// hsvRoute names how HSV produced its result.
+type hsvRoute int
+
+const (
+	// hsvRouteBase: an error, a model with no states, or Lyap's uncertified
+	// values, all as before the resolution tiers.
+	hsvRouteBase hsvRoute = iota
+	// hsvRoutePlain: float64 gramians with both Cholesky factors, within γₙ.
+	hsvRoutePlain
+	// hsvRouteCore: Balreal's refined gramian path, σ̃₁ resolved.
+	hsvRouteCore
+	// hsvRouteFloor: σ̃₁ below the double-double resolution, not exactly zero.
+	hsvRouteFloor
+	// hsvRouteZero: the transfer function is exactly zero.
+	hsvRouteZero
+	// hsvRouteCoreFailed: the refined gramian path returned an error.
+	hsvRouteCoreFailed
+)
+
+func hsvRouted(sys *System) ([]float64, hsvRoute, error) {
+	hsv, route, err := hsvTiered(sys)
+	for _, s := range hsv {
+		if !isFinite(s) {
+			return nil, route, fmt.Errorf("HSV: Hankel singular value exceeds float64 range: %w", ErrOverflow)
+		}
+	}
+	return hsv, route, err
+}
+
+func hsvTiered(sys *System) ([]float64, hsvRoute, error) {
+	base := hsvRouteBase
 	if err := requireFiniteSystem("HSV", sys); err != nil {
-		return nil, err
+		return nil, base, err
 	}
 	if err := newDescriptorPolicy(sys).requireStandard("HSV"); err != nil {
-		return nil, err
+		return nil, base, err
 	}
 	sys, err := finiteDimensionalModel(sys, "HSV")
 	if err != nil {
-		return nil, err
+		return nil, base, err
 	}
 	policy := newEnergyAnalysisPolicy(sys)
 	n := policy.n
 	if n == 0 {
-		return nil, nil
+		return nil, base, nil
 	}
 
 	if err := policy.requireStable(ErrUnstable); err != nil {
-		return nil, err
+		return nil, base, err
 	}
 
 	Wc, eB, err := policy.scaledGramian(GramControllability)
 	err, unvC := unverifiedLyapunov(err)
 	if err != nil {
-		return nil, err
+		return nil, base, err
 	}
 	Wo, eC, err := policy.scaledGramian(GramObservability)
 	err, unvO := unverifiedLyapunov(err)
 	if err != nil {
-		return nil, err
+		return nil, base, err
 	}
 
-	hsv, err := hsvFromGramians(Wc, Wo, n, eB+eC)
+	hsv, chol, err := hsvFromGramians(Wc, Wo, n, eB+eC)
 	if err != nil {
-		return nil, err
-	}
-	for _, s := range hsv {
-		if !isFinite(s) {
-			return nil, fmt.Errorf("HSV: Hankel singular value exceeds float64 range: %w", ErrOverflow)
-		}
+		return nil, base, err
 	}
 	if unv := cmp.Or(unvC, unvO); unv != nil {
-		return hsv, fmt.Errorf("HSV: %w", unv)
+		return hsv, base, fmt.Errorf("HSV: %w", unv)
 	}
-	return hsv, nil
+	if policy.m == 0 || policy.p == 0 || zeroDense(sys.B) || zeroDense(sys.C) {
+		return make([]float64, n), hsvRouteZero, nil
+	}
+	if chol && hsvPlainResolved(n, math.Sqrt(mat.Norm(Wc, 2))*math.Sqrt(mat.Norm(Wo, 2)), math.Ldexp(hsv[0], -(eB+eC))) {
+		return hsv, hsvRoutePlain, nil
+	}
+	f, err := newBalancedFactors("HSV", sys, hsvPlainGate(n), false)
+	if err != nil {
+		return hsv, hsvRouteCoreFailed, fmt.Errorf("HSV: refined gramians failed (%v), plain-path values not verified: %w", err, ErrAccuracyUnverified)
+	}
+	resolved := f.resolved()
+	ldexpFinite(f.s, f.eB+f.eC)
+	if resolved {
+		return f.s, hsvRouteCore, nil
+	}
+	if exactZeroTransfer(sys.A, sys.B, sys.C) == transferZero {
+		return make([]float64, n), hsvRouteZero, nil
+	}
+	return f.s, hsvRouteFloor, fmt.Errorf("HSV: σ₁ below the double-double resolution of the gramians, values not resolved to %g relative: %w", hsvTau, ErrAccuracyUnverified)
 }
 
 // hsvFromGramians returns the Hankel singular values of gramians Wc·4ᵉᴮ and
 // Wo·4ᵉᶜ, given Wc, Wo and e = eB+eC.
-func hsvFromGramians(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
+func hsvFromGramians(Wc, Wo *mat.Dense, n, e int) (hsv []float64, chol bool, err error) {
 	wcRaw := Wc.RawMatrix()
 	lc := make([]float64, n*n)
 	copyStrided(lc, n, wcRaw.Data, wcRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lc, n) {
-		return eigenvalueHSV(Wc, Wo, n, e)
+		hsv, err = eigenvalueHSV(Wc, Wo, n, e)
+		return hsv, false, err
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -249,7 +308,8 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 	copyStrided(lo, n, woRaw.Data, woRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lo, n) {
-		return eigenvalueHSV(Wc, Wo, n, e)
+		hsv, err = eigenvalueHSV(Wc, Wo, n, e)
+		return hsv, false, err
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -268,10 +328,10 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, wq, -1)
 	work := make([]float64, int(wq[0]))
 	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, work, len(work)) {
-		return nil, fmt.Errorf("HSV: singular value iteration did not converge: %w", ErrSchurFailed)
+		return nil, false, fmt.Errorf("HSV: singular value iteration did not converge: %w", ErrSchurFailed)
 	}
 	ldexpFinite(s, e)
-	return s, nil
+	return s, true, nil
 }
 
 func eigenvalueHSV(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
