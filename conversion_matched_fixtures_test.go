@@ -119,4 +119,24 @@ var matchedDCFixtures = map[string]matchedDCFixture{
 		C: mat.NewDense(1, 6, []float64{2, 1, 0.5, 0.5, 1, 0.5}),
 		D: mat.NewDense(1, 1, []float64{0}),
 		E: nil, Dt: 0.01},
+	// AQU6M7 census row g3/rotZ.9.
+	"near dc pole 1": {A: mat.NewDense(3, 3, []float64{5.684341886080802e-14, -1, 0.5, 0, -1, 1, 0, -1, -1}), B: mat.NewDense(3, 1, []float64{-1, 0.5, -1}), C: mat.NewDense(1, 3, []float64{-1, 2, -1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row near1/564.
+	"near dc pole 2": {A: mat.NewDense(4, 4, []float64{-0.08868571233280692, -0.346420865252168, 0.49063615055222315, 0.5569282191252063, -0.7659809658507856, -0.6950592045272144, 0.5039964211182866, 0.9968250165110165, 0.024029883435317163, 0.3322939260304659, -0.5204958014813442, -0.5467348606748718, 0.5555250313387559, 0.6608989192246886, -0.6204081279041966, -0.98327385827736}), B: mat.NewDense(4, 1, []float64{1.1112146686389885, 0.8011311639226358, 0.09128316243305301, 0.4516466800830543}), C: mat.NewDense(1, 4, []float64{0.06673465183540858, -0.3942372435375976, -2.5986698060442968, -1.0024911658949527}), D: mat.NewDense(1, 1, []float64{-0.7167311661250777}), E: nil},
+	// AQU6M7 census row near1/72.
+	"near dc pole 3": {A: mat.NewDense(3, 3, []float64{-0.2978915117193384, -0.12894174991276144, 0.21210023233043213, 0.18901434424962602, 0.01423262292743027, 0.00047761154994131207, 0.022322591661144316, 0.012022043211780204, -0.020609570414614968}), B: mat.NewDense(3, 1, []float64{-0.32294414024342327, -0.09100996426584984, 0.33747898044925495}), C: mat.NewDense(1, 3, []float64{0.38771926199978557, -0.5176587288545493, -0.4974014472143429}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/fz.350.
+	"near dc root 4": {A: mat.NewDense(2, 2, []float64{0.0014665855424052078, 0.0007999602529088275, 0.00022800707232351896, 0.00012442869537930313}), B: mat.NewDense(2, 1, []float64{-0.9753847190209978, -0.4733884629781336}), C: mat.NewDense(1, 2, []float64{-1.2032485007043574, -1.4746003018274967}), D: mat.NewDense(1, 1, []float64{2.658266400189184}), E: nil},
+	// AQU6M7 census row g3/rlrep.57.
+	"window dc pole": {A: mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 0, 1, 0, 0}), B: mat.NewDense(3, 1, []float64{0.5, 0.5, 0.5}), C: mat.NewDense(1, 3, []float64{1, 0.5, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row near1/73.
+	"window dc zero": {A: mat.NewDense(3, 3, []float64{0, 0, -2.0893858691996314e-06, 1, 0, -0.4151896800989887, 0, 1, -1.288699247376847}), B: mat.NewDense(3, 1, []float64{-0, 1.1666862595849457, 0}), C: mat.NewDense(1, 3, []float64{0, 0, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/rotZ.0.
+	"window dc pole cancelled": {A: mat.NewDense(3, 3, []float64{0, 0, 0, 0, -0.5, 1, 0, -1, -0.5}), B: mat.NewDense(3, 1, []float64{2, 0.5, -1}), C: mat.NewDense(1, 3, []float64{2, 0, 0}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/rotH.188.
+	"dc zero gain noise": {A: mat.NewDense(4, 4, []float64{-0.5, -1.25, -0.5, 0.25, 0.75, -1, 0.25, 0, 0, -0.75, -1, -0.25, 0.25, -0.5, 0.75, -0.5}), B: mat.NewDense(4, 1, []float64{1, 0, 0, 1}), C: mat.NewDense(1, 4, []float64{0, -1, -1, 0}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row near1/100.
+	"near dc cluster": {A: mat.NewDense(5, 5, []float64{0, 0, 0, 0, -5.493324930935505e-13, 1, 0, 0, 0, -0.0005636381693098302, 0, 1, 0, 0, -7.502934890279211, 0, 0, 1, 0, -11.497641124710292, 0, 0, 0, 1, -5.87314303789566}), B: mat.NewDense(5, 1, []float64{-5.049752020569552e-11, -0.18683509936166423, 1.261156441964868, 0, 0}), C: mat.NewDense(1, 5, []float64{0, 0, 0, 0, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/rlrep.169.
+	"window dc pole kept copies": {A: mat.NewDense(5, 5, []float64{0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5, -1, -1, -1, 0, 0, 0, 1, 0, 0}), B: mat.NewDense(5, 1, []float64{0.5, -1, 0, 2, 1}), C: mat.NewDense(1, 5, []float64{0.5, 0.5, 0.5, 0.5, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
 }

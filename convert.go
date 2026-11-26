@@ -62,18 +62,32 @@ import (
 //
 // Matched (SISO) maps poles and zeros by z = e^{s·dt}, adds zeros at z = −1
 // up to relative degree one, and matches the DC gain to DCGain of sys, as
-// MATLAB matches the DC gains; a root within 1e-9 of z = 1 (1e-9/dt of
-// s = 0) is taken for a pole or zero at DC and its leading term is matched
-// instead. Elsewhere a nil error certifies that the DC gain of the result,
-// exact for its stored entries, lies within the descriptor bar
+// MATLAB matches the DC gains, through the factors 1 − e^{s·dt} formed
+// from the continuous roots (else, where that fails the bar below, those of
+// the stored discrete roots). A nil error certifies that the DC gain of
+// the result, exact for its stored entries, lies within the descriptor bar
 // u·(‖C‖‖M‖‖A‖‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + |D|), M = A⁻¹, u = 4(n+5)ε (Frobenius
-// norms of the delay-free sys) of that DCGain. Neither the response away
-// from DC nor the root locations are certified. The model is returned with
-// an error wrapping ErrAccuracyUnverified when DCGain fails, is unverified,
-// or is 0 or infinite (a pole or zero at DC outside that window); when the
-// DC product of the roots mapped is not within √ε·max(|DCGain|, |product|,
-// Σ|C||X| + |D|) of it; or when the DC gain of the result is not within the
-// bar. That model is the best available but can be poor.
+// norms of the delay-free sys) of that DCGain. A pole or zero at DC is the
+// stored data's exact limit, as DCGain returns it: where DCGain is 0, ±Inf
+// or within ε·(|D| + Σ|C||X|) of 0, the exact expansion of the transfer
+// function of sys at s = 0 (order up to 16) gives the order k of its lowest
+// term; the roots nearest DC are put at z = 1 exactly, |k| of them net (with
+// as many more cancelling pairs as the exact multiplicities allow, where
+// that brings the roots' leading coefficient within terms), and the gain
+// matches the exact coefficient of that term times dt^−k. A nil error then
+// certifies that the result's DC gain is exactly that of sys: at a pole,
+// its own exact expansion at z = 1 has order k and a coefficient of that
+// sign; at a zero, its DC gain is 0 or within the bar of 0. A root near DC
+// but not at it is mapped like any other. Neither the response away from
+// DC (the leading coefficient included) nor the root locations are
+// certified. The model is returned with an error wrapping
+// ErrAccuracyUnverified when DCGain fails or is unverified, or the pencil
+// −A is singular (no bar); when the expansion is unavailable or the roots
+// cannot hold the order; when the DC product (leading coefficient) of the
+// roots mapped is not within √ε·max(|DCGain|, |product|, Σ|C||X| + |D|)
+// (√ε·max(|coefficient|, |product|)) of it; or when the DC gain of the
+// result is not within the bar (not that of sys). That model is the best
+// available but can be poor.
 //
 // Every other error comes with a nil model.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {

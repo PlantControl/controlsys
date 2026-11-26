@@ -321,26 +321,6 @@ func (r matchedReference) matchedGain(v, ratio complex128, base float64) (float6
 	return gain, nil
 }
 
-// matchedDCWindow reports a root that matchedContinuousGain takes for a
-// pole or zero at DC.
-func matchedDCWindow(dz, dp, cz, cp []complex128, dt float64) bool {
-	for _, set := range [][]complex128{dz, dp} {
-		for _, z := range set {
-			if cmplx.Abs(z-1) <= 1e-9 {
-				return true
-			}
-		}
-	}
-	for _, set := range [][]complex128{cz, cp} {
-		for _, z := range set {
-			if cmplx.Abs(z) <= 1e-9/dt {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func matchedDiscreteProduct(k float64, zeros, poles []complex128, artificial int) complex128 {
 	v := complex(k, 0)
 	for _, z := range zeros {

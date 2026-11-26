@@ -13,11 +13,11 @@ import (
 // d2cMatched uses principal logarithms of finite roots. All zeros at z=-1
 // are interpreted as the artificial zeros of matched discretization and removed.
 // Other nonpositive real roots are rejected rather than inventing a complex model.
-// Gain matches the leading low-frequency term, including poles or zeros at DC.
-// The gain is set from the DCGain of ref, the caller's model, where no root
-// lies in that window; the result is returned with errMatchedUnverified
-// unless the discrete roots' own DC product and the result's DC gain agree
-// with it (matchedReference).
+// The gain is set from the DCGain of ref, the caller's model, or where ref
+// has a pole or zero at DC (matchedDCRootOf) from its exact leading
+// coefficient; the result is returned with errMatchedUnverified unless the
+// discrete roots' own DC product and the result's DC gain agree with it
+// (matchedReference, matchedD2CModelAtDC).
 func (sys *System) d2cMatched(ref *System) (*System, error) {
 	if sys.IsContinuous() {
 		return nil, fmt.Errorf("matched: %w", ErrWrongDomain)
@@ -48,14 +48,19 @@ func (sys *System) d2cMatched(ref *System) (*System, error) {
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
 	var out *System
 	var unverified error
+	r := newMatchedReference(ref)
+	var root matchedDCRoot
+	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
+		root, _ = matchedDCRootOf(ref, noise)
+	}
 	if z, p, g, ok := matchedD2CPencilRoots(sys, numerator, dz, dp, k, artificial); ok {
-		out, unverified, err = matchedD2CModel(z, p, g, artificial, sys.Dt, ref, nil, nil)
+		out, unverified, err = matchedD2CModel(z, p, g, artificial, sys.Dt, ref, sys, r, root, nil, nil)
 		if err != nil {
 			out = nil
 		}
 	}
 	if out == nil {
-		if out, unverified, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt, ref, numerator, result.TF.Den[0]); err != nil {
+		if out, unverified, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt, ref, nil, r, root, numerator, result.TF.Den[0]); err != nil {
 			return nil, err
 		}
 	}
@@ -66,12 +71,16 @@ func (sys *System) d2cMatched(ref *System) (*System, error) {
 }
 
 // matchedD2CModel realizes the continuous matched model of the discrete
-// roots dz (less the artificial zeros at −1), dp and gain k. Outside the
-// DC window (matchedDCWindow) the roots of the transfer function (num and
-// den non-nil) are first polished on their polynomials, and the gain
-// matches the DCGain of ref; the second result is the verdict of the root
-// and DC gates against it.
-func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64, ref *System, num, den []float64) (*System, error, error) {
+// roots dz (less the artificial zeros at −1), dp and gain k. The roots of
+// the transfer function (num and den non-nil) are first polished on their
+// polynomials, and the gain matches the DCGain of the reference r; the
+// second result is the verdict of the root and DC gates against it. Where
+// the model ref has a pole or zero at DC (root) matchedD2CModelAtDC takes
+// over, fit the model whose pencil gave the roots, if any.
+func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64, ref, fit *System, r matchedReference, root matchedDCRoot, num, den []float64) (*System, error, error) {
+	if root.order != 0 {
+		return matchedD2CModelAtDC(dz, dp, k, artificial, dt, ref, fit, root, num, den)
+	}
 	cz, err := matchedLogRoots(dz, dt)
 	if err != nil {
 		return nil, nil, err
@@ -80,29 +89,19 @@ func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64,
 	if err != nil {
 		return nil, nil, err
 	}
-	window := matchedDCWindow(dz, dp, cz, cp, dt)
-	if !window && num != nil {
+	if num != nil {
 		pz, pp := matchedPolish(num, dz), matchedPolish(den, dp)
 		if lz, err := matchedLogRoots(pz, dt); err == nil {
-			if lp, err := matchedLogRoots(pp, dt); err == nil && !matchedDCWindow(pz, pp, lz, lp, dt) {
+			if lp, err := matchedLogRoots(pp, dt); err == nil {
 				dz, dp, cz, cp = pz, pp, lz, lp
 			}
 		}
 	}
-	all := slices.Clone(dz)
-	for range artificial {
-		all = append(all, -1)
-	}
-	gain, err := matchedContinuousGain(all, dp, cz, cp, k, dt)
+	gain, err := matchedContinuousGain(matchedWithArtificial(dz, artificial), dp, cz, cp, k, dt)
 	if err != nil {
 		return nil, nil, err
 	}
-	if window {
-		out, _, _, err := matchedCascadeDC(cz, cp, gain, 0)
-		return out, nil, err
-	}
-	r := newMatchedReference(ref)
-	gain, unverified := r.matchedGain(matchedDiscreteProduct(k, dz, dp, artificial), matchedContinuousProduct(1, cz, cp), gain)
+	gain, unverified := r.matchedGainAtFloatDC(matchedDiscreteProduct(k, dz, dp, artificial), matchedContinuousProduct(1, cz, cp), gain)
 	out, dc, dcOK, err := matchedCascadeDC(cz, cp, gain, 0)
 	if err != nil {
 		return nil, nil, err
@@ -285,30 +284,38 @@ func matchedLogRoots(roots []complex128, dt float64) ([]complex128, error) {
 	return out, nil
 }
 
+// matchedContinuousGain is gain times the ratio of the leading discrete
+// product at z = 1 to the continuous one at s = 0 of the roots dz, dp
+// (artificial zeros past the end of cz) and their images cz, cp. A root at
+// DC, its continuous image exactly 0 or its discrete one exactly 1, takes
+// the factor dt on the discrete side and none on the continuous one.
 func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float64, error) {
+	atDC := func(d, c []complex128, i int) bool {
+		return d[i] == 1 || (i < len(c) && c[i] == 0)
+	}
 	discrete := complex(gain, 0)
 	continuous := complex(1, 0)
-	for _, z := range dz {
-		if cmplx.Abs(z-1) <= 1e-9 {
+	for i, z := range dz {
+		if atDC(dz, cz, i) {
 			discrete *= complex(dt, 0)
 		} else {
 			discrete *= 1 - z
 		}
 	}
-	for _, p := range dp {
-		if cmplx.Abs(p-1) <= 1e-9 {
+	for i, p := range dp {
+		if atDC(dp, cp, i) {
 			discrete /= complex(dt, 0)
 		} else {
 			discrete /= 1 - p
 		}
 	}
-	for _, z := range cz {
-		if cmplx.Abs(z) > 1e-9/dt {
+	for i, z := range cz {
+		if !atDC(dz, cz, i) {
 			continuous *= -z
 		}
 	}
-	for _, p := range cp {
-		if cmplx.Abs(p) > 1e-9/dt {
+	for i, p := range cp {
+		if !atDC(dp, cp, i) {
 			continuous /= -p
 		}
 	}
@@ -323,13 +330,16 @@ func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float
 }
 
 // discretizeMatched is matched C2D of sys, the model the route hands over,
-// with the DC gain matched to the DCGain of ref, the caller's model, where
-// no root lies in the DC window (matchedDCWindow; there the leading term of
-// the roots is matched as before). The roots of the transfer function, when
+// with the DC gain matched to the DCGain of ref, the caller's model, or
+// where ref has a pole or zero at DC (matchedDCRootOf) its leading term
+// (discretizeMatchedAtDC). The roots of the transfer function, when
 // they are the ones mapped, are polished on their polynomials. The result
 // comes with errMatchedUnverified when DCGain of ref is unavailable, the
 // roots' own DC product is not within terms of it, or the result's DC gain
-// is not within the descriptor bar of it (matchedReference).
+// is not within the descriptor bar of it (matchedReference). The gain is
+// matched through 1 − e^{root·dt} formed from the continuous roots
+// (matchedMappedProduct), else, where that fails the DC gate, through the
+// stored discrete roots.
 func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
@@ -374,12 +384,11 @@ func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	if matchedDCWindow(dz, dp, cz, cp, dt) {
-		realized, _, _, err := matchedCascadeDC(dz, dp, gain, dt)
-		if err != nil {
-			return nil, err
+	r := newMatchedReference(ref)
+	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
+		if root, ok := matchedDCRootOf(ref, noise); ok && root.order != 0 {
+			return sys.discretizeMatchedAtDC(dt, ref, rational, cz, cp, k, transfer, root)
 		}
-		return matchedDiscreteResult(realized, sys, dt, nil)
 	}
 	if transfer {
 		pz, pp := matchedPolish(rational.TF.Num[0][0], cz), matchedPolish(rational.TF.Den[0], cp)
@@ -387,14 +396,24 @@ func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 			cz, cp, dz, dp, gain = pz, pp, z, p, g
 		}
 	}
-	r := newMatchedReference(ref)
-	gain, unverified := r.matchedGain(matchedContinuousProduct(k, cz, cp), matchedDiscreteProduct(1, dz, dp, 0), gain)
+	v, base := matchedContinuousProduct(k, cz, cp), gain
+	mapped := matchedMappedProduct(cz, cp, dz, dt, 0)
+	gain, unverified := r.matchedGainAtFloatDC(v, mapped, base)
 	realized, dc, dcOK, err := matchedCascadeDC(dz, dp, gain, dt)
 	if err != nil {
 		return nil, err
 	}
-	if unverified == nil && !r.dcAgrees(dc, dcOK) {
-		unverified = matchedUnverified("DC gain of the result is not within the descriptor bar of DCGain")
+	if r.err == nil && !r.zero && !r.dcAgrees(dc, dcOK) {
+		refuted := matchedUnverified("DC gain of the result is not within the descriptor bar of DCGain")
+		if stored := matchedDiscreteProduct(1, dz, dp, 0); stored != mapped {
+			g, unv := r.matchedGainAtFloatDC(v, stored, base)
+			if out, sdc, sok, serr := matchedCascadeDC(dz, dp, g, dt); serr == nil && r.dcAgrees(sdc, sok) {
+				realized, refuted = out, unv
+			}
+		}
+		if unverified == nil {
+			unverified = refuted
+		}
 	}
 	return matchedDiscreteResult(realized, sys, dt, unverified)
 }
