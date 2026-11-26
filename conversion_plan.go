@@ -107,11 +107,11 @@ func (p c2dPlan) run() (*System, error) {
 	if p.workSys.HasInternalDelay() {
 		return p.discretizeInternalDelay()
 	}
-	disc, err := p.discretizeMethod()
+	disc, src, err := p.discretizeMethod()
 	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
-	out, derr := p.applyExternalDelays(disc)
+	out, derr := p.applyExternalDelaysFrom(src, disc)
 	if derr != nil {
 		return nil, derr
 	}
@@ -129,30 +129,31 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 	return p.applyExternalDelays(disc)
 }
 
-// discretizeMethod discretizes workSys by the method; with a gate, a
+// discretizeMethod discretizes workSys by the method, returning the model
+// it discretized (the delays are applied in its coordinates); with a gate, a
 // ZOH or FOH result of a dense workSys that fails it is discretized again
 // from the real Schur form of workSys, in those coordinates and without
 // state names, and the first result that passes is returned, else the
 // first with the gate's error. A fold of a dense, non-normal E⁻¹A with
 // ‖A·dt‖ ≫ 1 holds DC poorly in its own coordinates, where even its
 // rounded exact hold is far off; orthogonal ones keep it.
-func (p c2dPlan) discretizeMethod() (*System, error) {
+func (p c2dPlan) discretizeMethod() (*System, *System, error) {
 	disc, err := p.discretizeWith(p.workSys)
 	if p.gate == nil || err != nil {
-		return disc, err
+		return disc, p.workSys, err
 	}
 	gerr := p.gate.check(disc)
 	if gerr == nil || p.gate.refused != nil || (p.method != C2DMethodZOH && p.method != C2DMethodFOH) || upperQuasiTriangular(p.workSys.A) {
-		return disc, gerr
+		return disc, p.workSys, gerr
 	}
 	schur, ok := realSchurPart(p.workSys)
 	if !ok {
-		return disc, gerr
+		return disc, p.workSys, gerr
 	}
 	if sd, err := p.discretizeWith(schur); err == nil && p.gate.check(sd) == nil {
-		return sd, nil
+		return sd, schur, nil
 	}
-	return disc, gerr
+	return disc, p.workSys, gerr
 }
 
 func (p c2dPlan) discretizeWith(sys *System) (*System, error) {
@@ -215,13 +216,19 @@ func discretizeMatchedDescriptor(sys *System, dt float64, ref *System) (*System,
 }
 
 func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
+	return p.applyExternalDelaysFrom(p.workSys, disc)
+}
+
+// applyExternalDelaysFrom is applyExternalDelays for disc discretized from
+// cont, whose coordinates a fractional ZOH input delay is held in.
+func (p c2dPlan) applyExternalDelaysFrom(cont, disc *System) (*System, error) {
 	if p.pathDelay != nil {
 		var err error
 		if disc, err = conversionPathThiran(disc, p.pathDelay, p.dt, p.opts); err != nil {
 			return nil, err
 		}
 	}
-	return applyConversionExternalDelays(p.workSys, disc, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
+	return applyConversionExternalDelays(cont, disc, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
 }
 
 type d2cPlan struct {

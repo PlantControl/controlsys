@@ -398,6 +398,9 @@ func TestC2DDescriptorDCContractFractionalInputDelay(t *testing.T) {
 		sys.InputDelay = []float64{0.0025}
 		for _, m := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
 			out, err := sys.C2D(0.01, C2DOptions{Method: m})
+			if out != nil {
+				checkDescriptorDCContract(t, tc.row+" "+string(m), sys, delayClosedAtDC(t, out), err)
+			}
 			got := "err"
 			switch {
 			case err == nil:
@@ -409,5 +412,59 @@ func TestC2DDescriptorDCContractFractionalInputDelay(t *testing.T) {
 				t.Errorf("%s %s: %s (%v), want %s", tc.row, m, got, err, tc.want)
 			}
 		}
+	}
+}
+
+// delayClosedAtDC returns the discrete out with its internal delays closed
+// as identity (z = 1) without rounding: the delayed signals w become states
+// of x⁺ = A·x + B2·w + B·u, w⁺ = C2·x + D22·w + D21·u, whose DC gain is that
+// of out. I/O delay fields are dropped (identity at z = 1).
+func delayClosedAtDC(t *testing.T, out *System) *System {
+	t.Helper()
+	if out.LFT == nil {
+		c := *out
+		c.InputDelay, c.OutputDelay, c.Delay = nil, nil, nil
+		return &c
+	}
+	n, m, p := out.Dims()
+	L := out.LFT
+	N := len(L.Tau)
+	A := mat.NewDense(n+N, n+N, nil)
+	B := mat.NewDense(n+N, m, nil)
+	C := mat.NewDense(p, n+N, nil)
+	A.Slice(0, n, 0, n).(*mat.Dense).Copy(out.A)
+	A.Slice(0, n, n, n+N).(*mat.Dense).Copy(L.B2)
+	A.Slice(n, n+N, 0, n).(*mat.Dense).Copy(L.C2)
+	A.Slice(n, n+N, n, n+N).(*mat.Dense).Copy(L.D22)
+	B.Slice(0, n, 0, m).(*mat.Dense).Copy(out.B)
+	B.Slice(n, n+N, 0, m).(*mat.Dense).Copy(L.D21)
+	C.Slice(0, p, 0, n).(*mat.Dense).Copy(out.C)
+	C.Slice(0, p, n, n+N).(*mat.Dense).Copy(L.D12)
+	return &System{A: A, B: B, C: C, D: out.D, Dt: out.Dt}
+}
+
+// A fractional I/O delay held after the real Schur retry is applied in
+// the Schur coordinates the model was discretized in: strad1m/17 at
+// dt = 0.01 with a 1.2345-sample delay returns ZOH nil, its delay-closed DC
+// within the bar (applied in the fold's coordinates instead, DC was 0.064
+// against −1.898, 4e11 bars).
+func TestC2DDescriptorDCContractDelayAfterSchurRetry(t *testing.T) {
+	var sys *System
+	for _, r := range descriptorDCGateRows {
+		if r.name == "strad1m/17" {
+			var err error
+			if sys, err = r.system(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, d := range []struct{ in, out []float64 }{{[]float64{0.012345}, nil}, {nil, []float64{0.012345}}} {
+		s := sys.Copy()
+		s.InputDelay, s.OutputDelay = d.in, d.out
+		out, err := s.C2D(0.01, C2DOptions{})
+		if err != nil {
+			t.Fatalf("in %v out %v: %v", d.in, d.out, err)
+		}
+		checkDescriptorDCContract(t, "strad1m/17 delayed", sys, delayClosedAtDC(t, out), nil)
 	}
 }
