@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -824,7 +825,7 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64, rec *
 	if err := sp.within(limit); err != nil {
 		return nil, false, err
 	}
-	parts := sp.parts
+	parts := slices.Clone(sp.parts)
 	zs := make([]*mat.Dense, len(parts))
 	for i, part := range parts {
 		if parts[i], zs[i], ok = realSchurPartZ(part); !ok {

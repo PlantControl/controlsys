@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"testing"
 
@@ -157,31 +158,79 @@ func responseError(got, ref *mat.Dense) float64 {
 	return worst
 }
 
+// clusterStiffDescriptor is a stable 5-state descriptor (E symmetric
+// positive definite, A symmetric negative definite) whose E has three stiff
+// singular values within a factor 1.7: its fast modes form one part that
+// splitFastPencil does not split, dense after svdExplicit.
+func clusterStiffDescriptor(t *testing.T) *System {
+	t.Helper()
+	rng := rand.New(rand.NewPCG(0, 99))
+	const n = 5
+	orth := func() *mat.Dense {
+		a := mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				a.Set(i, j, rng.NormFloat64())
+			}
+		}
+		var qr mat.QR
+		qr.Factorize(a)
+		var q mat.Dense
+		qr.QTo(&q)
+		return &q
+	}
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range i + 1 {
+			v := 0.2 * rng.NormFloat64()
+			A.Set(i, j, v)
+			A.Set(j, i, v)
+		}
+		A.Set(i, i, A.At(i, i)-1)
+	}
+	q := orth()
+	var T, E mat.Dense
+	T.Mul(q, mat.NewDiagDense(n, []float64{1, 0.7, 1e-9, 1.3e-9, 1.7e-9}))
+	E.Mul(&T, q.T())
+	sys, err := NewDescriptor(A, mat.NewDense(n, 1, []float64{1, 0.3, -0.7, 0.5, 0.2}),
+		mat.NewDense(1, n, []float64{0.6, -0.9, 0.4, 0.2, 0.1}), mat.NewDense(1, 1, []float64{0.1}), &E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
 // With an input delay of whole samples, C2D of a stiff descriptor holds the
 // generalized Schur parts in their real Schur forms (stiffDescriptorExplicit)
 // and C2DMap's G carries Zᵀ·W into them: the free response from G·x0 is the
-// delay-free one, which the input delay does not act on.
+// delay-free one, which the input delay does not act on. The cluster row's
+// fast part is dense, so its Schur form changes coordinates.
 func TestC2DMapDescriptorInputDelaySchurParts(t *testing.T) {
-	sys := c2dMapRowSystem(t, "stfr/399")
-	n, _, _ := sys.Dims()
-	x0 := make([]float64, n)
-	for i := range x0 {
-		x0[i] = (1 + 0.25*float64(i)) * float64(1-2*(i%2))
+	cluster := clusterStiffDescriptor(t)
+	sp, ok := foldInaccurateParts(cluster)
+	dense := false
+	for _, part := range sp.parts {
+		dense = dense || !upperQuasiTriangular(part.A)
 	}
-	for _, dt := range []float64{1e-4, 1e-2} {
-		for _, meth := range []C2DMethod{C2DMethodZOH} {
+	if !ok || sp.err != nil || !dense {
+		t.Fatal("cluster row: no certified split with a dense part; the case no longer tests Zᵀ")
+	}
+	for name, sys := range map[string]*System{"stfr/399": c2dMapRowSystem(t, "stfr/399"), "cluster": cluster} {
+		n, _, _ := sys.Dims()
+		x0 := c2dMapRefX0(n)
+		for _, dt := range []float64{1e-4, 1e-2} {
 			delayed := sys.Copy()
 			delayed.InputDelay = []float64{3 * dt}
-			d, g, err := delayed.C2DMap(dt, C2DOptions{Method: meth})
+			d, g, err := delayed.C2DMap(dt, C2DOptions{})
 			if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
-				t.Fatalf("%g/%s: %v", dt, meth, err)
+				t.Fatalf("%s@%g: %v", name, dt, err)
 			}
-			d0, g0, err := sys.C2DMap(dt, C2DOptions{Method: meth})
+			d0, g0, err := sys.C2DMap(dt, C2DOptions{})
 			if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
-				t.Fatalf("%g/%s core: %v", dt, meth, err)
+				t.Fatalf("%s@%g core: %v", name, dt, err)
 			}
 			if e := responseError(mapResponse(d, g, x0, nil, 21), mapResponse(d0, g0, x0, nil, 21)); !(e <= 1e-9) {
-				t.Errorf("%g/%s: free response from G·x0 %.3g off the delay-free one", dt, meth, e)
+				t.Errorf("%s@%g: free response from G·x0 %.3g off the delay-free one", name, dt, e)
 			}
 		}
 	}
