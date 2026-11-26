@@ -468,3 +468,30 @@ func TestC2DDescriptorDCContractDelayAfterSchurRetry(t *testing.T) {
 		checkDescriptorDCContract(t, "strad1m/17 delayed", sys, delayClosedAtDC(t, out), nil)
 	}
 }
+
+// The delays the hold adds can spoil DC that the delay-free core holds:
+// stfr/399 with a 2.34-sample output delay at dt = 1 is 8.6e11 bars off
+// in the ZOH returned, its core inside the bar. The returned model is what
+// is checked, so it is unverified.
+func TestC2DDescriptorDCContractDelaySpoilsCore(t *testing.T) {
+	var sys *System
+	for _, r := range descriptorDCGateRows {
+		if r.name == "stfr/399" {
+			var err error
+			if sys, err = r.system(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	core, err := sys.C2D(1, C2DOptions{})
+	if err != nil {
+		t.Fatalf("setup: delay-free core %v", err)
+	}
+	checkDescriptorDCContract(t, "stfr/399 core", sys, core, err)
+	s := sys.Copy()
+	s.OutputDelay = []float64{0.0234}
+	out, err := s.C2D(1, C2DOptions{})
+	if got := checkDescriptorDCContract(t, "stfr/399 delayed", sys, delayClosedAtDC(t, out), err); got != "unv" {
+		t.Errorf("stfr/399 delayed: %s (%v), want unverified", got, err)
+	}
+}
