@@ -46,6 +46,40 @@ func BenchmarkC2DDescriptorRoutes(b *testing.B) {
 	}
 }
 
+// BenchmarkC2DMapDescriptorRoutes times C2DMap of the rows of
+// BenchmarkC2DDescriptorRoutes: C2D's route, plus on the parts the riders
+// [E A] through the split and the shares.
+func BenchmarkC2DMapDescriptorRoutes(b *testing.B) {
+	for _, tc := range []struct {
+		row    string
+		dt     float64
+		method C2DMethod
+	}{
+		{"cond/13", 0.01, C2DMethodZOH},
+		{"cond/13", 0.01, C2DMethodTustin},
+		{"cond/13", 0.01, C2DMethodFOH},
+		{"cond/644", 0.01, C2DMethodZOH},
+		{"cond/644", 1, C2DMethodZOH},
+		{"strad1m/47", 0.01, C2DMethodZOH},
+		{"stfr/399", 0.01, C2DMethodZOH},
+	} {
+		var sys *System
+		for _, r := range descriptorDCGateRows {
+			if r.name == tc.row {
+				var err error
+				if sys, err = r.system(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+		b.Run(tc.row+"/"+string(tc.method)+"/"+formatBenchDt(tc.dt), func(b *testing.B) {
+			for b.Loop() {
+				_, _, _ = sys.C2DMap(tc.dt, C2DOptions{Method: tc.method})
+			}
+		})
+	}
+}
+
 func formatBenchDt(dt float64) string {
 	switch dt {
 	case 0.01:
