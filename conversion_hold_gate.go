@@ -107,11 +107,11 @@ func (g *holdGate) check(out *System) error {
 	if !g.gated {
 		return nil
 	}
-	if out.LFT != nil {
-		return holdUnverified("DC gain of a result with internal delays is not checked")
-	}
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
 		return holdUnverified("%v", err)
+	}
+	if out.LFT != nil {
+		out = delaysClosedAtDC(out)
 	}
 	h, herr, allow, ok := holdDC(out)
 	if !ok {
@@ -133,17 +133,35 @@ func (g *holdGate) check(out *System) error {
 	return nil
 }
 
-// checkCore is check of the discretized delay-free core of a result whose
-// fractional I/O delays the hold absorbs channel by channel: the delays
-// re-attached there are unity at DC, so the result's DC gain is the core's.
-func (g *holdGate) checkCore(core *System, err error) error {
-	if err == nil {
-		return g.check(core)
+// delaysClosedAtDC returns the discrete out with its internal delays, the
+// identity at z = 1, closed without rounding: the delayed signals w become
+// states of x⁺ = A·x + B2·w + B·u, w⁺ = C2·x + D22·w + D21·u, output
+// C·x + D12·w + D·u, whose DC gain, exact for the stored entries, is out's.
+func delaysClosedAtDC(out *System) *System {
+	n, m, p := out.Dims()
+	L := out.LFT
+	N := out.internalDelayCount()
+	A, B, C := newDense(n+N, n+N), newDense(n+N, m), newDense(p, n+N)
+	set := func(dst *mat.Dense, r0, c0 int, src *mat.Dense) {
+		if src == nil {
+			return
+		}
+		rows, cols := src.Dims()
+		for i := range rows {
+			for j := range cols {
+				dst.Set(r0+i, c0+j, src.At(i, j))
+			}
+		}
 	}
-	if g.err != nil || g.gated || g.refused != nil {
-		return holdUnverified("delay-free core: %v", err)
-	}
-	return nil
+	set(A, 0, 0, out.A)
+	set(A, 0, n, L.B2)
+	set(A, n, 0, L.C2)
+	set(A, n, n, L.D22)
+	set(B, 0, 0, out.B)
+	set(B, n, 0, L.D21)
+	set(C, 0, 0, out.C)
+	set(C, 0, n, L.D12)
+	return &System{A: A, B: B, C: C, D: out.D, Dt: out.Dt}
 }
 
 func halfUlp(v float64) float64 {

@@ -45,8 +45,8 @@ import (
 // rounding of the result's own entries (Ad, Bd, Cd, Dd):
 // S = |Dd| + Σ|Cd||X| + |Cd(I − Ad)⁻¹|·(|Ad||X| + |Bd|), X = (I − Ad)⁻¹Bd,
 // counted only where ε·S_ij ≤ √ε·max(|g0_ij|, Σ|C_i||A⁻¹B_j| + |D_ij|).
-// I/O delays, unity at DC, are re-attached after the check of the
-// delay-free core. An entry where g0 is infinite (a pole at DC) is not
+// With I/O delays the check is on the model returned, its internal delays
+// (unity at DC) closed. An entry where g0 is infinite (a pole at DC) is not
 // checked; where other entries are, there is no bar and the model is
 // unverified. Where the model
 // of a dense E⁻¹A fails that check, ZOH and FOH discretize its real Schur

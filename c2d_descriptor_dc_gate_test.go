@@ -376,11 +376,11 @@ func TestC2DDescriptorDCContractNoChannels(t *testing.T) {
 	}
 }
 
-// Fractional I/O delays are re-attached after the check of the
-// discretized delay-free core: cond/111 at dt = 0.01 is 13.9 bars in fold
-// and 41 in Schur coordinates, so with a 0.25-sample input delay ZOH and
-// FOH (which holds the delay channel by channel) stay unverified, while
-// cond/644, 1.2 bars in fold coordinates, stays nil.
+// With fractional I/O delays the model returned, its internal delays
+// closed, is checked: cond/111 at dt = 0.01 is 13.9 bars in fold and 41 in
+// Schur coordinates, so with a 0.25-sample input delay ZOH and FOH (which
+// holds the delay channel by channel) stay unverified, while cond/644,
+// 1.2 bars in fold coordinates, stays nil.
 func TestC2DDescriptorDCContractFractionalInputDelay(t *testing.T) {
 	for _, tc := range []struct {
 		row  string

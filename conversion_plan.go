@@ -101,7 +101,7 @@ func (p c2dPlan) run() (*System, error) {
 			if err != nil || p.gate == nil {
 				return out, err
 			}
-			return out, p.gate.checkCore(p.discretizeWith(ioDelayFree(p.sys)))
+			return out, p.gate.check(out)
 		}
 	}
 	if p.workSys.HasInternalDelay() {
@@ -114,6 +114,9 @@ func (p c2dPlan) run() (*System, error) {
 	out, derr := p.applyExternalDelaysFrom(src, disc)
 	if derr != nil {
 		return nil, derr
+	}
+	if p.gate != nil && p.sys.HasDelay() && (err == nil || carriesModel(err)) {
+		err = p.gate.check(out)
 	}
 	return out, err
 }
