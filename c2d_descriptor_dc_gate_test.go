@@ -305,10 +305,10 @@ func TestC2DDescriptorDCGateErrorBounds(t *testing.T) {
 	}
 }
 
-// A pole at DC that no exactly zero pivot shows (A's 2×2 block is the
-// singular [3 6; 1 2], whose float LU pivot 2 − fl(1/3)·6 is 2⁻⁵² and not
-// 0) leaves the finite entry without a bar: the descriptor bar of that LU
-// would pass anything, so the result is unverified.
+// A pole at DC beside a finite entry leaves that entry without a bar, so
+// the result is unverified. A's 2×2 block is the singular [3 6; 1 2]: with
+// a fused multiply-add the LU pivot 2 − (1/3)·6 is 2⁻⁵² and not 0, so the
+// descriptor bar of that LU would pass anything; without one it is 0.
 func TestC2DDescriptorDCContractPoleBesideFiniteEntry(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{
 		-3, -6, 0,
@@ -320,9 +320,6 @@ func TestC2DDescriptorDCContractPoleBesideFiniteEntry(t *testing.T) {
 	sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 1, nil), E, 0)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if b := newDCBar(sys); b.lu == nil {
-		t.Fatal("setup: LU of A meets an exact zero pivot")
 	}
 	g, err := sys.DCGain()
 	if err != nil || !math.IsInf(g.At(0, 0), 0) || math.IsInf(g.At(1, 0), 0) {
