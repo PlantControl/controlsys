@@ -264,6 +264,108 @@ func TestC2DMatchedLowFrequencyResponse(t *testing.T) {
 	}
 }
 
+// matchedSingularPencilModel is an explicit model with det(A) = 0 exactly and
+// a finite DC limit: rows 0 and 1 of A, and of B, differ by the factor k, so
+// the mode at 0 is uncontrollable; the entries are float32 values, so k·x is
+// exact, and the LU need not meet a zero pivot.
+func matchedSingularPencilModel(t *testing.T, a, b float32, k float64, tail []float64) *System {
+	t.Helper()
+	m := len(tail)
+	n := 2 + m
+	A := mat.NewDense(n, n, nil)
+	A.Set(0, 0, float64(a))
+	A.Set(0, 1, float64(b))
+	A.Set(1, 0, k*float64(a))
+	A.Set(1, 1, k*float64(b))
+	B := mat.NewDense(n, 1, nil)
+	B.Set(0, 0, float64(a))
+	B.Set(1, 0, k*float64(a))
+	C := mat.NewDense(1, n, nil)
+	C.Set(0, 0, 0.5)
+	C.Set(0, 1, -0.25)
+	for i, l := range tail {
+		A.Set(2+i, 0, 1+float64(i))
+		A.Set(2+i, 1, 2-float64(i))
+		if i > 0 {
+			A.Set(2+i, 1+i, 0.75)
+		}
+		A.Set(2+i, 2+i, -l)
+		B.Set(2+i, 0, 1)
+		C.Set(0, 2+i, 2-0.5*float64(i))
+	}
+	sys, err := New(A, B, C, mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// AQU6M7 (F1, U-A): an exactly singular DC pencil with a finite exact limit
+// takes the bar u·(2|g0 − D| + |D|), whether or not its LU meets a zero
+// pivot; a rounding-size pivot gave a bar of 1e20 that passed any DC (the
+// arbiter's model, DC off by 1.25e-8 at dt = 1e-8 with nil).
+func TestC2DMatchedSingularPencilBar(t *testing.T) {
+	models := map[string]*System{"arbiter": matchedSingularPencilModel(t, 0.47, 0.81, 3, []float64{1.5})}
+	for i, c := range []struct {
+		a, b float32
+		k    float64
+		tail []float64
+	}{
+		{0.3, -1.7, 5, []float64{2}}, {1.1, 0.13, 7, []float64{0.5, 3}}, {-0.62, 2.9, 3, []float64{1, 4, 0.25}},
+		{0.07, 0.91, 9, []float64{6}}, {2.3, -0.4, 11, []float64{0.1, 1.3}},
+	} {
+		models[string(rune('a'+i))] = matchedSingularPencilModel(t, c.a, c.b, c.k, c.tail)
+	}
+	models["g3/rotZ.7"] = matchedFixture(t, "singular pencil zero pivot")
+	nils := 0
+	for name, sys := range models {
+		n, _, _ := sys.Dims()
+		order, lead := matchedRationalLaurent(t, sys, 0)
+		if order != 0 {
+			t.Fatalf("%s: order %d at DC, want a finite limit", name, order)
+		}
+		if exactDetIsZero(sys.A.RawMatrix()) != true {
+			t.Fatalf("%s: A not exactly singular", name)
+		}
+		g0, _ := lead.Float64()
+		bar := 4 * float64(n+5) * 0x1p-52 * 2 * math.Abs(g0)
+		for _, dt := range []float64{1e-2, 1e-4, 1e-6, 1e-8} {
+			d, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
+			if err != nil {
+				requireMatchedUnverifiedModel(t, d, err)
+				continue
+			}
+			nils++
+			free := *d
+			free.InputDelay, free.OutputDelay, free.Delay = nil, nil, nil
+			free.Dt = 1
+			h, _ := matchedDC320(t, &free, 1)
+			if e := math.Abs(h - g0); !(e <= bar) {
+				t.Errorf("%s @%g: nil with DC off by %.3g, bar %.3g", name, dt, e, bar)
+			}
+		}
+	}
+	if nils == 0 {
+		t.Error("no singular pencil returned nil")
+	}
+}
+
+// AQU6M7 (U-B): where the gain through 1 − e^{p·dt} misses the DC bar and
+// the stored discrete roots' gain is taken, their DC product rescaled to
+// DCGain must be within terms (R2), else the DC-matched model comes with
+// ErrAccuracyUnverified: g3/rotZ.144 and near1/72 at dt = 1e-4, gain off
+// by up to 3e-4.
+func TestC2DMatchedStoredRootsRescaleUnverified(t *testing.T) {
+	for _, name := range []string{"stored roots refuted", "near dc pole 3"} {
+		sys := matchedFixture(t, name)
+		d, err := sys.C2D(1e-4, C2DOptions{Method: C2DMethodMatched})
+		requireMatchedUnverifiedModel(t, d, err)
+		if bars := matchedDCInBars(t, sys, d); !(bars <= 1) {
+			t.Errorf("%s: DC of the unverified model off by %.3g bars", name, bars)
+		}
+	}
+}
+
 func TestMatchedLaurentAgrees(t *testing.T) {
 	ref := conversionSISO(t, []float64{1}, []float64{1, 1, 0}, 0)
 	zref := conversionSISO(t, []float64{1, 0}, []float64{1, 1}, 0)

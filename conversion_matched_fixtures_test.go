@@ -139,4 +139,8 @@ var matchedDCFixtures = map[string]matchedDCFixture{
 	"near dc cluster": {A: mat.NewDense(5, 5, []float64{0, 0, 0, 0, -5.493324930935505e-13, 1, 0, 0, 0, -0.0005636381693098302, 0, 1, 0, 0, -7.502934890279211, 0, 0, 1, 0, -11.497641124710292, 0, 0, 0, 1, -5.87314303789566}), B: mat.NewDense(5, 1, []float64{-5.049752020569552e-11, -0.18683509936166423, 1.261156441964868, 0, 0}), C: mat.NewDense(1, 5, []float64{0, 0, 0, 0, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
 	// AQU6M7 census row g3/rlrep.169.
 	"window dc pole kept copies": {A: mat.NewDense(5, 5, []float64{0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5, -1, -1, -1, 0, 0, 0, 1, 0, 0}), B: mat.NewDense(5, 1, []float64{0.5, -1, 0, 2, 1}), C: mat.NewDense(1, 5, []float64{0.5, 0.5, 0.5, 0.5, 1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/rotZ.7.
+	"singular pencil zero pivot": {A: mat.NewDense(6, 6, []float64{0, 0, 0, 0, 0, 0, -1, -0.5, 0, 1, 0.5, 1, -1, 0, -0.5, -1, 0, -2, -1, 0, 0, -1, 0, 0, 0, -0.5, 0, 0, -0.5, 1, 0, 0, 2, -1, 0, -0.5}), B: mat.NewDense(6, 1, []float64{0, 1, 0.5, 2, 0.5, 0.5}), C: mat.NewDense(1, 6, []float64{0, 1, 2, 1, 0.5, 0}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
+	// AQU6M7 census row g3/rotZ.144.
+	"stored roots refuted": {A: mat.NewDense(3, 3, []float64{-1, 2, 0.5, -2, -1, 1, 0, 0, -9.313225746154785e-10}), B: mat.NewDense(3, 1, []float64{0.5, 0, 1}), C: mat.NewDense(1, 3, []float64{-1, 1, -1}), D: mat.NewDense(1, 1, []float64{0}), E: nil},
 }

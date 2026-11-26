@@ -64,10 +64,14 @@ import (
 // up to relative degree one, and matches the DC gain to DCGain of sys, as
 // MATLAB matches the DC gains, through the factors 1 − e^{s·dt} formed
 // from the continuous roots (else, where that fails the bar below, those of
-// the stored discrete roots). A nil error certifies that the DC gain of
-// the result, exact for its stored entries, lies within the descriptor bar
-// u·(‖C‖‖M‖‖A‖‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + |D|), M = A⁻¹, u = 4(n+5)ε (Frobenius
-// norms of the delay-free sys) of that DCGain. A pole or zero at DC is the
+// the stored discrete roots, if their DC product rescaled to DCGain is
+// within √ε·max(|DCGain|, |product|, Σ|C||X| + |D|) of it). A nil error
+// certifies that the DC gain of the result, exact for its stored entries,
+// lies within the descriptor bar u·(‖C‖‖M‖‖A‖‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + |D|),
+// M = A⁻¹, u = 4(n+5)ε (Frobenius norms of the delay-free sys) of that
+// DCGain; where A is exactly singular (decided exactly up to order 16) and
+// the exact limit is finite, within u·(2|DCGain − D| + |D|), the floor of
+// that bar with the group inverse of A in place of A⁻¹. A pole or zero at DC is the
 // stored data's exact limit, as DCGain returns it: where DCGain is 0, ±Inf
 // or within ε·(|D| + Σ|C||X|) of 0, the exact expansion of the transfer
 // function of sys at s = 0 (order up to 16) gives the order k of its lowest
@@ -81,8 +85,8 @@ import (
 // but not at it is mapped like any other. Neither the response away from
 // DC (the leading coefficient included) nor the root locations are
 // certified. The model is returned with an error wrapping
-// ErrAccuracyUnverified when DCGain fails or is unverified, or the pencil
-// −A is singular (no bar); when the expansion is unavailable or the roots
+// ErrAccuracyUnverified when DCGain fails or is unverified, or A is
+// singular beyond order 16; when the expansion is unavailable or the roots
 // cannot hold the order; when the DC product (leading coefficient) of the
 // roots mapped is not within √ε·max(|DCGain|, |product|, Σ|C||X| + |D|)
 // (√ε·max(|coefficient|, |product|)) of it; or when the DC gain of the

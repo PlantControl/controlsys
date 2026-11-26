@@ -48,7 +48,7 @@ func (sys *System) d2cMatched(ref *System) (*System, error) {
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
 	var out *System
 	var unverified error
-	r := newMatchedReference(ref)
+	r := matchedReferenceOf(ref)
 	var root matchedDCRoot
 	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
 		root, _ = matchedDCRootOf(ref, noise)
@@ -339,7 +339,9 @@ func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float
 // is not within the descriptor bar of it (matchedReference). The gain is
 // matched through 1 − e^{root·dt} formed from the continuous roots
 // (matchedMappedProduct), else, where that fails the DC gate, through the
-// stored discrete roots.
+// stored discrete roots, unverified unless their DC product, rescaled to
+// DCGain, is within its terms (R2's inequality: the rescale must not hide a
+// refuted root set).
 func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
@@ -384,7 +386,7 @@ func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := newMatchedReference(ref)
+	r := matchedReferenceOf(ref)
 	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
 		if root, ok := matchedDCRootOf(ref, noise); ok && root.order != 0 {
 			return sys.discretizeMatchedAtDC(dt, ref, rational, cz, cp, k, transfer, root)
@@ -409,6 +411,9 @@ func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 			g, unv := r.matchedGainAtFloatDC(v, stored, base)
 			if out, sdc, sok, serr := matchedCascadeDC(dz, dp, g, dt); serr == nil && r.dcAgrees(sdc, sok) {
 				realized, refuted = out, unv
+				if rescaled := complex(r.g0, 0) * stored / mapped; refuted == nil && !r.rootsAgree(rescaled) {
+					refuted = matchedUnverified("DC product %v of the stored discrete roots is not within terms of DCGain %v", real(rescaled), r.g0)
+				}
 			}
 		}
 		if unverified == nil {
