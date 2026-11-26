@@ -36,12 +36,7 @@ func matchedReferenceOf(ref *System) matchedReference {
 	if r.zero {
 		return r
 	}
-	free := ref
-	if ref.HasDelay() {
-		c := *ref
-		c.Delay, c.InputDelay, c.OutputDelay = nil, nil, nil
-		free = &c
-	}
+	free := ioDelayFree(ref)
 	n, _, _ := free.Dims()
 	x0 := 0.0
 	if free.IsDiscrete() {
@@ -76,12 +71,7 @@ func matchedReferenceOf(ref *System) matchedReference {
 // (matchedExactLaurent), whose sign at a pole must be that of DCGain. ok is false where DCGain fails or
 // the expansion is unavailable or disagrees with it.
 func matchedDCRootOf(ref *System, noise bool) (matchedDCRoot, bool) {
-	free := ref
-	if ref.HasDelay() {
-		c := *ref
-		c.Delay, c.InputDelay, c.OutputDelay = nil, nil, nil
-		free = &c
-	}
+	free := ioDelayFree(ref)
 	g, err := free.DCGain()
 	if err != nil {
 		return matchedDCRoot{}, false
@@ -310,41 +300,19 @@ func matchedLaurentAgrees(out, ref *System, root matchedDCRoot, x0 float64) bool
 }
 
 // matchedZeroBar is the descriptor bar of the delay-free ref at s = 0 or
-// z = 1, u·(‖C‖‖M‖·(‖A‖ + x0‖E‖)·‖M‖‖B‖ + ‖C‖‖M‖‖B‖ + |D|),
-// M = (x0·E − A)⁻¹, u = 4(n+5)ε, Frobenius norms (E = I when nil), for a
-// model whose DC gain is exactly 0 (newMatchedReference has none there);
-// ok is false where x0·E − A is singular in double.
+// z = 1 (newDCBar) for a model whose DC gain is exactly 0, where
+// newMatchedReference has none; ok is false where no bar exists.
 func matchedZeroBar(ref *System) (float64, bool) {
-	n, _, _ := ref.Dims()
-	x0, normE := 0.0, math.Sqrt(float64(n))
-	if ref.IsDiscrete() {
-		x0 = 1
-	}
-	if ref.E != nil {
-		normE = mat.Norm(ref.E, 2)
-	}
-	p := mat.NewDense(n, n, nil)
-	p.Scale(-1, ref.A)
-	for i := range n {
-		for j := range n {
-			e := 0.0
-			switch {
-			case ref.E != nil:
-				e = ref.E.At(i, j)
-			case i == j:
-				e = 1
-			}
-			p.Set(i, j, p.At(i, j)+x0*e)
-		}
-	}
-	var m mat.Dense
-	if err := m.Inverse(p); err != nil {
+	b := newDCBar(ioDelayFree(ref))
+	if b.reason != "" {
 		return 0, false
 	}
-	normM := mat.Norm(&m, 2)
-	cm, normB := mat.Norm(ref.C, 2)*normM, mat.Norm(ref.B, 2)
-	u := 4 * float64(n+5) * 0x1p-52
-	bar := u * (cm*(mat.Norm(ref.A, 2)+x0*normE)*normM*normB + cm*normB + math.Abs(ref.D.At(0, 0)))
+	bar := 0.0
+	if b.lu == nil {
+		bar = b.bar[0]
+	} else {
+		bar = b.fullBar(0)
+	}
 	return bar, !math.IsNaN(bar) && !math.IsInf(bar, 0)
 }
 
