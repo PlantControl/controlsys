@@ -8,7 +8,6 @@ import (
 	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
-	"plantcontrol.org/v1/gonum/floats"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -192,10 +191,6 @@ func newDCBarSolved(free *System, solved []dd) dcBar {
 		impl.Dgetrs(blas.NoTrans, n, m, lu, n, ipiv, x, max(m, 1))
 		b.lu, b.ipiv = lu, ipiv
 	}
-	cScale := 1.0
-	if !finiteSlice(x) {
-		cScale = b.balance(free, x)
-	}
 	b.barLow = make([]float64, p*m)
 	for j := range m {
 		normX := 0.0
@@ -206,20 +201,12 @@ func newDCBarSolved(free *System, solved []dd) dcBar {
 			k := i*m + j
 			terms := b.absD[k]
 			for l := range n {
-				terms += math.Abs(free.C.At(i, l) * cScale * x[l*m+j])
+				terms += math.Abs(free.C.At(i, l) * x[l*m+j])
 			}
 			b.terms[k] = terms
 			b.barLow[k] = b.absD[k] * b.u
 			if b.normB[j] > 0 {
-				nx := math.Sqrt(normX)
-				if math.IsInf(nx, 1) {
-					col := make([]float64, n)
-					for l := range n {
-						col[l] = x[l*m+j]
-					}
-					nx = floats.Norm(col, 2)
-				}
-				b.barLow[k] = b.barOf(k, nx/b.normB[j])
+				b.barLow[k] = b.barOf(k, math.Sqrt(normX)/b.normB[j])
 			}
 			if math.IsNaN(b.barLow[k]) || math.IsInf(b.barLow[k], 0) || math.IsNaN(terms) || math.IsInf(terms, 0) {
 				b.reason = "DC bar not finite"
@@ -227,34 +214,6 @@ func newDCBarSolved(free *System, solved []dd) dcBar {
 		}
 	}
 	return b
-}
-
-// balance solves again for X = M·B·2⁻ˢ where M·B overflows, B·2⁻ˢ and
-// C·2ˢ balanced in norm, which leaves every term C_il·X_lj and the bar
-// unchanged; it returns 2ˢ and scales normB and normC to match.
-func (b *dcBar) balance(free *System, x []float64) float64 {
-	n, m, _ := free.Dims()
-	if b.factor {
-		b.factor = false
-		impl.Dgetrf(n, n, b.lu, n, b.ipiv)
-	}
-	_, eb := math.Frexp(mat.Norm(free.B, math.Inf(1)))
-	_, ec := math.Frexp(mat.Norm(free.C, math.Inf(1)))
-	sh := (eb - ec) / 2
-	br := free.B.RawMatrix()
-	for i := range n {
-		for j := range m {
-			x[i*m+j] = math.Ldexp(br.Data[i*br.Stride+j], -sh)
-		}
-	}
-	impl.Dgetrs(blas.NoTrans, n, m, b.lu, n, b.ipiv, x, max(m, 1))
-	for j := range b.normB {
-		b.normB[j] = math.Ldexp(b.normB[j], -sh)
-	}
-	for i := range b.normC {
-		b.normC[i] = math.Ldexp(b.normC[i], sh)
-	}
-	return math.Ldexp(1, sh)
 }
 
 // barOf is the bar of entry k for ‖M‖ = normM.

@@ -375,3 +375,39 @@ func TestC2DDescriptorDCContractNoChannels(t *testing.T) {
 		}
 	}
 }
+
+// Fractional I/O delays are re-attached after the check of the
+// discretized delay-free core: cond/111 at dt = 0.01 is 13.9 bars in fold
+// and 41 in Schur coordinates, so with a 0.25-sample input delay ZOH and
+// FOH (which holds the delay channel by channel) stay unverified, while
+// cond/644, 1.2 bars in fold coordinates, stays nil.
+func TestC2DDescriptorDCContractFractionalInputDelay(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		want string
+	}{{"cond/111", "unv"}, {"cond/644", "nil"}} {
+		var sys *System
+		for _, r := range descriptorDCGateRows {
+			if r.name == tc.row {
+				var err error
+				if sys, err = r.system(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		sys.InputDelay = []float64{0.0025}
+		for _, m := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
+			out, err := sys.C2D(0.01, C2DOptions{Method: m})
+			got := "err"
+			switch {
+			case err == nil:
+				got = "nil"
+			case errors.Is(err, ErrAccuracyUnverified) && out != nil:
+				got = "unv"
+			}
+			if got != tc.want {
+				t.Errorf("%s %s: %s (%v), want %s", tc.row, m, got, err, tc.want)
+			}
+		}
+	}
+}
