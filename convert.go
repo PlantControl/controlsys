@@ -45,8 +45,10 @@ import (
 // rounding of the result's own entries (Ad, Bd, Cd, Dd):
 // S = |Dd| + Σ|Cd||X| + |Cd(I − Ad)⁻¹|·(|Ad||X| + |Bd|), X = (I − Ad)⁻¹Bd,
 // counted only where ε·S_ij ≤ √ε·max(|g0_ij|, Σ|C_i||A⁻¹B_j| + |D_ij|).
-// An entry where g0 is infinite (a pole at DC) is not checked; where other
-// entries are, there is no bar and the model is unverified. Where the model
+// I/O delays, unity at DC, are re-attached after the check of the
+// delay-free core. An entry where g0 is infinite (a pole at DC) is not
+// checked; where other entries are, there is no bar and the model is
+// unverified. Where the model
 // of a dense E⁻¹A fails that check, ZOH and FOH discretize its real Schur
 // form instead, whose result has new state coordinates and no state names.
 // The model is returned with an error wrapping ErrAccuracyUnverified where

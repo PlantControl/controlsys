@@ -101,7 +101,7 @@ func (p c2dPlan) run() (*System, error) {
 			if err != nil || p.gate == nil {
 				return out, err
 			}
-			return out, p.gate.check(out)
+			return out, p.gate.checkCore(p.discretizeWith(ioDelayFree(p.sys)))
 		}
 	}
 	if p.workSys.HasInternalDelay() {
