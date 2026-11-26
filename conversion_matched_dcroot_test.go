@@ -395,7 +395,8 @@ func TestMatchedLeadGateBoundary(t *testing.T) {
 	}
 
 	ref := conversionSISO(t, []float64{1}, []float64{1, 1, 0}, 0)
-	dcRoot, ok := matchedDCRootOf(ref, false)
+	_, dcg := matchedReferenceOf(ref)
+	dcRoot, ok := matchedDCRootOf(ref, false, dcg)
 	if !ok || dcRoot.order != -1 {
 		t.Fatalf("root at DC %v %v", dcRoot, ok)
 	}
@@ -412,7 +413,8 @@ func TestMatchedLeadGateBoundary(t *testing.T) {
 
 	dt, a := 0.1, 0.5
 	dref := conversionSISO(t, []float64{1}, []float64{1, -(1 + a), a}, dt)
-	droot, ok := matchedDCRootOf(dref, false)
+	_, ddcg := matchedReferenceOf(dref)
+	droot, ok := matchedDCRootOf(dref, false, ddcg)
 	if !ok || droot.order != -1 {
 		t.Fatalf("discrete root at DC %v %v", droot, ok)
 	}
@@ -420,6 +422,39 @@ func TestMatchedLeadGateBoundary(t *testing.T) {
 	c, unverified, err := matchedD2CModelAtDC([]complex128{}, []complex128{1, complex(ap, 0)}, 1, 0, dt, dref, nil, droot, []float64{1}, []float64{1, -(1 + ap), ap})
 	if err != nil || c == nil || !errors.Is(unverified, errMatchedUnverified) {
 		t.Errorf("D2C: lead 1e-5 off: model %v, verdict %v, err %v; want the model, unverified", c, unverified, err)
+	}
+}
+
+// AQU6M7: where the roots fail the lead gate the model comes with its roots
+// mapped as given and their own leading-term gain, formed through
+// 1 − e^{p·dt} like the matched one: a zero at −1.4e-14 maps at dt = 0.01 to
+// a stored e^{z·dt} that holds 1 − e^{z·dt} only to 22 %. The roots are the
+// transfer-function roots of g3/rotZ.331 as amd64 (Rosetta) computes them,
+// frozen so the case runs on every arch.
+func TestC2DMatchedUnresolvedRootsOwnGain(t *testing.T) {
+	sys := matchedFixture(t, "missed dc pole 1")
+	_, dcg := matchedReferenceOf(sys)
+	root, ok := matchedDCRootOf(sys, false, dcg)
+	if !ok || root.order != -1 {
+		t.Fatalf("root at DC %v %v", root, ok)
+	}
+	rational := &TransferFuncResult{TF: &TransferFunc{
+		Num: [][][]float64{{{0x1.8000000000001p+1, 0x1.000003ffffffep+2, 0x1.ff7e853d06522p-45}}},
+		Den: [][]float64{{1, 0x1.0000000002876p-21, 0x1.00000000000fdp+0, 0}},
+	}}
+	pair := complex(-0x1.0000000080000p-22, 0x1.ffffffffffffdp-1)
+	cz := []complex128{-0x1.ff7e7d3f0c636p-47, -0x1.55555aaaaaa67p+0}
+	cp := []complex128{0, pair, cmplx.Conj(pair)}
+	dt := 0.01
+	d, err := sys.discretizeMatchedAtDC(dt, sys, rational, cz, cp, 0x1.8000000000001p+1, true, root)
+	if !errors.Is(err, errMatchedUnverified) || d == nil {
+		t.Fatalf("err %v, model %v; want the model, unverified", err, d)
+	}
+	theta := 1e-3
+	g := mustEvalFr(t, sys, complex(0, theta/dt))
+	h := mustEvalFr(t, d, cmplx.Exp(complex(0, theta)))
+	if e := math.Abs(cmplx.Abs(h)/cmplx.Abs(g) - 1); e > 1e-3 {
+		t.Errorf("unverified model's gain at θ = %g off by %.3g", theta, e)
 	}
 }
 

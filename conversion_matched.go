@@ -48,10 +48,10 @@ func (sys *System) d2cMatched(ref *System) (*System, error) {
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
 	var out *System
 	var unverified error
-	r := matchedReferenceOf(ref)
+	r, dcg := matchedReferenceOf(ref)
 	var root matchedDCRoot
 	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
-		root, _ = matchedDCRootOf(ref, noise)
+		root, _ = matchedDCRootOf(ref, noise, dcg)
 	}
 	if z, p, g, ok := matchedD2CPencilRoots(sys, numerator, dz, dp, k, artificial); ok {
 		out, unverified, err = matchedD2CModel(z, p, g, artificial, sys.Dt, ref, sys, r, root, nil, nil)
@@ -386,9 +386,9 @@ func (sys *System) discretizeMatched(dt float64, ref *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := matchedReferenceOf(ref)
+	r, dcg := matchedReferenceOf(ref)
 	if noise := r.err == nil && !r.zero && math.Abs(r.g0) <= 0x1p-52*r.terms; r.err != nil || noise {
-		if root, ok := matchedDCRootOf(ref, noise); ok && root.order != 0 {
+		if root, ok := matchedDCRootOf(ref, noise, dcg); ok && root.order != 0 {
 			return sys.discretizeMatchedAtDC(dt, ref, rational, cz, cp, k, transfer, root)
 		}
 	}

@@ -26,57 +26,62 @@ type matchedDCRoot struct {
 // pencil x0·I − A (explicit, or E dropping out at s = 0; order up to
 // exactDetMaxOrder) decided exactly, whether or not its LU meets a zero
 // pivot: a regular DC solve that certifies proves it nonsingular, else
-// exactShiftedDetIsZero decides. Where it is singular and DCGain is finite
+// exactShiftedDetIsZero decides. It also returns the DCGain it computed,
+// which matchedDCRootOf reads rather than solving again. Where it is singular and DCGain is finite
 // and nonzero (the stored exact limit cancels the pole at DC), the bar is
 // u·(2|g0 − D| + |D|), u = 4(n+5)ε, the floor at the stored order of the
 // descriptor bar with the group inverse A# in place of A⁻¹ (U-A), and the
 // terms |D| + |g0 − D|.
-func matchedReferenceOf(ref *System) matchedReference {
-	r := newMatchedReference(ref)
-	if r.zero {
-		return r
-	}
+func matchedReferenceOf(ref *System) (matchedReference, matchedDCGain) {
 	free := ioDelayFree(ref)
+	g, err := free.DCGain()
+	dcg := matchedDCGain{g: g, err: err}
+	r := matchedReferenceAt(free, g, err)
+	if r.zero || err != nil {
+		return r, dcg
+	}
+	g0 := g.At(0, 0)
+	if g0 == 0 || math.IsInf(g0, 0) || math.IsNaN(g0) {
+		return r, dcg
+	}
 	n, _, _ := free.Dims()
 	x0 := 0.0
 	if free.IsDiscrete() {
 		x0 = 1
 	}
 	if n == 0 || n > exactDetMaxOrder || (x0 != 0 && free.E != nil) {
-		return r
+		return r, dcg
 	}
 	if r.err == nil && solveDCRegular(nil, free.A, free.B, free.C, free.D, x0, false).certified {
-		return r
+		return r, dcg
 	}
 	if !exactShiftedDetIsZero(free.A.RawMatrix(), x0) {
-		return r
-	}
-	g, err := free.DCGain()
-	if err != nil {
-		return matchedReference{err: matchedUnverified("DCGain of the model: %v", err)}
-	}
-	g0 := g.At(0, 0)
-	if g0 == 0 || math.IsInf(g0, 0) || math.IsNaN(g0) {
-		return matchedReference{err: matchedUnverified("DCGain of the model is %v", g0)}
+		return r, dcg
 	}
 	d := math.Abs(free.D.At(0, 0))
 	e := math.Abs(g0 - free.D.At(0, 0))
-	return matchedReference{g0: g0, terms: d + e, bar: 4 * float64(n+5) * 0x1p-52 * (2*e + d)}
+	return matchedReference{g0: g0, terms: d + e, bar: 4 * float64(n+5) * 0x1p-52 * (2*e + d)}, dcg
 }
 
-// matchedDCRootOf is the root at DC of ref, read from DCGain: a finite
+// matchedDCGain is the DCGain of the caller's delay-free model, computed
+// once by matchedReferenceOf for matchedDCRootOf.
+type matchedDCGain struct {
+	g   *mat.Dense
+	err error
+}
+
+// matchedDCRootOf is the root at DC of ref, read from its DCGain dcg: a finite
 // nonzero gain has none unless noise (a gain within its own rounding terms
 // of 0, which may stand for an exact zero); a gain of 0 or ±Inf, or noise,
 // takes the order and leading coefficient of the exact Laurent expansion
 // (matchedExactLaurent), whose sign at a pole must be that of DCGain. ok is false where DCGain fails or
 // the expansion is unavailable or disagrees with it.
-func matchedDCRootOf(ref *System, noise bool) (matchedDCRoot, bool) {
+func matchedDCRootOf(ref *System, noise bool, dcg matchedDCGain) (matchedDCRoot, bool) {
 	free := ioDelayFree(ref)
-	g, err := free.DCGain()
-	if err != nil {
+	if dcg.err != nil {
 		return matchedDCRoot{}, false
 	}
-	v := g.At(0, 0)
+	v := dcg.g.At(0, 0)
 	switch {
 	case math.IsNaN(v):
 		return matchedDCRoot{}, false

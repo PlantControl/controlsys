@@ -70,6 +70,12 @@ func (r matchedReference) fullBar() float64 {
 func newMatchedReference(ref *System) matchedReference {
 	free := ioDelayFree(ref)
 	g, err := free.DCGain()
+	return matchedReferenceAt(free, g, err)
+}
+
+// matchedReferenceAt is newMatchedReference of the delay-free free whose
+// DCGain returned g, err.
+func matchedReferenceAt(free *System, g *mat.Dense, err error) matchedReference {
 	if (err != nil || g.At(0, 0) == 0) && matchedExactZero(free) {
 		return matchedReference{zero: true}
 	}
