@@ -212,7 +212,8 @@ func partShare(part *System, riders *mat.Dense, fast bool) *mat.Dense {
 }
 
 // stateMap returns G of the recorded route for out: on the parts, per part
-// k its own map (conversionStateMap) composed with diag(W_k, I); on the
+// k its own map (conversionStateMap; for FOH [I −Γ1] with the Γ1 of the
+// part's hold, fohInputIntegrals) composed with diag(W_k, I); on the
 // plan route, the map of cont composed with diag(T, I), T = zᵀ·t (t = I for
 // the fold).
 func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64) (*mat.Dense, error) {
@@ -226,16 +227,25 @@ func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64
 			if pk == 0 {
 				continue
 			}
+			rows := G.Slice(off, off+pk, 0, n+m).(*mat.Dense)
+			off += pk
+			if method == C2DMethodFOH {
+				rows.Slice(0, pk, 0, n).(*mat.Dense).Copy(c.shares[k])
+				if m > 0 {
+					_, _, gamma1 := fohInputIntegrals(part.A, part.B, out.Dt)
+					rows.Slice(0, pk, n, n+m).(*mat.Dense).Scale(-1, gamma1)
+				}
+				continue
+			}
 			stub := &System{A: part.A, B: part.B, C: part.C, D: part.D, Dt: out.Dt}
 			gp, err := conversionStateMap(part, stub, method, prewarp, false)
 			if err != nil {
 				return nil, err
 			}
-			G.Slice(off, off+pk, 0, n).(*mat.Dense).Mul(gp.Slice(0, pk, 0, pk), c.shares[k])
+			rows.Slice(0, pk, 0, n).(*mat.Dense).Mul(gp.Slice(0, pk, 0, pk), c.shares[k])
 			if m > 0 {
-				G.Slice(off, off+pk, n, n+m).(*mat.Dense).Copy(gp.Slice(0, pk, pk, pk+m))
+				rows.Slice(0, pk, n, n+m).(*mat.Dense).Copy(gp.Slice(0, pk, pk, pk+m))
 			}
-			off += pk
 		}
 		return G, nil
 	}
