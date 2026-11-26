@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -24,7 +25,7 @@ func stiffHoldOracleChecks(t *testing.T, name string, sys *System, modes stepOra
 		{C2DMethodImpulse, func(i, j int, z complex128) complex128 { return modes.impulseTail(i, j, dt, z) }},
 	} {
 		d, err := sys.C2D(dt, C2DOptions{Method: mt.method})
-		if err != nil {
+		if err != nil && (d == nil || !errors.Is(err, ErrAccuracyUnverified)) {
 			t.Errorf("%s %s: C2D: %v", name, mt.method, err)
 			continue
 		}

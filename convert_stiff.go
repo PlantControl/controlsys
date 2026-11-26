@@ -19,7 +19,8 @@ type holdLeaf func(a, b *mat.Dense, dt float64, fast bool) (ad *mat.Dense, gamma
 // clusters: the real Schur form of A is split, by the ratio of
 // stiffExplicitParts, into modes with |λ| < qzLargeRatio·ρ(A) and the rest,
 // recursively, the clusters are decoupled by a Sylvester equation and each
-// is discretized by leaf. Ad and the integrals are returned in the
+// is discretized by leaf. The slow cluster is reordered to lead, except
+// where the fast modes already lead in one run (fastLeadingRun). Ad and the integrals are returned in the
 // coordinates of A. One exponential of A·dt with ‖A·dt‖ ≫ 1 rounds every
 // mode to ε·‖A·dt‖ in its squarings, which swamps the slow ones beside a
 // stiff one (|λ|·dt ~ 1e13: 1e-3). The split needs A upper
@@ -89,9 +90,12 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 	if !(rho*dt*qzLargeRatio >= 1) {
 		return slowLeaf()
 	}
-	n1, err := orderSchurGroupFirst(t, z, n, slowMode(rho))
-	if err != nil {
-		return slowLeaf()
+	n1, fastLeading := fastLeadingRun(t, n, slowMode(rho))
+	if !fastLeading {
+		var err error
+		if n1, err = orderSchurGroupFirst(t, z, n, slowMode(rho)); err != nil {
+			return slowLeaf()
+		}
 	}
 	if n1 == 0 {
 		return leaf(a, b, dt, true)
@@ -147,6 +151,27 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 		gammas[k] = g
 	}
 	return ad, gammas, true
+}
+
+// fastLeadingRun reports that the diagonal blocks of the real Schur form t
+// form exactly two contiguous runs, the fast one (not slow) leading, and
+// returns the size of that run. splitModalHold then keeps the order: the
+// swap of orderSchurGroupFirst would mix the stiff rows of B, up to 1e15
+// beside the slow ones, into the slow block at ε·‖b‖ absolute.
+func fastLeadingRun(t []float64, n int, slow func(complex128) bool) (int, bool) {
+	n1 := 0
+	for n1 < n && !slow(schurBlockEigenvalue(t, n, n1)) {
+		n1 += schurBlockSize(t, n, n1)
+	}
+	if n1 == 0 || n1 == n {
+		return 0, false
+	}
+	for i := n1; i < n; i += schurBlockSize(t, n, i) {
+		if !slow(schurBlockEigenvalue(t, n, i)) {
+			return 0, false
+		}
+	}
+	return n1, true
 }
 
 // upperQuasiTriangular reports that a is in real Schur shape: zero below

@@ -22,7 +22,7 @@ func matchedUnverified(format string, args ...any) error {
 
 // carriesModel reports an error that comes with the model it describes.
 func carriesModel(err error) bool {
-	return errors.Is(err, errPencilFitUncertified) || errors.Is(err, errMatchedUnverified)
+	return errors.Is(err, errPencilFitUncertified) || errors.Is(err, errMatchedUnverified) || errors.Is(err, errHoldUnverified)
 }
 
 // matchedReference is the DC gain g0 of the caller's delay-free SISO model,
@@ -68,12 +68,7 @@ func (r matchedReference) fullBar() float64 {
 }
 
 func newMatchedReference(ref *System) matchedReference {
-	free := ref
-	if ref.HasDelay() {
-		c := *ref
-		c.Delay, c.InputDelay, c.OutputDelay = nil, nil, nil
-		free = &c
-	}
+	free := ioDelayFree(ref)
 	g, err := free.DCGain()
 	if (err != nil || g.At(0, 0) == 0) && matchedExactZero(free) {
 		return matchedReference{zero: true}
@@ -85,18 +80,70 @@ func newMatchedReference(ref *System) matchedReference {
 	if g0 == 0 || math.IsInf(g0, 0) || math.IsNaN(g0) {
 		return matchedReference{err: matchedUnverified("DCGain of the model is %v", g0)}
 	}
-	n, _, _ := free.Dims()
-	d := math.Abs(free.D.At(0, 0))
-	u := 4 * float64(n+5) * 0x1p-52
+	return newDCBar(free).matched(g0)
+}
+
+// ioDelayFree returns sys without its Delay, InputDelay and OutputDelay.
+func ioDelayFree(sys *System) *System {
+	if !sys.HasDelay() {
+		return sys
+	}
+	c := *sys
+	c.Delay, c.InputDelay, c.OutputDelay = nil, nil, nil
+	return &c
+}
+
+// dcBar is, for a delay-free model and each entry (i, j) of its gain at
+// s = 0 or z = 1, the terms T0_ij = |D_ij| + Σ_l |C_il||X_lj|, X = M·B,
+// and the descriptor bar u·(‖C_i‖‖M‖·(‖A‖ + |x0|‖E‖)·‖M‖‖B_j‖ +
+// ‖C_i‖‖M‖‖B_j‖ + |D_ij|), M = (x0·E − A)⁻¹, u = 4(n+5)ε, Frobenius norms
+// (E = I when nil), row C_i and column B_j. reason is set where no bar
+// exists (an exactly singular pencil, a bar not finite).
+type dcBar struct {
+	m      int
+	terms  []float64
+	barLow []float64
+	// bar is the bar itself where lu is nil; otherwise barLow ≤ bar takes
+	// ‖X_j‖/‖B_j‖ for ‖M‖ and fullBar forms ‖M‖ from the LU factors.
+	bar   []float64
+	lu    []float64
+	ipiv  []int
+	normM float64
+	// factor reports lu holding x0·E − A not yet factored.
+	factor       bool
+	normA, normE float64
+	normC, normB []float64
+	absD         []float64
+	x0, u        float64
+	reason       string
+}
+
+func newDCBar(free *System) dcBar { return newDCBarSolved(free, nil) }
+
+// newDCBarSolved is newDCBar from X = M·B already solved (DCGain's
+// certified solve) where solved is not nil; x0·E − A is then factored only
+// where fullBar needs it.
+func newDCBarSolved(free *System, solved []dd) dcBar {
+	n, m, p := free.Dims()
+	b := dcBar{m: m, u: 4 * float64(n+5) * 0x1p-52, terms: make([]float64, p*m), absD: make([]float64, p*m)}
+	for i := range p {
+		for j := range m {
+			b.absD[i*m+j] = math.Abs(free.D.At(i, j))
+		}
+	}
 	if n == 0 {
-		return matchedReference{g0: g0, terms: d, bar: u * d}
+		copy(b.terms, b.absD)
+		b.bar = make([]float64, p*m)
+		for k, d := range b.absD {
+			b.bar[k] = b.u * d
+		}
+		return b
 	}
-	x0 := 0.0
 	if free.IsDiscrete() {
-		x0 = 1
+		b.x0 = 1
 	}
-	normE := math.Sqrt(float64(n))
-	buf := make([]float64, n*n+n)
+	b.normE = math.Sqrt(float64(n))
+	buf := make([]float64, n*n+n*m)
 	lu, x := buf[:n*n], buf[n*n:]
 	ar := free.A.RawMatrix()
 	for i := range n {
@@ -105,8 +152,8 @@ func newMatchedReference(ref *System) matchedReference {
 		}
 	}
 	if free.E != nil {
-		normE = mat.Norm(free.E, 2)
-		if x0 != 0 {
+		b.normE = mat.Norm(free.E, 2)
+		if b.x0 != 0 {
 			er := free.E.RawMatrix()
 			for i := range n {
 				for j := range n {
@@ -114,34 +161,117 @@ func newMatchedReference(ref *System) matchedReference {
 				}
 			}
 		}
-	} else if x0 != 0 {
+	} else if b.x0 != 0 {
 		for i := range n {
-			lu[i*n+i] += x0
+			lu[i*n+i] += b.x0
 		}
 	}
+	b.normA = mat.Norm(free.A, 2)
+	b.normC, b.normB = make([]float64, p), make([]float64, m)
+	for i := range p {
+		b.normC[i] = mat.Norm(free.C.Slice(i, i+1, 0, n), 2)
+	}
+	for j := range m {
+		b.normB[j] = mat.Norm(free.B.Slice(0, n, j, j+1), 2)
+	}
 	ipiv := make([]int, n)
-	if !impl.Dgetrf(n, n, lu, n, ipiv) {
-		return matchedSingularLU(free, g0, x0, u, normE, d)
+	if solved != nil {
+		for k := range x {
+			x[k] = solved[k].hi
+		}
+		b.lu, b.ipiv, b.factor = lu, ipiv, true
+	} else {
+		if !impl.Dgetrf(n, n, lu, n, ipiv) {
+			return b.singular(free)
+		}
+		br := free.B.RawMatrix()
+		for i := range n {
+			copy(x[i*m:i*m+m], br.Data[i*br.Stride:i*br.Stride+m])
+		}
+		impl.Dgetrs(blas.NoTrans, n, m, lu, n, ipiv, x, max(m, 1))
+		b.lu, b.ipiv = lu, ipiv
 	}
-	br := free.B.RawMatrix()
-	for i := range n {
-		x[i] = br.Data[i*br.Stride]
+	b.barLow = make([]float64, p*m)
+	for j := range m {
+		normX := 0.0
+		for l := range n {
+			normX += x[l*m+j] * x[l*m+j]
+		}
+		for i := range p {
+			k := i*m + j
+			terms := b.absD[k]
+			for l := range n {
+				terms += math.Abs(free.C.At(i, l) * x[l*m+j])
+			}
+			b.terms[k] = terms
+			b.barLow[k] = b.absD[k] * b.u
+			if b.normB[j] > 0 {
+				b.barLow[k] = b.barOf(k, math.Sqrt(normX)/b.normB[j])
+			}
+			if math.IsNaN(b.barLow[k]) || math.IsInf(b.barLow[k], 0) || math.IsNaN(terms) || math.IsInf(terms, 0) {
+				b.reason = "DC bar not finite"
+			}
+		}
 	}
-	impl.Dgetrs(blas.NoTrans, n, 1, lu, n, ipiv, x, 1)
-	terms, normX := d, 0.0
-	for i := range n {
-		terms += math.Abs(free.C.At(0, i) * x[i])
-		normX += x[i] * x[i]
+	return b
+}
+
+// barOf is the bar of entry k for ‖M‖ = normM.
+func (b dcBar) barOf(k int, normM float64) float64 {
+	cm := b.normC[k/b.m] * normM
+	return b.u * (cm*(b.normA+b.x0*b.normE)*normM*b.normB[k%b.m] + cm*b.normB[k%b.m] + b.absD[k])
+}
+
+// fullBar is the bar of entry k with ‖M‖ formed from the LU factors,
+// computed once.
+func (b *dcBar) fullBar(k int) float64 {
+	if b.factor {
+		b.factor = false
+		if !impl.Dgetrf(len(b.ipiv), len(b.ipiv), b.lu, len(b.ipiv), b.ipiv) {
+			b.normM = math.Inf(1)
+		}
 	}
-	r := matchedReference{g0: g0, terms: terms, lu: lu, ipiv: ipiv, barX0: x0, barU: u,
-		barNorms: [5]float64{mat.Norm(free.A, 2), mat.Norm(free.B, 2), mat.Norm(free.C, 2), normE, d}}
-	r.barLow = d * u
-	if normB := r.barNorms[1]; normB > 0 {
-		r.barLow = r.barOf(math.Sqrt(normX) / normB)
+	if b.normM == 0 {
+		n := len(b.ipiv)
+		inv := make([]float64, n*n)
+		for i := range n {
+			inv[i*n+i] = 1
+		}
+		impl.Dgetrs(blas.NoTrans, n, n, b.lu, n, b.ipiv, inv, n)
+		s := 0.0
+		for _, v := range inv {
+			s += v * v
+		}
+		b.normM = math.Sqrt(s)
 	}
-	if math.IsNaN(r.barLow) || math.IsInf(r.barLow, 0) || math.IsNaN(terms) || math.IsInf(terms, 0) {
-		return matchedReference{err: matchedUnverified("DC bar not finite")}
+	return b.barOf(k, b.normM)
+}
+
+// within reports need ≤ bar + allow for entry k.
+func (b *dcBar) within(k int, need, allow float64) bool {
+	if b.lu == nil {
+		return need <= b.bar[k]+allow
 	}
+	return need <= b.barLow[k]+allow || need <= b.fullBar(k)+allow
+}
+
+// matched is the matchedReference of the SISO gain g0 with this bar.
+func (b dcBar) matched(g0 float64) matchedReference {
+	if b.reason != "" {
+		return matchedReference{err: matchedUnverified("%s", b.reason)}
+	}
+	r := matchedReference{g0: g0, terms: b.terms[0]}
+	if b.normC == nil {
+		r.bar = b.bar[0]
+		return r
+	}
+	r.barX0, r.barU = b.x0, b.u
+	r.barNorms = [5]float64{b.normA, b.normB[0], b.normC[0], b.normE, b.absD[0]}
+	if b.lu == nil {
+		r.bar = b.bar[0]
+		return r
+	}
+	r.barLow, r.lu, r.ipiv = b.barLow[0], b.lu, b.ipiv
 	return r
 }
 
@@ -409,34 +539,44 @@ func matchedExactZero(sys *System) bool {
 	return sys.E == nil && exactZeroTransfer(sys.A, sys.B, sys.C) == transferZero
 }
 
-// matchedSingularLU is newMatchedReference where the LU of x0·E − A meets an
-// exactly zero pivot. An exactly singular pencil (exactShiftedDetIsZero,
-// explicit or continuous, order up to exactDetMaxOrder) has no bar: the
-// result is unverified. Otherwise the pencil is only ill-conditioned, and
-// X and ‖M‖ come from its singular values.
+// matchedSingularLU is the matchedReference of dcBar.singular for the
+// SISO sys of gain g0.
 func matchedSingularLU(sys *System, g0, x0, u, normE, d float64) matchedReference {
-	singular := matchedUnverified("DC pencil not invertible")
-	n, _, _ := sys.Dims()
-	if n > exactDetMaxOrder || (x0 != 0 && sys.E != nil) {
-		return matchedReference{err: singular}
+	b := dcBar{m: 1, u: u, x0: x0, normE: normE, normA: mat.Norm(sys.A, 2),
+		normC: []float64{mat.Norm(sys.C, 2)}, normB: []float64{mat.Norm(sys.B, 2)},
+		absD: []float64{d}, terms: make([]float64, 1)}
+	return b.singular(sys).matched(g0)
+}
+
+// singular is newDCBar where the LU of x0·E − A meets an exactly zero
+// pivot. An exactly singular pencil (exactShiftedDetIsZero, explicit or
+// continuous, order up to exactDetMaxOrder) has no bar. Otherwise the
+// pencil is only ill-conditioned, and X and ‖M‖ come from its singular
+// values.
+func (b dcBar) singular(sys *System) dcBar {
+	const singular = "DC pencil not invertible"
+	b.reason = singular
+	n, m, p := sys.Dims()
+	if n > exactDetMaxOrder || (b.x0 != 0 && sys.E != nil) {
+		return b
 	}
-	if exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
-		return matchedReference{err: singular}
+	if exactShiftedDetIsZero(sys.A.RawMatrix(), b.x0) {
+		return b
 	}
 	k := mat.NewDense(n, n, nil)
 	k.Scale(-1, sys.A)
 	if sys.E != nil {
-		if x0 != 0 {
+		if b.x0 != 0 {
 			k.Add(k, sys.E)
 		}
 	} else {
 		for i := range n {
-			k.Set(i, i, k.At(i, i)+x0)
+			k.Set(i, i, k.At(i, i)+b.x0)
 		}
 	}
 	var svd mat.SVD
 	if !svd.Factorize(k, mat.SVDThin) {
-		return matchedReference{err: singular}
+		return b
 	}
 	sv := svd.Values(nil)
 	var uu, vv mat.Dense
@@ -445,26 +585,34 @@ func matchedSingularLU(sys *System, g0, x0, u, normE, d float64) matchedReferenc
 	sumInv := 0.0
 	for _, v := range sv {
 		if v == 0 {
-			return matchedReference{err: singular}
+			return b
 		}
 		sumInv += 1 / (v * v)
 	}
 	var utb mat.Dense
 	utb.Mul(uu.T(), sys.B)
 	for i, v := range sv {
-		utb.Set(i, 0, utb.At(i, 0)/v)
+		for j := range m {
+			utb.Set(i, j, utb.At(i, j)/v)
+		}
 	}
 	var x mat.Dense
 	x.Mul(&vv, &utb)
-	terms := d
-	for i := range n {
-		terms += math.Abs(sys.C.At(0, i) * x.At(i, 0))
+	b.reason = ""
+	b.bar = make([]float64, p*m)
+	for i := range p {
+		for j := range m {
+			e := i*m + j
+			terms := b.absD[e]
+			for l := range n {
+				terms += math.Abs(sys.C.At(i, l) * x.At(l, j))
+			}
+			b.terms[e] = terms
+			b.bar[e] = b.barOf(e, math.Sqrt(sumInv))
+			if math.IsNaN(b.bar[e]) || math.IsInf(b.bar[e], 0) || math.IsNaN(terms) || math.IsInf(terms, 0) {
+				b.reason = singular
+			}
+		}
 	}
-	r := matchedReference{g0: g0, terms: terms, barX0: x0, barU: u,
-		barNorms: [5]float64{mat.Norm(sys.A, 2), mat.Norm(sys.B, 2), mat.Norm(sys.C, 2), normE, d}}
-	r.bar = r.barOf(math.Sqrt(sumInv))
-	if math.IsNaN(r.bar) || math.IsInf(r.bar, 0) || math.IsNaN(terms) || math.IsInf(terms, 0) {
-		return matchedReference{err: singular}
-	}
-	return r
+	return b
 }

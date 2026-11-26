@@ -176,7 +176,7 @@ func TestInitial_DescriptorWithOverflowingEinvBKeepsStateCoordinates(t *testing.
 func TestC2D_DescriptorWithOverflowingEinvB(t *testing.T) {
 	sys := explicitOverflowDescriptor(t, 0)
 	got, err := sys.C2D(0.1, C2DOptions{})
-	if err != nil {
+	if err != nil && (got == nil || !errors.Is(err, ErrAccuracyUnverified)) {
 		t.Fatal(err)
 	}
 	requireExplicitOverflowFinite(t, "B", got.B)

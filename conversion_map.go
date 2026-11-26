@@ -18,6 +18,10 @@ import (
 // state dimension, a result with no states), C2DMap returns
 // ErrOptionUnsupported; C2D still converts. A singular-E descriptor model,
 // whose algebraic states are eliminated, returns ErrDescriptorInitialState.
+// The model and G of a full-rank descriptor are those of E⁻¹A; for ZOH,
+// FOH and Tustin, where the DC gain of the result fails the check of C2D
+// against sys, they are returned with an error wrapping
+// ErrAccuracyUnverified.
 // An Inf or NaN entry in the result or in G returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("C2DMap", sys); err != nil {
@@ -50,6 +54,11 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	}
 	if err := finiteDense("C2DMap", "G", G, ErrOverflow); err != nil {
 		return nil, nil, err
+	}
+	if holdGated(sys, opts.Method) {
+		if err := newHoldGate(sys).check(out); err != nil {
+			return out, G, fmt.Errorf("C2DMap: %v: %w", err, ErrAccuracyUnverified)
+		}
 	}
 	return out, G, nil
 }
