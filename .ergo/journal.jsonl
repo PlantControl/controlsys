@@ -274,3 +274,5 @@
 {"version":1,"task_id":"7IXZEV","kind":"created","at":"2026-11-26T14:40:46.155702Z"}
 {"version":1,"task_id":"GTWPF6","kind":"created","at":"2026-11-26T14:40:46.178328Z"}
 {"version":1,"task_id":"EEJUPH","kind":"created","at":"2026-11-26T14:40:46.198443Z"}
+{"version":1,"task_id":"EJDS3U","kind":"done","at":"2026-11-26T15:52:18.144172Z","agent":"coordinator@ejds3u","text":"PR-1 #567 merged; T3IVBX PR-2 follows"}
+{"version":1,"task_id":"ZUNT37","kind":"done","at":"2026-11-26T15:52:18.173452Z","agent":"coordinator@ejds3u","text":"ZOH/FOH/Tustin band parts in #567"}
