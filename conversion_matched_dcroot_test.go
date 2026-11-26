@@ -366,6 +366,63 @@ func TestC2DMatchedStoredRootsRescaleUnverified(t *testing.T) {
 	}
 }
 
+// AQU6M7: the lead gate is the ZPK within-terms inequality at the leading
+// term, √ε·max(|lead|, |v|): a root set whose own leading coefficient is off
+// by 1e-5 relative, between √ε and the 1e-3 a loose gate would admit, is
+// refuted at each place it is applied: the choice of roots at DC
+// (matchedMarkDCPair), C2D (discretizeMatchedAtDC) and D2C
+// (matchedD2CModelAtDC).
+func TestMatchedLeadGateBoundary(t *testing.T) {
+	tol := math.Sqrt(0x1p-52)
+	for _, tc := range []struct {
+		v    complex128
+		want bool
+	}{
+		{1, true}, {complex(1+0.5*tol, 0), true}, {complex(1-0.5*tol, 0), true},
+		{complex(1+4*tol, 0), false}, {complex(1+1e-5, 0), false}, {complex(1-1e-4, 0), false},
+		{complex(1, 1e-5), false},
+	} {
+		if got := matchedLeadAgrees(tc.v, 1); got != tc.want {
+			t.Errorf("matchedLeadAgrees(%v, 1) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+
+	cz, cp := []complex128{-1.0001}, []complex128{0, -1, -2}
+	root := matchedDCRoot{order: -1, lead: 0.5, zeros: 1, poles: 2}
+	mz, mp, ok := matchedMarkDCPair(cz, cp, root, func(z, p []complex128) complex128 { return matchedLeadProduct(1, z, p) })
+	if !ok || !slices.Equal(mz, []bool{true}) || !slices.Equal(mp, []bool{true, true, false}) {
+		t.Errorf("pair marking: zeros %v poles %v ok %v; want the cancelling pair at DC, not the single pole 1e-4 off", mz, mp, ok)
+	}
+
+	ref := conversionSISO(t, []float64{1}, []float64{1, 1, 0}, 0)
+	dcRoot, ok := matchedDCRootOf(ref, false)
+	if !ok || dcRoot.order != -1 {
+		t.Fatalf("root at DC %v %v", dcRoot, ok)
+	}
+	off := -(1 + 1e-5)
+	sys := conversionSISO(t, []float64{1}, []float64{1, -off, 0}, 0)
+	rational, err := sys.transferRational(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := sys.discretizeMatchedAtDC(0.01, ref, rational, nil, []complex128{0, complex(off, 0)}, 1, true, dcRoot)
+	if !errors.Is(err, errMatchedUnverified) || d == nil {
+		t.Errorf("C2D: lead 1e-5 off: err %v, model %v; want the model, unverified", err, d)
+	}
+
+	dt, a := 0.1, 0.5
+	dref := conversionSISO(t, []float64{1}, []float64{1, -(1 + a), a}, dt)
+	droot, ok := matchedDCRootOf(dref, false)
+	if !ok || droot.order != -1 {
+		t.Fatalf("discrete root at DC %v %v", droot, ok)
+	}
+	ap := 1 - (1-a)*(1+1e-5)
+	c, unverified, err := matchedD2CModelAtDC([]complex128{}, []complex128{1, complex(ap, 0)}, 1, 0, dt, dref, nil, droot, []float64{1}, []float64{1, -(1 + ap), ap})
+	if err != nil || c == nil || !errors.Is(unverified, errMatchedUnverified) {
+		t.Errorf("D2C: lead 1e-5 off: model %v, verdict %v, err %v; want the model, unverified", c, unverified, err)
+	}
+}
+
 func TestMatchedLaurentAgrees(t *testing.T) {
 	ref := conversionSISO(t, []float64{1}, []float64{1, 1, 0}, 0)
 	zref := conversionSISO(t, []float64{1, 0}, []float64{1, 1}, 0)
