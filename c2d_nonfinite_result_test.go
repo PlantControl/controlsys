@@ -134,9 +134,9 @@ func TestC2DStiffDescriptorValueIsFiniteOrError(t *testing.T) {
 }
 
 // C2DMap FOH of the same pencil at c=1e10 can have a finite result and NaN in
-// the Γ1 block of G, on seeds that depend on the arch (4MJ46B). A finite
-// fold result whose DC fails the check of C2D comes with G and
-// ErrAccuracyUnverified (EJDS3U U-3).
+// the Γ1 block of G, on seeds that depend on the arch (4MJ46B). C2DMap
+// follows C2D (T3IVBX): a split C2D refuses is its ErrSchurFailed with no
+// model, and an unverified result comes with G and ErrAccuracyUnverified.
 func TestC2DMapStiffDescriptorFOHMapIsFiniteOrError(t *testing.T) {
 	const c, dt = 1e10, 0.1
 	for seed := range uint64(100) {
@@ -151,8 +151,8 @@ func TestC2DMapStiffDescriptorFOHMapIsFiniteOrError(t *testing.T) {
 			err = nil
 		}
 		if err != nil {
-			if !errors.Is(err, ErrOverflow) || d != nil || g != nil {
-				t.Errorf("seed %d: %v, %v, %v; want nil, nil, ErrOverflow", seed, d, g, err)
+			if !(errors.Is(err, ErrOverflow) || errors.Is(err, ErrSchurFailed)) || d != nil || g != nil {
+				t.Errorf("seed %d: %v, %v, %v; want nil, nil, ErrOverflow or ErrSchurFailed", seed, d, g, err)
 			}
 			continue
 		}

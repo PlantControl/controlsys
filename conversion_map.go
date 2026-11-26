@@ -18,11 +18,16 @@ import (
 // state dimension, a result with no states), C2DMap returns
 // ErrOptionUnsupported; C2D still converts. A singular-E descriptor model,
 // whose algebraic states are eliminated, returns ErrDescriptorInitialState.
-// The model and G of a full-rank descriptor are those of E⁻¹A; for ZOH,
-// FOH and Tustin, where the DC gain of the result fails the check of C2D
-// against sys, they are returned with an error wrapping
-// ErrAccuracyUnverified.
-// An Inf or NaN entry in the result or in G returns ErrOverflow.
+// For a full-rank continuous descriptor without internal delays, by ZOH,
+// FOH, Tustin or impulse, the model and its error are those of C2D,
+// bitwise, in whatever state coordinates C2D took (the E⁻¹A fold, its real
+// Schur form, or the generalized Schur parts of the pencil), and G maps the
+// descriptor state into them: on the parts, G = [W 0] for ZOH and impulse,
+// W the map of x0 into the parts' states, and the parts' own Tustin or FOH
+// map composed with diag(W, I) otherwise. A model returned with an error
+// wrapping ErrAccuracyUnverified comes with its G. Other descriptors take
+// the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
+// returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("C2DMap", sys); err != nil {
 		return nil, nil, err
@@ -32,6 +37,9 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
 	std, reduced, k, err := conversionStandardFormScaled(sys, "C2DMap")
+	if c2dMapRouted(sys, opts.Method) && (err == nil || errors.Is(err, ErrOverflow)) && !reduced {
+		return sys.c2dMapRouted(dt, opts, k, err)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,12 +63,208 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if err := finiteDense("C2DMap", "G", G, ErrOverflow); err != nil {
 		return nil, nil, err
 	}
-	if holdGated(sys, opts.Method) {
-		if err := newHoldGate(sys).check(out); err != nil {
-			return out, G, fmt.Errorf("C2DMap: %v: %w", err, ErrAccuracyUnverified)
+	return out, G, nil
+}
+
+// c2dMapRouted reports a C2DMap that follows C2D's route (c2dCoords): a
+// continuous descriptor without internal delays by ZOH, FOH, Tustin or
+// impulse.
+func c2dMapRouted(sys *System, method C2DMethod) bool {
+	switch method {
+	case C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse:
+	default:
+		return false
+	}
+	return sys.IsContinuous() && sys.IsDescriptor() && sys.LFT == nil
+}
+
+// c2dMapRouted is C2DMap of a c2dMapRouted sys: C2D's result and the map
+// into its coordinates. k and foldErr are the fold scaling and error of
+// conversionStandardFormScaled, which matter only where C2D folds.
+func (sys *System) c2dMapRouted(dt float64, opts C2DOptions, k int, foldErr error) (*System, *mat.Dense, error) {
+	rec := &c2dCoords{}
+	out, err := sys.c2dRecorded(dt, opts, rec)
+	if err != nil && !carriesModel(err) {
+		return nil, nil, fmt.Errorf("C2DMap: %w", err)
+	}
+	if rec.parts == nil && rec.cont != nil && rec.t == nil {
+		if foldErr != nil {
+			return nil, nil, fmt.Errorf("C2DMap: %w", foldErr)
+		}
+		if k != 0 {
+			return nil, nil, fmt.Errorf("C2DMap: E⁻¹B overflows the descriptor state coordinates: %w", ErrOverflow)
 		}
 	}
+	if (rec.parts == nil && rec.cont == nil) || !conversionCanMapState(sys, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(sys, dt)) {
+		return nil, nil, fmt.Errorf("C2DMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)
+	}
+	G, gerr := rec.stateMap(sys, out, opts.Method, opts.PrewarpFrequency)
+	if gerr != nil {
+		return nil, nil, fmt.Errorf("C2DMap: %w", gerr)
+	}
+	if gerr := finiteDense("C2DMap", "G", G, ErrOverflow); gerr != nil {
+		return nil, nil, gerr
+	}
+	if err != nil {
+		return out, G, fmt.Errorf("C2DMap: %v: %w", err, ErrAccuracyUnverified)
+	}
 	return out, G, nil
+}
+
+// c2dCoords records, for C2DMap, the state coordinates C2D discretized a
+// continuous descriptor in. On the parts route (discretizeStiffDescriptor)
+// parts are the explicit parts, each discretized alone, and shares the maps
+// W_k of the descriptor state into their states (partShare). On the plan
+// route cont is the explicit model discretized and t the map into its
+// state, nil for the LU fold, whose state is the descriptor's; z, when set,
+// holds the Schur vectors of the real Schur retry, whose state is zᵀ times
+// that of t. A nil *c2dCoords records nothing.
+type c2dCoords struct {
+	parts  []*System
+	shares []*mat.Dense
+	cont   *System
+	t, z   *mat.Dense
+}
+
+// riders returns [E A] of the descriptor sys, the riders whose transforms
+// give the shares, or nil for a nil c.
+func (c *c2dCoords) riders(sys *System) *mat.Dense {
+	if c == nil || !sys.IsDescriptor() {
+		return nil
+	}
+	n, _, _ := sys.Dims()
+	r := newDense(n, 2*n)
+	if n > 0 {
+		r.Slice(0, n, 0, n).(*mat.Dense).Copy(sys.E)
+		r.Slice(0, n, n, 2*n).(*mat.Dense).Copy(sys.A)
+	}
+	return r
+}
+
+func (c *c2dCoords) setParts(sp stiffSplit) {
+	if c == nil {
+		return
+	}
+	c.parts = sp.parts
+	c.shares = make([]*mat.Dense, len(sp.parts))
+	for k, part := range sp.parts {
+		c.shares[k] = partShare(part, sp.riders[k], k > 0)
+	}
+}
+
+// setSchurParts records the parts of stiffDescriptorExplicit, each in the
+// coordinates of its real Schur form (zs[k]; nil when unchanged), as the map
+// t of the parallel connection.
+func (c *c2dCoords) setSchurParts(sp stiffSplit, zs []*mat.Dense) {
+	if c == nil {
+		return
+	}
+	nt := 0
+	for _, part := range sp.parts {
+		pk, _, _ := part.Dims()
+		nt += pk
+	}
+	_, nr := sp.riders[0].Dims()
+	t := newDense(nt, nr/2)
+	off := 0
+	for k, part := range sp.parts {
+		pk, _, _ := part.Dims()
+		w := partShare(part, sp.riders[k], k > 0)
+		dst := t.Slice(off, off+pk, 0, nr/2).(*mat.Dense)
+		if zs[k] != nil {
+			dst.Mul(zs[k].T(), w)
+		} else {
+			dst.Copy(w)
+		}
+		off += pk
+	}
+	c.t = t
+}
+
+func (c *c2dCoords) setCont(src *System, z *mat.Dense) {
+	if c == nil {
+		return
+	}
+	c.cont, c.z = src, z
+}
+
+// partShare is the map of the descriptor state into the state of a part of
+// stiffDescriptorPartsRiders with riders [E A] taken through it, as
+// freePartShare: a fast part takes A_k⁻¹ times the A block, which carries
+// no cancellation in the nearly null directions of E, where A_k is
+// solvable (1-norm condition below 2⁵²); a slow part, or a fast one with
+// near-singular A_k, keeps the E block.
+func partShare(part *System, riders *mat.Dense, fast bool) *mat.Dense {
+	pk, _, _ := part.Dims()
+	_, nr := riders.Dims()
+	n := nr / 2
+	if fast {
+		var lu mat.LU
+		lu.Factorize(part.A)
+		if lu.Cond() < 0x1p52 {
+			var s mat.Dense
+			if err := lu.SolveTo(&s, false, riders.Slice(0, pk, n, nr)); err == nil {
+				return &s
+			}
+		}
+	}
+	return mat.DenseCopyOf(riders.Slice(0, pk, 0, n))
+}
+
+// stateMap returns G of the recorded route for out: on the parts, per part
+// k its own map (conversionStateMap) composed with diag(W_k, I); on the
+// plan route, the map of cont composed with diag(T, I), T = zᵀ·t (t = I for
+// the fold).
+func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64) (*mat.Dense, error) {
+	n, m, _ := sys.Dims()
+	nt, _, _ := out.Dims()
+	if c.parts != nil {
+		G := newDense(nt, n+m)
+		off := 0
+		for k, part := range c.parts {
+			pk, _, _ := part.Dims()
+			if pk == 0 {
+				continue
+			}
+			stub := &System{A: part.A, B: part.B, C: part.C, D: part.D, Dt: out.Dt}
+			gp, err := conversionStateMap(part, stub, method, prewarp, false)
+			if err != nil {
+				return nil, err
+			}
+			G.Slice(off, off+pk, 0, n).(*mat.Dense).Mul(gp.Slice(0, pk, 0, pk), c.shares[k])
+			if m > 0 {
+				G.Slice(off, off+pk, n, n+m).(*mat.Dense).Copy(gp.Slice(0, pk, pk, pk+m))
+			}
+			off += pk
+		}
+		return G, nil
+	}
+	gc, err := conversionStateMap(c.cont, out, method, prewarp, false)
+	if err != nil {
+		return nil, err
+	}
+	nc, _, _ := c.cont.Dims()
+	T := c.t
+	if T == nil {
+		T = newDense(nc, n)
+		for i := range min(nc, n) {
+			T.Set(i, i, 1)
+		}
+	}
+	if c.z != nil {
+		var zt mat.Dense
+		zt.Mul(c.z.T(), T)
+		T = &zt
+	}
+	_, cols := gc.Dims()
+	G := newDense(nt, n+cols-nc)
+	if nt > 0 && n > 0 {
+		G.Slice(0, nt, 0, n).(*mat.Dense).Mul(gc.Slice(0, nt, 0, nc), T)
+	}
+	if cols > nc {
+		G.Slice(0, nt, n, n+cols-nc).(*mat.Dense).Copy(gc.Slice(0, nt, nc, cols))
+	}
+	return G, nil
 }
 
 // D2CMap converts sys like D2C and also returns the map G of MATLAB
