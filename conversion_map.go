@@ -24,7 +24,11 @@ import (
 // Schur form, or the generalized Schur parts of the pencil), and G maps the
 // descriptor state into them: on the parts, G = [W 0] for ZOH and impulse,
 // W the map of x0 into the parts' states, and the parts' own Tustin or FOH
-// map composed with diag(W, I) otherwise. A model returned with an error
+// map composed with diag(W, I) otherwise. So does a full-rank continuous
+// descriptor with internal delays, by ZOH, FOH or Tustin, whose E has an
+// LU condition estimate of 1e6 or more (C2D's stiff LFT split): there G
+// maps the descriptor state into the real Schur forms of the parts, and
+// its w0 columns are those of the split model. A model returned with an error
 // wrapping ErrAccuracyUnverified comes with its G. The error is C2D's
 // verdict on the DC gain of the model; G itself is not checked. Other descriptors take
 // the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
