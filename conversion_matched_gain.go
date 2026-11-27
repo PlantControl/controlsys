@@ -70,6 +70,12 @@ func (r matchedReference) fullBar() float64 {
 func newMatchedReference(ref *System) matchedReference {
 	free := ioDelayFree(ref)
 	g, err := free.DCGain()
+	return matchedReferenceAt(free, g, err)
+}
+
+// matchedReferenceAt is newMatchedReference of the delay-free free whose
+// DCGain returned g, err.
+func matchedReferenceAt(free *System, g *mat.Dense, err error) matchedReference {
 	if (err != nil || g.At(0, 0) == 0) && matchedExactZero(free) {
 		return matchedReference{zero: true}
 	}
@@ -319,26 +325,6 @@ func (r matchedReference) matchedGain(v, ratio complex128, base float64) (float6
 		return gain, matchedUnverified("DC product %v of the roots is not within terms of DCGain %v", real(v), r.g0)
 	}
 	return gain, nil
-}
-
-// matchedDCWindow reports a root that matchedContinuousGain takes for a
-// pole or zero at DC.
-func matchedDCWindow(dz, dp, cz, cp []complex128, dt float64) bool {
-	for _, set := range [][]complex128{dz, dp} {
-		for _, z := range set {
-			if cmplx.Abs(z-1) <= 1e-9 {
-				return true
-			}
-		}
-	}
-	for _, set := range [][]complex128{cz, cp} {
-		for _, z := range set {
-			if cmplx.Abs(z) <= 1e-9/dt {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func matchedDiscreteProduct(k float64, zeros, poles []complex128, artificial int) complex128 {

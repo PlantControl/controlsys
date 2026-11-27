@@ -196,36 +196,12 @@ func TestC2DMatchedStandardFormSourceRefuted(t *testing.T) {
 	}
 }
 
-// SWKJW4: DCGain unverified (g3/rlrep.427), or an exact DC pole whose roots
-// fall outside the DC window (g3/rotZ.331, near1/128; AQU6M7): the model
-// with the root-product gain and ErrAccuracyUnverified.
+// SWKJW4: DCGain unverified (g3/rlrep.427): the model with the
+// root-product gain and ErrAccuracyUnverified.
 func TestC2DMatchedDCGainUnavailable(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		dt   float64
-	}{{"dc gain unverified", 1e-2}, {"missed dc pole 1", 1e-2}, {"missed dc pole 2", 1e-2}} {
-		sys := matchedFixture(t, tc.name)
-		d, err := sys.C2D(tc.dt, C2DOptions{Method: C2DMethodMatched})
-		if err == nil && matchedHasDCPole(d) {
-			continue
-		}
-		requireMatchedUnverifiedModel(t, d, err)
-	}
-}
-
-// matchedHasDCPole reports a pole of the discrete d within the DC window
-// |z − 1| ≤ 1e-9, where matched keeps the leading-term gain (AQU6M7).
-func matchedHasDCPole(d *System) bool {
-	poles, err := d.Poles()
-	if err != nil {
-		return false
-	}
-	for _, p := range poles {
-		if cmplx.Abs(p-1) <= 1e-9 {
-			return true
-		}
-	}
-	return false
+	sys := matchedFixture(t, "dc gain unverified")
+	d, err := sys.C2D(1e-2, C2DOptions{Method: C2DMethodMatched})
+	requireMatchedUnverifiedModel(t, d, err)
 }
 
 func TestMatchedRootGateBoundary(t *testing.T) {

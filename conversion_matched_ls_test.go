@@ -84,14 +84,7 @@ func TestMatchedReverseIndependentResponse(t *testing.T) {
 			source := conversionSISO(t, tc.num, tc.den, dt)
 			copy := source.Copy()
 			cont, err := source.D2C(D2COptions{Method: C2DMethodMatched})
-			if tc.name == "double integrator" {
-				// AQU6M7: the double pole at z = 1 is exact (DCGain +Inf); where
-				// its computed roots fall outside the DC window the model comes
-				// with ErrAccuracyUnverified until DC roots come from the data.
-				if err != nil && (!errors.Is(err, ErrAccuracyUnverified) || cont == nil) {
-					t.Fatalf("err %v, model %v: want the model with ErrAccuracyUnverified", err, cont)
-				}
-			} else if err != nil {
+			if err != nil {
 				t.Fatal(err)
 			}
 			tf, err := cont.TransferFunction(nil)
