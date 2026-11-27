@@ -431,6 +431,9 @@ type stiffSplit struct {
 	zeta     float64
 	err      error
 	eCond    float64
+	// riders holds, per part, the riders of stiffExplicitSplitRiders
+	// through that part's transformations; nil without riders.
+	riders []*mat.Dense
 }
 
 // within returns sp.err, or the stiff-split error when the parts are
@@ -469,16 +472,27 @@ func errStiffInseparable() error {
 // reduction is the accurate route. A pencil whose modes all lie on one side
 // of the cut is returned whole.
 func stiffExplicitSplit(sys *System) (sp stiffSplit, ok bool) {
-	eq, slow, fast, zeta, eCond, err, ok := stiffPencilSplit(sys)
+	return stiffExplicitSplitRiders(sys, nil)
+}
+
+// stiffExplicitSplitRiders is stiffExplicitSplit also taking riders (n×r
+// B-like columns of sys, nil for none) through every transformation of B,
+// into sp.riders. Riders enter no test, cut or certificate: the split and
+// its parts are those of stiffExplicitSplit bitwise.
+func stiffExplicitSplitRiders(sys *System, riders *mat.Dense) (sp stiffSplit, ok bool) {
+	eq, slow, fast, zeta, eCond, err, ok, rd := stiffPencilSplitRiders(sys, riders)
 	if !ok {
 		return stiffSplit{}, false
 	}
 	whole := func(sp stiffSplit) (stiffSplit, bool) {
-		w, ok := svdExplicit(eq)
+		w, wr, ok := svdExplicitRiders(eq, rd.eq)
 		if !ok {
 			return stiffSplit{}, false
 		}
 		sp.parts, sp.eCond = []*System{w}, eCond
+		if riders != nil {
+			sp.riders = []*mat.Dense{wr}
+		}
 		return sp, true
 	}
 	if err != nil {
@@ -487,11 +501,21 @@ func stiffExplicitSplit(sys *System) (sp stiffSplit, ok bool) {
 	if fast == nil {
 		return whole(stiffSplit{})
 	}
-	fastParts, fz, err, ok := splitFastPencil(fast)
+	fastParts, fz, err, ok, fr := splitFastPencilRiders(fast, rd.fast)
 	if !ok {
 		return whole(stiffSplit{deflated: true})
 	}
-	return stiffSplit{parts: append([]*System{slow}, fastParts...), zeta: math.Max(zeta, fz), err: err, eCond: eCond}, true
+	sp = stiffSplit{parts: append([]*System{slow}, fastParts...), zeta: math.Max(zeta, fz), err: err, eCond: eCond}
+	if riders != nil {
+		sp.riders = append([]*mat.Dense{rd.slow}, fr...)
+	}
+	return sp, true
+}
+
+// pencilRiders are the riders of stiffPencilSplitRiders: of eq, of the slow
+// part and of the fast part.
+type pencilRiders struct {
+	eq, slow, fast *mat.Dense
 }
 
 // stiffPencilSplit is the split of stiffExplicitSplit before the fast part
@@ -501,45 +525,52 @@ func stiffExplicitSplit(sys *System) (sp stiffSplit, ok bool) {
 // condition estimate of the E of sys. err reports a split with modes on
 // both sides that failed or was not certified.
 func stiffPencilSplit(sys *System) (eq, slow, fast *System, zeta, eCond float64, err error, ok bool) {
+	eq, slow, fast, zeta, eCond, err, ok, _ = stiffPencilSplitRiders(sys, nil)
+	return
+}
+
+// stiffPencilSplitRiders is stiffPencilSplit also taking riders (n×r
+// B-like columns, nil for none) through the equilibration and the split.
+func stiffPencilSplitRiders(sys *System, riders *mat.Dense) (eq, slow, fast *System, zeta, eCond float64, err error, ok bool, rd pencilRiders) {
 	if sys.LFT != nil {
-		return nil, nil, nil, 0, 0, nil, false
+		return nil, nil, nil, 0, 0, nil, false, rd
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	eCond = lu.Cond()
 	if eCond < illConditionedECond || eRankDeficient(sys.E, &lu) {
-		return nil, nil, nil, 0, 0, nil, false
+		return nil, nil, nil, 0, 0, nil, false, rd
 	}
-	eq = equilibrateDescriptor(sys)
+	eq, rd.eq = equilibrateDescriptorRiders(sys, riders)
 	lu.Factorize(eq.E)
 	if lu.Cond() < illConditionedECond {
-		return nil, nil, nil, 0, 0, nil, false
+		return nil, nil, nil, 0, 0, nil, false, rd
 	}
 	normA, normE := mat.Norm(eq.A, 2), mat.Norm(eq.E, 2)
 	if normA == 0 {
-		return eq, nil, nil, 0, eCond, nil, true
+		return eq, nil, nil, 0, eCond, nil, true, rd
 	}
 	nominal := normA / (normE * qzLargeRatio)
 	cut := nominal
 	var mods []float64
-	slow, fast, zeta, err = decomposeGeneralizedQZZeta(eq, func(l complex128) bool {
+	slow, fast, zeta, rd.slow, rd.fast, err = decomposeGeneralizedQZZetaRiders(eq, func(l complex128) bool {
 		return cmplx.Abs(l) < nominal
 	}, func(m []float64) func(complex128) bool {
 		mods, cut = m, stiffCut(m, nominal)
 		return func(l complex128) bool { return cmplx.Abs(l) < cut }
-	})
+	}, rd.eq)
 	if err != nil {
 		if mods != nil && !splitsBothSides(mods, cut) {
-			return eq, nil, nil, 0, eCond, nil, true
+			return eq, nil, nil, 0, eCond, nil, true, rd
 		}
-		return eq, nil, nil, 0, eCond, errStiffInseparable(), true
+		return eq, nil, nil, 0, eCond, errStiffInseparable(), true, rd
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := fast.Dims()
 	if n1 == 0 || n2 == 0 {
-		return eq, nil, nil, 0, eCond, nil, true
+		return eq, nil, nil, 0, eCond, nil, true, rd
 	}
-	return eq, slow, fast, zeta, eCond, nil, true
+	return eq, slow, fast, zeta, eCond, nil, true, rd
 }
 
 // stiffCut is the cut of the stiff splits: the geometric midpoint √lo·√hi
@@ -586,8 +617,22 @@ func splitsBothSides(mods []float64, cut float64) bool {
 // scaled E (e.g. diagonal) then no longer looks ill-conditioned, where the
 // LU E⁻¹A is already componentwise accurate.
 func equilibrateDescriptor(sys *System) *System {
+	out, _ := equilibrateDescriptorRiders(sys, nil)
+	return out
+}
+
+// equilibrateDescriptorRiders is equilibrateDescriptor also scaling the rows
+// of riders (n×r, B-like columns that ride the split; nil for none) as B.
+func equilibrateDescriptorRiders(sys *System, riders *mat.Dense) (*System, *mat.Dense) {
 	n, m, p := sys.Dims()
 	out := sys.Copy()
+	var rd blas64.General
+	nr := 0
+	if riders != nil {
+		riders = mat.DenseCopyOf(riders)
+		rd = riders.RawMatrix()
+		nr = rd.Cols
+	}
 	e, a := out.E.RawMatrix(), out.A.RawMatrix()
 	b, c := out.B.RawMatrix(), out.C.RawMatrix()
 	var b2, c2 blas64.General
@@ -616,6 +661,9 @@ func equilibrateDescriptor(sys *System) *System {
 		for j := range nd {
 			b2.Data[i*b2.Stride+j] = math.Ldexp(b2.Data[i*b2.Stride+j], k)
 		}
+		for j := range nr {
+			rd.Data[i*rd.Stride+j] = math.Ldexp(rd.Data[i*rd.Stride+j], k)
+		}
 	}
 	for j := range n {
 		mx := 0.0
@@ -634,7 +682,7 @@ func equilibrateDescriptor(sys *System) *System {
 			c2.Data[i*c2.Stride+j] = math.Ldexp(c2.Data[i*c2.Stride+j], k)
 		}
 	}
-	return out
+	return out, riders
 }
 
 // sumTransferFunction is the transfer function of the parallel connection
@@ -673,14 +721,21 @@ func sumTransferFunction(parts []*System, opts *TransferFuncOpts) (*TransferFunc
 // with the stiff directions confined to their own rows. The caller decides
 // the rank of E; ok is false only for an exactly singular or non-finite E.
 func svdExplicit(sys *System) (*System, bool) {
+	out, _, ok := svdExplicitRiders(sys, nil)
+	return out, ok
+}
+
+// svdExplicitRiders is svdExplicit also folding riders (n×r B-like
+// columns, nil for none) as B: Σ⁻¹Uᵀ·riders.
+func svdExplicitRiders(sys *System, riders *mat.Dense) (*System, *mat.Dense, bool) {
 	n, m, _ := sys.Dims()
 	var svd mat.SVD
 	if !svd.Factorize(sys.E, mat.SVDThin) {
-		return nil, false
+		return nil, nil, false
 	}
 	sv := svd.Values(nil)
 	if !(sv[n-1] > 0) || math.IsInf(sv[0], 1) {
-		return nil, false
+		return nil, nil, false
 	}
 	var u, v mat.Dense
 	svd.UTo(&u)
@@ -708,8 +763,21 @@ func svdExplicit(sys *System) (*System, bool) {
 			b.Data[i*b.Stride+j] *= inv
 		}
 	}
+	var fr *mat.Dense
+	if riders != nil {
+		_, k := riders.Dims()
+		fr = newDense(n, k)
+		fr.Mul(u.T(), riders)
+		r := fr.RawMatrix()
+		for i, s := range sv {
+			inv := 1 / s
+			for j := range k {
+				r.Data[i*r.Stride+j] *= inv
+			}
+		}
+	}
 	out.StateName = nil
-	return out, true
+	return out, fr, true
 }
 
 // addPolynomialPart adds Σ poly[k-1]·s^k to every channel of tf.

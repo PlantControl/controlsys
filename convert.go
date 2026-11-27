@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -117,7 +118,13 @@ func c2dExit(out *System, err error) (*System, error) {
 // fit through a descriptor pencil returns errPencilFitUncertified with the
 // model; only C2D (least squares) reaches it.
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
-	out, err := sys.c2dUnchecked(dt, opts, true)
+	return sys.c2dRecorded(dt, opts, nil)
+}
+
+// c2dRecorded is c2d recording, in a non-nil rec, the coordinates the
+// result was discretized in (c2dCoords), for C2DMap.
+func (sys *System) c2dRecorded(dt float64, opts C2DOptions, rec *c2dCoords) (*System, error) {
+	out, err := sys.c2dUnchecked(dt, opts, true, rec)
 	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
@@ -133,7 +140,7 @@ func (sys *System) c2dUnguarded(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
 	}
-	return c2dExit(sys.c2dUnchecked(dt, opts, false))
+	return c2dExit(sys.c2dUnchecked(dt, opts, false, nil))
 }
 
 // stiffSplitLimit is the ζ″ limit (stiffSplit.within) at which C2D with
@@ -148,18 +155,19 @@ func stiffSplitLimit(method C2DMethod, public bool) float64 {
 }
 
 // c2dUnchecked is C2D without the check of its result; public reports a
-// call from C2D, C2DMap or D2D (stiffSplitLimit).
-func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*System, error) {
+// call from C2D, C2DMap or D2D (stiffSplitLimit). A non-nil rec records
+// the coordinates of the result (c2dCoords); the result is the same.
+func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool, rec *c2dCoords) (*System, error) {
 	if public && holdGated(sys, opts.Method) {
-		return sys.c2dDescriptorGated(dt, opts)
+		return sys.c2dDescriptorGated(dt, opts, rec)
 	}
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
 		limit := stiffSplitLimit(opts.Method, public)
-		route := foldInaccurateParts
+		route := foldInaccuratePartsRiders
 		if opts.Method == C2DMethodMatched {
-			route = stiffDescriptorParts
+			route = stiffDescriptorPartsRiders
 		}
-		if sp, ok := route(sys); ok {
+		if sp, ok := route(sys, rec.riders(sys)); ok {
 			if err := sp.within(limit); err != nil {
 				return nil, err
 			}
@@ -167,9 +175,10 @@ func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*Syst
 			if err != nil {
 				return nil, err
 			}
+			rec.setParts(sp)
 			return discretizeStiffDescriptor(sys, sp.parts, dt, normalized)
 		}
-		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit)
+		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit, rec)
 		if err != nil {
 			return nil, err
 		}
@@ -202,6 +211,7 @@ func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*Syst
 	if err != nil {
 		return nil, err
 	}
+	plan.rec = rec
 	return plan.run()
 }
 
@@ -214,11 +224,11 @@ func (sys *System) c2dUnchecked(dt float64, opts C2DOptions, public bool) (*Syst
 // above it the error stays. Every result is gated (holdGate); a dense
 // standard form failing the gate is discretized again in real Schur
 // coordinates (c2dPlan.discretizeMethod).
-func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions) (*System, error) {
+func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions, rec *c2dCoords) (*System, error) {
 	gate := newHoldGate(sys)
 	limit := stiffSplitLimit(opts.Method, true)
 	if !sys.HasDelay() {
-		if sp, ok := stiffDescriptorParts(sys); ok {
+		if sp, ok := stiffDescriptorPartsRiders(sys, rec.riders(sys)); ok {
 			err := sp.within(limit)
 			switch {
 			case err == nil:
@@ -230,6 +240,7 @@ func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions) (*System, err
 				if err != nil {
 					return nil, err
 				}
+				rec.setParts(sp)
 				return out, gate.check(out)
 			case sp.eCond >= foldAccurateECond:
 				return nil, err
@@ -237,7 +248,7 @@ func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions) (*System, err
 			gate.refused = err
 		}
 	} else {
-		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit)
+		px, ok, err := stiffDescriptorExplicit(sys, opts.Method, limit, rec)
 		if err != nil {
 			return nil, err
 		}
@@ -250,6 +261,7 @@ func (sys *System) c2dDescriptorGated(dt float64, opts C2DOptions) (*System, err
 		return nil, err
 	}
 	plan.gate = gate
+	plan.rec = rec
 	return plan.run()
 }
 
@@ -627,10 +639,16 @@ func zohAugmentedExp(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 // certified is ok with sp.err set (stiffSplit): the caller returns that
 // error, never the parts.
 func stiffDescriptorParts(sys *System) (stiffSplit, bool) {
+	return stiffDescriptorPartsRiders(sys, nil)
+}
+
+// stiffDescriptorPartsRiders is stiffDescriptorParts with the riders of
+// stiffExplicitSplitRiders.
+func stiffDescriptorPartsRiders(sys *System, riders *mat.Dense) (stiffSplit, bool) {
 	if !sys.IsDescriptor() || sys.HasDelay() {
 		return stiffSplit{}, false
 	}
-	sp, ok := stiffExplicitSplit(sys)
+	sp, ok := stiffExplicitSplitRiders(sys, riders)
 	if !ok || sp.deflated {
 		return stiffSplit{}, false
 	}
@@ -651,6 +669,12 @@ const foldAccurateECond = 1e6
 // foldInaccurateParts is stiffDescriptorParts for an E whose LU condition
 // estimate is foldAccurateECond or more.
 func foldInaccurateParts(sys *System) (stiffSplit, bool) {
+	return foldInaccuratePartsRiders(sys, nil)
+}
+
+// foldInaccuratePartsRiders is foldInaccurateParts with the riders of
+// stiffExplicitSplitRiders.
+func foldInaccuratePartsRiders(sys *System, riders *mat.Dense) (stiffSplit, bool) {
 	if !sys.IsDescriptor() {
 		return stiffSplit{}, false
 	}
@@ -659,7 +683,7 @@ func foldInaccurateParts(sys *System) (stiffSplit, bool) {
 	if lu.Cond() < foldAccurateECond {
 		return stiffSplit{}, false
 	}
-	return stiffDescriptorParts(sys)
+	return stiffDescriptorPartsRiders(sys, riders)
 }
 
 // splitFastPencil returns explicit parts of the fast descriptor part of
@@ -675,17 +699,31 @@ func foldInaccurateParts(sys *System) (stiffSplit, bool) {
 // fold, which only TransferFunction, judging the sum, takes. ok is false
 // when the fold is exactly singular (deflated).
 func splitFastPencil(fast *System) (parts []*System, zeta float64, err error, ok bool) {
-	folded, ok := svdExplicit(fast)
+	parts, zeta, err, ok, _ = splitFastPencilRiders(fast, nil)
+	return
+}
+
+// splitFastPencilRiders is splitFastPencil also taking riders (n×r B-like
+// columns of fast, nil for none) through each part's transformations, one
+// per part.
+func splitFastPencilRiders(fast *System, riders *mat.Dense) (parts []*System, zeta float64, err error, ok bool, pr []*mat.Dense) {
+	folded, fr, ok := svdExplicitRiders(fast, riders)
 	if !ok {
-		return nil, 0, nil, false
+		return nil, 0, nil, false, nil
+	}
+	whole := func(err error) ([]*System, float64, error, bool, []*mat.Dense) {
+		if riders == nil {
+			return []*System{folded}, 0, err, true, nil
+		}
+		return []*System{folded}, 0, err, true, []*mat.Dense{fr}
 	}
 	n, _, _ := fast.Dims()
 	if n == 1 {
-		return []*System{folded}, 0, nil, true
+		return whole(nil)
 	}
 	var eig mat.Eigen
 	if !eig.Factorize(folded.A, mat.EigenNone) {
-		return []*System{folded}, 0, nil, true
+		return whole(nil)
 	}
 	rho := 0.0
 	mods := make([]float64, 0, n)
@@ -694,25 +732,28 @@ func splitFastPencil(fast *System) (parts []*System, zeta float64, err error, ok
 		mods = append(mods, cmplx.Abs(l))
 	}
 	cut := stiffCut(mods, qzLargeRatio*rho)
-	slow, rest, zeta, err := decomposeGeneralizedQZZeta(fast, func(l complex128) bool {
+	slow, rest, zeta, rs, rr, err := decomposeGeneralizedQZZetaRiders(fast, func(l complex128) bool {
 		return cmplx.Abs(l) < cut
-	}, nil)
+	}, nil, riders)
 	if err != nil {
 		if !splitsBothSides(mods, cut) {
-			return []*System{folded}, 0, nil, true
+			return whole(nil)
 		}
-		return []*System{folded}, 0, errStiffInseparable(), true
+		return whole(errStiffInseparable())
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := rest.Dims()
 	if n1 == 0 || n2 == 0 {
-		return []*System{folded}, 0, nil, true
+		return whole(nil)
 	}
-	restParts, rz, rerr, ok := splitFastPencil(rest)
+	restParts, rz, rerr, ok, restRiders := splitFastPencilRiders(rest, rr)
 	if !ok {
-		return []*System{folded}, 0, nil, true
+		return whole(nil)
 	}
-	return append([]*System{slow}, restParts...), math.Max(zeta, rz), rerr, true
+	if riders != nil {
+		pr = append([]*mat.Dense{rs}, restRiders...)
+	}
+	return append([]*System{slow}, restParts...), math.Max(zeta, rz), rerr, true, pr
 }
 
 // discretizeStiffDescriptor discretizes the descriptor sys from its
@@ -765,8 +806,9 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 // the hold discretize its stiff and slow modes separately
 // (stiffModalHold). Matched is left to newC2DPlan, which keeps the
 // transfer function of the pencil. A split not certified within limit
-// (stiffSplit.within) returns its error.
-func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64) (*System, bool, error) {
+// (stiffSplit.within) returns its error. A non-nil rec records the map
+// of the descriptor state into the state of the result.
+func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64, rec *c2dCoords) (*System, bool, error) {
 	if method == C2DMethodMatched || !sys.IsDescriptor() || !sys.HasDelay() {
 		return nil, false, nil
 	}
@@ -776,16 +818,17 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64) (*Sys
 		}
 		return stiffLFTExplicitWithin(sys, limit)
 	}
-	sp, ok := foldInaccurateParts(ioDelayFreeCore(sys))
+	sp, ok := foldInaccuratePartsRiders(ioDelayFreeCore(sys), rec.riders(sys))
 	if !ok {
 		return nil, false, nil
 	}
 	if err := sp.within(limit); err != nil {
 		return nil, false, err
 	}
-	parts := sp.parts
+	parts := slices.Clone(sp.parts)
+	zs := make([]*mat.Dense, len(parts))
 	for i, part := range parts {
-		if parts[i], ok = realSchurPart(part); !ok {
+		if parts[i], zs[i], ok = realSchurPartZ(part); !ok {
 			return nil, false, nil
 		}
 	}
@@ -797,6 +840,7 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64) (*Sys
 	out.StateName = nil
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
+	rec.setSchurParts(sp, zs)
 	return out, true, nil
 }
 
@@ -814,13 +858,20 @@ func ioDelayFreeCore(sys *System) *System {
 // realSchurPart returns the explicit part, if its A is not already upper
 // quasi-triangular, in the coordinates of the real Schur form of A.
 func realSchurPart(part *System) (*System, bool) {
+	out, _, ok := realSchurPartZ(part)
+	return out, ok
+}
+
+// realSchurPartZ is realSchurPart also returning the Schur vectors Z (the
+// part's state is Z times the result's); nil when part is returned as is.
+func realSchurPartZ(part *System) (*System, *mat.Dense, bool) {
 	if upperQuasiTriangular(part.A) {
-		return part, true
+		return part, nil, true
 	}
 	n, m, p := part.Dims()
 	t, z, ok := realSchur(part.A)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	Z := mat.NewDense(n, n, z)
 	out := part.Copy()
@@ -832,7 +883,7 @@ func realSchurPart(part *System) (*System, bool) {
 		out.C.Mul(part.C, Z)
 	}
 	out.StateName = nil
-	return out, true
+	return out, Z, true
 }
 
 // parallelExplicit returns the explicit parallel connection of parts with

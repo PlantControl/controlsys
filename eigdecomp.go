@@ -877,7 +877,7 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 	if certify {
 		mode = qzSplitCertified
 	}
-	group1, group2, _, err = decomposeGeneralizedQZCore(sys, isGroup1, nil, mode)
+	group1, group2, _, _, _, err = decomposeGeneralizedQZCore(sys, isGroup1, nil, mode, nil)
 	return group1, group2, err
 }
 
@@ -888,7 +888,15 @@ func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool, certify
 // (β ≠ 0) of the first ordered QZ to the selection actually split, which
 // reorders that QZ only when it moves a mode across the cut.
 func decomposeGeneralizedQZZeta(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool) (group1, group2 *System, zeta float64, err error) {
-	return decomposeGeneralizedQZCore(sys, isGroup1, recut, qzSplitZeta)
+	group1, group2, zeta, _, _, err = decomposeGeneralizedQZCore(sys, isGroup1, recut, qzSplitZeta, nil)
+	return group1, group2, zeta, err
+}
+
+// decomposeGeneralizedQZZetaRiders is decomposeGeneralizedQZZeta also
+// taking riders through the split (splitGeneralizedSchurRiders); r1 and r2
+// are nil unless both groups have modes.
+func decomposeGeneralizedQZZetaRiders(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool, riders *mat.Dense) (group1, group2 *System, zeta float64, r1, r2 *mat.Dense, err error) {
+	return decomposeGeneralizedQZCore(sys, isGroup1, recut, qzSplitZeta, riders)
 }
 
 // qzSplitMode selects decomposeGeneralizedQZCore's split: uncertified,
@@ -902,7 +910,7 @@ const (
 	qzSplitZeta
 )
 
-func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool, mode qzSplitMode) (group1, group2 *System, zeta float64, err error) {
+func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, recut func(mods []float64) func(complex128) bool, mode qzSplitMode, riders *mat.Dense) (group1, group2 *System, zeta float64, r1, r2 *mat.Dense, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, _, _ := sys.Dims()
 	s := make([]float64, n*n)
@@ -924,7 +932,7 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 		if firstFailed {
 			a, e := sys.A.RawMatrix(), sys.E.RawMatrix()
 			if ar, ai, be, ok = qzEigenvalues(n, a.Data, a.Stride, e.Data, e.Stride); !ok {
-				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+				return nil, nil, 0, nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 			}
 		}
 		mods := make([]float64, 0, n)
@@ -945,17 +953,17 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 		if moved {
 			n1, recip, ok = orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 			if !ok {
-				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+				return nil, nil, 0, nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 			}
 		}
 	}
 	if !ok {
-		return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+		return nil, nil, 0, nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
 	ninf := 0
 	for i := range n {
 		if beta[i] == 0 && alphar[i] == 0 && alphai[i] == 0 {
-			return nil, nil, 0, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
+			return nil, nil, 0, nil, nil, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
 		}
 		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
 			ninf++
@@ -964,29 +972,29 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 	if n1 > 0 {
 		retol, err := certifyFiniteRetained(sys.A, sys.E, n, n1, ninf, alphar, alphai, beta, qzInfiniteTol(qzLargeRatio, normA, normE), normA)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, 0, nil, nil, err
 		}
 		if retol > 0 {
 			infTol = retol
 			n1, recip, ok = orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 			if !ok {
-				return nil, nil, 0, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+				return nil, nil, 0, nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 			}
 		}
 	}
 	if n1 == 0 {
 		group1, group2, err = modesAllInGroup2(policy, sys)
-		return group1, group2, 0, err
+		return group1, group2, 0, nil, nil, err
 	}
 	switch mode {
 	case qzSplitZeta:
-		return splitGeneralizedSchurZeta(policy, sys, s, t, q, z, n1, recip)
+		return splitGeneralizedSchurZeta(policy, sys, s, t, q, z, n1, recip, riders)
 	case qzSplitCertified:
 		group1, group2, err = splitGeneralizedSchurCertified(policy, sys, s, t, q, z, n1, recip)
 	default:
 		group1, group2, err = splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, nil)
 	}
-	return group1, group2, 0, err
+	return group1, group2, 0, nil, nil, err
 }
 
 // splitGeneralizedSchur decouples the n1 leading modes of the generalized
@@ -997,10 +1005,19 @@ func decomposeGeneralizedQZCore(sys *System, isGroup1 func(complex128) bool, rec
 // ErrSchurFailed for every caller. budget, when set, receives the split's
 // certificate terms (descriptorBudget.addGeneralizedSplit).
 func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool, budget *descriptorBudget) (group1, group2 *System, err error) {
+	group1, group2, _, _, err = splitGeneralizedSchurRiders(policy, sys, s, t, q, z, n1, recip, budget, nil)
+	return group1, group2, err
+}
+
+// splitGeneralizedSchurRiders is splitGeneralizedSchur also taking riders
+// (n×r B-like columns, nil for none) through the left transformations of B
+// into r1 and r2, the riders of group1 and group2. Riders enter no test
+// and leave every other result bitwise unchanged.
+func splitGeneralizedSchurRiders(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool, budget *descriptorBudget, riders *mat.Dense) (group1, group2 *System, r1, r2 *mat.Dense, err error) {
 	n, m, p := sys.Dims()
 	n2 := n - n1
 	if n1 > 0 && n2 > 0 && (s[n1*n+n1-1] != 0 || t[n1*n+n1-1] != 0) {
-		return nil, nil, errModesInseparable()
+		return nil, nil, nil, nil, errModesInseparable()
 	}
 
 	bq := make([]float64, n*m)
@@ -1033,7 +1050,7 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 		}
 		scale, ok := qzSylvester(n, n1, recip, s, t, r, l)
 		if !ok || scale < 1e-12 {
-			return nil, nil, errModesInseparable()
+			return nil, nil, nil, nil, errModesInseparable()
 		}
 		for i := range r {
 			r[i] /= scale
@@ -1057,11 +1074,11 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 		var lu mat.LU
 		lu.Factorize(extractModalBlock(t, n, 0, n1, 0, n1))
 		if err := lu.SolveTo(A1, false, A1); err != nil {
-			return nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
+			return nil, nil, nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
 		}
 		if m > 0 {
 			if err := lu.SolveTo(B1, false, B1); err != nil {
-				return nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
+				return nil, nil, nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
 			}
 		}
 	} else {
@@ -1071,23 +1088,55 @@ func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t,
 			blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, B1.RawMatrix())
 		}
 	}
+	if riders != nil && n2 > 0 {
+		if r1, r2, err = splitRiders(t, q, n, n1, recip, l, riders); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
 	if budget != nil {
 		budget.addGeneralizedSplit(newDescriptorBar(sys), sys, s, t, q, z, n1, r, l, bq0, cz0, bq, cz, A1, B1)
 	}
 	group1, err = policy.resultWithZeroFeedthrough(A1, B1, extractModalBlock(cz, n, 0, p, 0, n1))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if n2 == 0 {
-		return modesAllInGroup1(policy, group1)
+		group1, group2, err = modesAllInGroup1(policy, group1)
+		return group1, group2, nil, nil, err
 	}
 	group2, err = policy.resultWithOriginalFeedthrough(
 		extractModalBlock(s, n, n1, n, n1, n), extractModalBlock(bq, m, n1, n, 0, m), extractModalBlock(cz, n, 0, p, n1, n))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	group2.E = extractModalBlock(t, n, n1, n, n1, n)
-	return group1, group2, nil
+	return group1, group2, r1, r2, nil
+}
+
+// splitRiders applies to riders the left transformations of B in
+// splitGeneralizedSchur: QᵀR, the decoupling R̃1 −= L·R̃2 and the fold of
+// T11 (r1 = T11⁻¹R̃1; r2 = R̃2).
+func splitRiders(t, q []float64, n, n1 int, recip bool, l []float64, riders *mat.Dense) (r1, r2 *mat.Dense, err error) {
+	n2 := n - n1
+	_, k := riders.Dims()
+	rq := make([]float64, n*k)
+	rr := riders.RawMatrix()
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: n, Stride: n, Data: q}, blas64.General{Rows: n, Cols: k, Stride: rr.Stride, Data: rr.Data},
+		0, blas64.General{Rows: n, Cols: k, Stride: k, Data: rq})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1, blas64.General{Rows: n1, Cols: n2, Stride: n2, Data: l}, blas64.General{Rows: n2, Cols: k, Stride: k, Data: rq[n1*k:]},
+		1, blas64.General{Rows: n1, Cols: k, Stride: k, Data: rq})
+	r1 = extractModalBlock(rq, k, 0, n1, 0, k)
+	if recip {
+		var lu mat.LU
+		lu.Factorize(extractModalBlock(t, n, 0, n1, 0, n1))
+		if err := lu.SolveTo(r1, false, r1); err != nil {
+			return nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
+		}
+	} else {
+		t11 := blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: n1, Stride: n, Data: t}
+		blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, r1.RawMatrix())
+	}
+	return r1, extractModalBlock(rq, k, n1, n, 0, k), nil
 }
 
 // splitGeneralizedSchurCertified is splitGeneralizedSchur returning the
@@ -1106,17 +1155,17 @@ func splitGeneralizedSchurCertified(policy realizationTransformPolicy, sys *Syst
 
 // splitGeneralizedSchurZeta is splitGeneralizedSchurCertified also
 // returning ζ″, evaluated down to stiffHoldZeta (descriptorBudget.zeta).
-func splitGeneralizedSchurZeta(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool) (group1, group2 *System, zeta float64, err error) {
+func splitGeneralizedSchurZeta(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool, riders *mat.Dense) (group1, group2 *System, zeta float64, r1, r2 *mat.Dense, err error) {
 	var budget descriptorBudget
-	group1, group2, err = splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip, &budget)
+	group1, group2, r1, r2, err = splitGeneralizedSchurRiders(policy, sys, s, t, q, z, n1, recip, &budget, riders)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, nil, err
 	}
 	zeta = budget.zeta(stiffHoldZeta)
 	if !(zeta <= 1) {
-		return nil, nil, 0, errModesInseparable()
+		return nil, nil, 0, nil, nil, errModesInseparable()
 	}
-	return group1, group2, zeta, nil
+	return group1, group2, zeta, r1, r2, nil
 }
 
 func errModesInseparable() error {

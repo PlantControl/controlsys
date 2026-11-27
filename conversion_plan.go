@@ -22,6 +22,11 @@ type c2dPlan struct {
 	// gate judges the result of a public ZOH, FOH or Tustin C2D of a
 	// descriptor (holdGate); nil otherwise.
 	gate *holdGate
+	// rec, for C2DMap, records the model discretizeMethod discretized.
+	rec *c2dCoords
+	// foldScale and reduced are conversionStandardFormScaled's of sys.
+	foldScale int
+	reduced   bool
 }
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
@@ -36,14 +41,14 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 			return c2dPlan{}, err
 		}
 	}
-	matchedStiff := false
+	matchedStiff, foldScale, reduced := false, 0, false
 	if opts.Method == C2DMethodMatched {
 		if matchedStiff, err = stiffDelayedDescriptor(sys); err != nil {
 			return c2dPlan{}, err
 		}
 	}
 	if !matchedStiff && lsSlow == nil {
-		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
+		if sys, reduced, foldScale, err = conversionStandardFormScaled(sys, "descriptor reduction"); err != nil {
 			return c2dPlan{}, err
 		}
 	}
@@ -66,6 +71,8 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		workSys:         cp,
 		lsSlow:          lsSlow,
 		matchedRef:      ref,
+		foldScale:       foldScale,
+		reduced:         reduced,
 	}
 	plan.workSys.InputDelay = nil
 	plan.workSys.OutputDelay = nil
@@ -107,10 +114,11 @@ func (p c2dPlan) run() (*System, error) {
 	if p.workSys.HasInternalDelay() {
 		return p.discretizeInternalDelay()
 	}
-	disc, src, err := p.discretizeMethod()
+	disc, src, z, err := p.discretizeMethod()
 	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
+	p.rec.setCont(src, z, p.foldScale, p.reduced)
 	out, derr := p.applyExternalDelaysFrom(src, disc)
 	if derr != nil {
 		return nil, derr
@@ -139,24 +147,25 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 // state names, and the first result that passes is returned, else the
 // first with the gate's error. A fold of a dense, non-normal E⁻¹A with
 // ‖A·dt‖ ≫ 1 holds DC poorly in its own coordinates, where even its
-// rounded exact hold is far off; orthogonal ones keep it.
-func (p c2dPlan) discretizeMethod() (*System, *System, error) {
+// rounded exact hold is far off; orthogonal ones keep it. z is the Schur
+// vectors of that retry (src's state is z times the result's), else nil.
+func (p c2dPlan) discretizeMethod() (*System, *System, *mat.Dense, error) {
 	disc, err := p.discretizeWith(p.workSys)
 	if p.gate == nil || err != nil {
-		return disc, p.workSys, err
+		return disc, p.workSys, nil, err
 	}
 	gerr := p.gate.check(disc)
 	if gerr == nil || p.gate.refused != nil || (p.method != C2DMethodZOH && p.method != C2DMethodFOH) || upperQuasiTriangular(p.workSys.A) {
-		return disc, p.workSys, gerr
+		return disc, p.workSys, nil, gerr
 	}
-	schur, ok := realSchurPart(p.workSys)
+	schur, z, ok := realSchurPartZ(p.workSys)
 	if !ok {
-		return disc, p.workSys, gerr
+		return disc, p.workSys, nil, gerr
 	}
 	if sd, err := p.discretizeWith(schur); err == nil && p.gate.check(sd) == nil {
-		return sd, schur, nil
+		return sd, schur, z, nil
 	}
-	return disc, p.workSys, gerr
+	return disc, p.workSys, nil, gerr
 }
 
 func (p c2dPlan) discretizeWith(sys *System) (*System, error) {

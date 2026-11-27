@@ -146,16 +146,15 @@ func TestC2DDescriptorDCContractFrozenRows(t *testing.T) {
 	}
 }
 
-// C2DMap keeps the LU fold of a full-rank E (T3IVBX is PR-2) and returns
-// it with its map and ErrAccuracyUnverified where the DC of the result is
-// outside the bar against the model passed: cond/13 at dt = 0.01 is 65
-// bars on the fold. Within the bar it stays nil.
-func TestC2DMapDescriptorDCUnverified(t *testing.T) {
+// C2DMap returns C2D's model and verdict (T3IVBX): cond/13 at dt = 0.01,
+// 65 bars off on the LU fold, takes the band parts and is nil; within the
+// bar it stays nil. A model outside the bar would come with its G.
+func TestC2DMapDescriptorDCVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		row  string
 		dt   float64
 		want string
-	}{{"cond/13", 0.01, "unv"}, {"cond/644", 0.01, "nil"}} {
+	}{{"cond/13", 0.01, "nil"}, {"cond/644", 0.01, "nil"}} {
 		var sys *System
 		for _, r := range descriptorDCGateRows {
 			if r.name == tc.row {
