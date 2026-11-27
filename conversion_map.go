@@ -68,20 +68,25 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 }
 
 // c2dMapRouted reports a C2DMap that follows C2D's route (c2dCoords): a
-// continuous descriptor without internal delays by ZOH, FOH, Tustin or
-// impulse whose E is not rank deficient by the MATLAB rule.
+// continuous descriptor whose E is not rank deficient by the MATLAB rule,
+// without internal delays by ZOH, FOH, Tustin or impulse, or with them by
+// ZOH, FOH or Tustin where C2D tries the stiff LFT split (LU condition
+// estimate of E foldAccurateECond or more).
 func c2dMapRouted(sys *System, method C2DMethod) bool {
 	switch method {
 	case C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse:
 	default:
 		return false
 	}
-	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.LFT != nil {
+	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.LFT != nil && method == C2DMethodImpulse {
 		return false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	return !eRankDeficient(sys.E, &lu)
+	if eRankDeficient(sys.E, &lu) {
+		return false
+	}
+	return sys.LFT == nil || lu.Cond() >= foldAccurateECond
 }
 
 // c2dMapRouted is C2DMap of a c2dMapRouted sys: C2D's result and the map

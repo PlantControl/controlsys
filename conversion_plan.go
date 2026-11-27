@@ -112,6 +112,7 @@ func (p c2dPlan) run() (*System, error) {
 		}
 	}
 	if p.workSys.HasInternalDelay() {
+		p.rec.setCont(p.sys, nil, p.foldScale, p.reduced)
 		return p.discretizeInternalDelay()
 	}
 	disc, src, z, err := p.discretizeMethod()

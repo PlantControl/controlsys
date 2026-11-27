@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -16,18 +17,23 @@ import (
 // of sys carry over; state names are dropped. ok is false when sys has no
 // internal delays or G does not need the split.
 func stiffLFTExplicit(sys *System) (*System, bool) {
-	out, ok, err := stiffLFTExplicitWithin(sys, 1)
+	out, ok, err := stiffLFTExplicitWithin(sys, 1, nil)
 	return out, ok && err == nil
 }
 
 // stiffLFTExplicitWithin is stiffLFTExplicit returning the error of a
-// split of G not certified within limit (stiffSplit.within), for C2D.
-func stiffLFTExplicitWithin(sys *System, limit float64) (*System, bool, error) {
-	sp, ok, err := newStiffLFTSplitWithin(sys, nil, limit)
+// split of G not certified within limit (stiffSplit.within), for C2D. A
+// non-nil rec records the map of the descriptor state into the state of
+// the result (c2dCoords.setSchurParts).
+func stiffLFTExplicitWithin(sys *System, limit float64, rec *c2dCoords) (*System, bool, error) {
+	sp, ok, err := newStiffLFTSplitRiders(sys, nil, limit, rec.riders(sys))
 	if !ok || err != nil {
 		return nil, ok, err
 	}
 	out, _, ok := sp.explicit()
+	if ok && rec != nil {
+		rec.setSchurParts(stiffSplit{parts: sp.pre, riders: sp.riders}, sp.zs)
+	}
 	return out, ok, nil
 }
 
@@ -115,19 +121,30 @@ func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (*System, *mat.VecDens
 
 // stiffLFTSplit is the generalized Schur split of the descriptor part G of
 // stiffLFTExplicitState, with the LU condition estimate of E; the slow
-// (first) part is in real Schur form.
+// (first) part is in real Schur form. With riders, pre holds the parts
+// before their real Schur forms, riders their riders and zs their Schur
+// vectors (realSchurPartZ), set by explicit for the fast parts.
 type stiffLFTSplit struct {
-	sys   *System
-	x0    *mat.VecDense
-	parts []*System
-	cols  int
-	cond  float64
+	sys    *System
+	x0     *mat.VecDense
+	parts  []*System
+	cols   int
+	cond   float64
+	pre    []*System
+	riders []*mat.Dense
+	zs     []*mat.Dense
 }
 
 // newStiffLFTSplitWithin splits G; ok is false when the split does not apply,
 // and err reports a split not certified within limit (stiffSplit.within),
 // certified with G's own B and C.
 func newStiffLFTSplitWithin(sys *System, x0 *mat.VecDense, limit float64) (*stiffLFTSplit, bool, error) {
+	return newStiffLFTSplitRiders(sys, x0, limit, nil)
+}
+
+// newStiffLFTSplitRiders is newStiffLFTSplitWithin taking riders through
+// the split of G (stiffExplicitSplitRiders), which leave it bitwise as is.
+func newStiffLFTSplitRiders(sys *System, x0 *mat.VecDense, limit float64, riders *mat.Dense) (*stiffLFTSplit, bool, error) {
 	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
 		return nil, false, nil
 	}
@@ -153,30 +170,47 @@ func newStiffLFTSplitWithin(sys *System, x0 *mat.VecDense, limit float64) (*stif
 		b.SetCol(cols+1, ax.RawVector().Data)
 		g.B, g.D = b, d
 	}
-	split, ok := stiffDescriptorParts(g)
+	split, ok := stiffDescriptorPartsRiders(g, riders)
 	if !ok {
 		return nil, false, nil
 	}
 	if err := split.within(limit); err != nil {
 		return nil, true, err
 	}
-	parts := split.parts
-	if parts[0], ok = realSchurPart(parts[0]); !ok {
+	out := &stiffLFTSplit{sys: sys, x0: x0, parts: split.parts, cols: cols, cond: cond}
+	if riders != nil {
+		out.pre, out.riders = slices.Clone(split.parts), split.riders
+		out.zs = make([]*mat.Dense, len(split.parts))
+	}
+	if !out.schurPart(0) {
 		return nil, false, nil
 	}
-	return &stiffLFTSplit{sys: sys, x0: x0, parts: parts, cols: cols, cond: cond}, true, nil
+	return out, true, nil
+}
+
+// schurPart puts part i in real Schur form, recording its Schur vectors
+// when sp has riders.
+func (sp *stiffLFTSplit) schurPart(i int) bool {
+	part, z, ok := realSchurPartZ(sp.parts[i])
+	if !ok {
+		return false
+	}
+	sp.parts[i] = part
+	if sp.zs != nil {
+		sp.zs[i] = z
+	}
+	return true
 }
 
 // explicit assembles the parts, each in real Schur form, into the model of
 // stiffLFTExplicitState.
 func (sp *stiffLFTSplit) explicit() (*System, *mat.VecDense, bool) {
-	sys, parts := sp.sys, sp.parts
-	for i := 1; i < len(parts); i++ {
-		var ok bool
-		if parts[i], ok = realSchurPart(parts[i]); !ok {
+	for i := 1; i < len(sp.parts); i++ {
+		if !sp.schurPart(i) {
 			return nil, nil, false
 		}
 	}
+	sys, parts := sp.sys, sp.parts
 	n, m, p := sys.Dims()
 	var xt *mat.VecDense
 	if sp.x0 != nil {
