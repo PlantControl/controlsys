@@ -195,7 +195,8 @@ func TestC2DMapDescriptorInputDelaySchurParts(t *testing.T) {
 
 // A descriptor whose E is singular by the MATLAB rule is reduced; its
 // algebraic states have no image (EJDS3U ruling R8). stfr/54's C2D ZOH
-// overflows; C2DMap still reports the reduction.
+// overflows after the plan reduced it, and stfr/678's Tustin fails before;
+// C2DMap reports the reduction either way.
 func TestC2DMapDescriptorReducedKeepsInitialStateError(t *testing.T) {
 	for _, name := range []string{"stfr/45", "stfr/54"} {
 		sys := c2dMapRowSystem(t, name)
@@ -206,7 +207,15 @@ func TestC2DMapDescriptorReducedKeepsInitialStateError(t *testing.T) {
 		}
 	}
 	if _, err := c2dMapRowSystem(t, "stfr/54").C2D(0.01, C2DOptions{}); !errors.Is(err, ErrOverflow) {
-		t.Errorf("stfr/54: C2D %v, want ErrOverflow; the row no longer tests the reduction check before C2D", err)
+		t.Errorf("stfr/54: C2D %v, want ErrOverflow; the row no longer tests the reduction check after C2D", err)
+	}
+	sys := c2dMapRowSystem(t, "stfr/678")
+	tustin := C2DOptions{Method: C2DMethodTustin}
+	if d, _ := sys.C2D(1, tustin); d != nil {
+		t.Error("stfr/678: Tustin C2D at dt = 1 succeeds; the row no longer tests the reduction check before C2D")
+	}
+	if d, g, err := sys.C2DMap(1, tustin); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
+		t.Errorf("stfr/678@1/tustin: %v, want ErrDescriptorInitialState with no model", err)
 	}
 }
 
