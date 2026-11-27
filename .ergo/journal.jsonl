@@ -277,3 +277,14 @@
 {"version":1,"task_id":"BWVNRE","kind":"created","at":"2026-11-27T10:19:42.662381Z"}
 {"version":1,"task_id":"4CL6F3","kind":"created","at":"2026-11-27T10:19:42.686816Z"}
 {"version":1,"task_id":"U3IWY4","kind":"created","at":"2026-11-27T10:19:42.707027Z"}
+{"version":1,"task_id":"PT5WKA","kind":"created","at":"2026-11-27T13:57:14.19515Z"}
+{"version":1,"task_id":"EHHD4B","kind":"created","at":"2026-11-27T13:57:14.224617Z"}
+{"version":1,"task_id":"4CL6F3","kind":"result","at":"2026-11-27T13:57:14.249533Z","text":"Direction (T3IVBX ruling Q4): runtime t=0 identity check C_d·G_x = C, C_d·G_u + D_d = D as path to a documented G bar."}
+{"version":1,"task_id":"UWAQWX","kind":"result","at":"2026-11-27T13:57:14.270503Z","text":"T3IVBX ruling Q3: C2DMap FOH +27% (amd64 +21%) vs C2D on cond/13 because Γ1 computed twice."}
+{"version":1,"task_id":"YR6FKO","kind":"result","at":"2026-11-27T13:57:14.298021Z","text":"T3IVBX ruling Q4: amd64 extra nil G cell \u003e1e-6: cond/957 FOH dt 0.01, forced response 2.2e-6."}
+{"version":1,"task_id":"WPRALU","kind":"created","at":"2026-11-27T13:57:40.034822Z"}
+{"version":1,"task_id":"ZC4XHI","kind":"created","at":"2026-11-27T13:57:40.067616Z"}
+{"version":1,"task_id":"7PXISH","kind":"created","at":"2026-11-27T13:57:40.091745Z"}
+{"version":1,"task_id":"EO2WBX","kind":"created","at":"2026-11-27T13:57:40.115888Z"}
+{"version":1,"task_id":"AAT6H2","kind":"created","at":"2026-11-27T13:57:40.154423Z"}
+{"version":1,"task_id":"DPTLBE","kind":"created","at":"2026-11-27T13:57:40.17788Z"}
