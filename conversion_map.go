@@ -138,6 +138,7 @@ type c2dCoords struct {
 	t, z      *mat.Dense
 	foldScale int
 	reduced   bool
+	gamma1    *mat.Dense
 }
 
 // riders returns [E A] of the descriptor sys, the riders whose transforms
@@ -265,6 +266,9 @@ func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64
 		}
 		return G, nil
 	}
+	if method == C2DMethodFOH && c.t != nil && c.cont.HasInternalDelay() {
+		return c.lftFOHMap(nt)
+	}
 	gc, err := conversionStateMap(c.cont, out, method, prewarp, false)
 	if err != nil {
 		return nil, err
@@ -289,6 +293,26 @@ func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64
 	}
 	if cols > nc {
 		G.Slice(0, nt, n, n+cols-nc).(*mat.Dense).Copy(gc.Slice(0, nt, nc, cols))
+	}
+	return G, nil
+}
+
+// lftFOHMap is the FOH G of the stiff LFT route: [T −Γ1], Γ1 the hold of
+// [B B2] that C2D's discretization of the split model took (gamma1).
+func (c *c2dCoords) lftFOHMap(nt int) (*mat.Dense, error) {
+	nc, m, _ := c.cont.Dims()
+	_, n := c.t.Dims()
+	nw := c.cont.internalDelayCount()
+	if nt != nc {
+		return nil, fmt.Errorf("foh changes the state dimension: %w", ErrOptionUnsupported)
+	}
+	G := newDense(nt, n+m+nw)
+	G.Slice(0, nt, 0, n).(*mat.Dense).Copy(c.t)
+	if nt > 0 && m+nw > 0 {
+		if c.gamma1 == nil {
+			return nil, fmt.Errorf("foh hold of the split model not recorded: %w", ErrOptionUnsupported)
+		}
+		G.Slice(0, nt, n, n+m+nw).(*mat.Dense).Scale(-1, c.gamma1)
 	}
 	return G, nil
 }

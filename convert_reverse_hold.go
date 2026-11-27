@@ -135,20 +135,31 @@ func (sys *System) d2cZOHRealExtension(augmented *mat.Dense, values []complex128
 // discretizeModifiedFOH uses piecewise-linear interpolation between input samples.
 // The discrete state is x_d[k] = x_c(k*dt) - Gamma1*u[k].
 func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
+	out, _, err := sys.discretizeModifiedFOHGamma(dt)
+	return out, err
+}
+
+// discretizeModifiedFOHGamma is discretizeModifiedFOH also returning the
+// Γ1 of its hold (fohInputIntegrals; nil without states or inputs).
+func (sys *System) discretizeModifiedFOHGamma(dt float64) (*System, *mat.Dense, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
+		return nil, nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || math.IsInf(dt, 0) || math.IsNaN(dt) {
-		return nil, ErrInvalidSampleTime
+		return nil, nil, ErrInvalidSampleTime
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("foh: internal delays not supported: %w", ErrFeedbackDelay)
+		return nil, nil, fmt.Errorf("foh: internal delays not supported: %w", ErrFeedbackDelay)
 	}
 	n, m, p := sys.Dims()
 	out := sys.Copy()
 	out.Dt = dt
+	var g1 *mat.Dense
 	if n > 0 {
 		ad, gamma0, gamma1 := fohInputIntegrals(sys.A, sys.B, dt)
+		if m > 0 {
+			g1 = gamma1
+		}
 		out.A = ad
 		if m > 0 {
 			var extra mat.Dense
@@ -167,9 +178,9 @@ func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
 	policy := newDelayConversionPolicy(dt)
 	var err error
 	if out, err = policy.applyDiscreteDelayFields(out, sys); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out, nil
+	return out, g1, nil
 }
 
 func (sys *System) d2cFOH() (*System, error) {

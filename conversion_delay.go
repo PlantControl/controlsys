@@ -410,6 +410,12 @@ func copyConversionBlock(dst, src *mat.Dense, row, col int) {
 }
 
 func discretizeInternalModel(sys *System, dt float64, opts C2DOptions) (*System, error) {
+	return discretizeInternalModelRec(sys, dt, opts, nil)
+}
+
+// discretizeInternalModelRec is discretizeInternalModel recording, in a
+// non-nil rec, the FOH Γ1 of the augmented model's hold (c2dCoords.gamma1).
+func discretizeInternalModelRec(sys *System, dt float64, opts C2DOptions, rec *c2dCoords) (*System, error) {
 	_, m, p := sys.Dims()
 	tau := make([]float64, len(sys.LFT.Tau))
 	if opts.Method == C2DMethodImpulse || opts.Method == C2DMethodMatched || opts.Method == C2DMethodLeastSquares {
@@ -444,7 +450,11 @@ func discretizeInternalModel(sys *System, dt float64, opts C2DOptions) (*System,
 	case C2DMethodZOH:
 		disc, err = rational.discretizeZOH(dt)
 	case C2DMethodFOH:
-		disc, err = rational.discretizeModifiedFOH(dt)
+		var gamma1 *mat.Dense
+		disc, gamma1, err = rational.discretizeModifiedFOHGamma(dt)
+		if rec != nil {
+			rec.gamma1 = gamma1
+		}
 	default:
 		return nil, fmt.Errorf("method %q with internal delays: %w", opts.Method, ErrOptionUnsupported)
 	}
