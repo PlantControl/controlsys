@@ -25,7 +25,8 @@ import (
 // descriptor state into them: on the parts, G = [W 0] for ZOH and impulse,
 // W the map of x0 into the parts' states, and the parts' own Tustin or FOH
 // map composed with diag(W, I) otherwise. A model returned with an error
-// wrapping ErrAccuracyUnverified comes with its G. Other descriptors take
+// wrapping ErrAccuracyUnverified comes with its G. The error is C2D's
+// verdict on the DC gain of the model; G itself is not checked. Other descriptors take
 // the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
 // returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
