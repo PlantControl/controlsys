@@ -36,10 +36,10 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
-	std, reduced, k, err := conversionStandardFormScaled(sys, "C2DMap")
-	if c2dMapRouted(sys, opts.Method) && (err == nil || errors.Is(err, ErrOverflow)) && !reduced {
-		return sys.c2dMapRouted(dt, opts, k, err)
+	if c2dMapRouted(sys, opts.Method) {
+		return sys.c2dMapRouted(dt, opts)
 	}
+	std, reduced, k, err := conversionStandardFormScaled(sys, "C2DMap")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,32 +68,34 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 
 // c2dMapRouted reports a C2DMap that follows C2D's route (c2dCoords): a
 // continuous descriptor without internal delays by ZOH, FOH, Tustin or
-// impulse.
+// impulse whose E is not rank deficient by the MATLAB rule.
 func c2dMapRouted(sys *System, method C2DMethod) bool {
 	switch method {
 	case C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse:
 	default:
 		return false
 	}
-	return sys.IsContinuous() && sys.IsDescriptor() && sys.LFT == nil
+	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.LFT != nil {
+		return false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	return !eRankDeficient(sys.E, &lu)
 }
 
 // c2dMapRouted is C2DMap of a c2dMapRouted sys: C2D's result and the map
-// into its coordinates. k and foldErr are the fold scaling and error of
-// conversionStandardFormScaled, which matter only where C2D folds.
-func (sys *System) c2dMapRouted(dt float64, opts C2DOptions, k int, foldErr error) (*System, *mat.Dense, error) {
+// into its coordinates.
+func (sys *System) c2dMapRouted(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	rec := &c2dCoords{}
 	out, err := sys.c2dRecorded(dt, opts, rec)
+	if rec.reduced {
+		return nil, nil, fmt.Errorf("C2DMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
+	}
 	if err != nil && !carriesModel(err) {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
-	if rec.parts == nil && rec.cont != nil && rec.t == nil {
-		if foldErr != nil {
-			return nil, nil, fmt.Errorf("C2DMap: %w", foldErr)
-		}
-		if k != 0 {
-			return nil, nil, fmt.Errorf("C2DMap: E⁻¹B overflows the descriptor state coordinates: %w", ErrOverflow)
-		}
+	if rec.parts == nil && rec.cont != nil && rec.t == nil && rec.foldScale != 0 {
+		return nil, nil, fmt.Errorf("C2DMap: E⁻¹B overflows the descriptor state coordinates: %w", ErrOverflow)
 	}
 	if (rec.parts == nil && rec.cont == nil) || !conversionCanMapState(sys, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(sys, dt)) {
 		return nil, nil, fmt.Errorf("C2DMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)
@@ -120,10 +122,12 @@ func (sys *System) c2dMapRouted(dt float64, opts C2DOptions, k int, foldErr erro
 // holds the Schur vectors of the real Schur retry, whose state is zᵀ times
 // that of t. A nil *c2dCoords records nothing.
 type c2dCoords struct {
-	parts  []*System
-	shares []*mat.Dense
-	cont   *System
-	t, z   *mat.Dense
+	parts     []*System
+	shares    []*mat.Dense
+	cont      *System
+	t, z      *mat.Dense
+	foldScale int
+	reduced   bool
 }
 
 // riders returns [E A] of the descriptor sys, the riders whose transforms
@@ -181,11 +185,13 @@ func (c *c2dCoords) setSchurParts(sp stiffSplit, zs []*mat.Dense) {
 	c.t = t
 }
 
-func (c *c2dCoords) setCont(src *System, z *mat.Dense) {
+// setCont records the plan route: src and z as in c2dCoords, with the fold
+// scaling 2^foldScale and reduction of the plan's standard form.
+func (c *c2dCoords) setCont(src *System, z *mat.Dense, foldScale int, reduced bool) {
 	if c == nil {
 		return
 	}
-	c.cont, c.z = src, z
+	c.cont, c.z, c.foldScale, c.reduced = src, z, foldScale, reduced
 }
 
 // partShare is the map of the descriptor state into the state of a part of

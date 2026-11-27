@@ -24,6 +24,9 @@ type c2dPlan struct {
 	gate *holdGate
 	// rec, for C2DMap, records the model discretizeMethod discretized.
 	rec *c2dCoords
+	// foldScale and reduced are conversionStandardFormScaled's of sys.
+	foldScale int
+	reduced   bool
 }
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
@@ -38,14 +41,14 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 			return c2dPlan{}, err
 		}
 	}
-	matchedStiff := false
+	matchedStiff, foldScale, reduced := false, 0, false
 	if opts.Method == C2DMethodMatched {
 		if matchedStiff, err = stiffDelayedDescriptor(sys); err != nil {
 			return c2dPlan{}, err
 		}
 	}
 	if !matchedStiff && lsSlow == nil {
-		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
+		if sys, reduced, foldScale, err = conversionStandardFormScaled(sys, "descriptor reduction"); err != nil {
 			return c2dPlan{}, err
 		}
 	}
@@ -68,6 +71,8 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		workSys:         cp,
 		lsSlow:          lsSlow,
 		matchedRef:      ref,
+		foldScale:       foldScale,
+		reduced:         reduced,
 	}
 	plan.workSys.InputDelay = nil
 	plan.workSys.OutputDelay = nil
@@ -113,7 +118,7 @@ func (p c2dPlan) run() (*System, error) {
 	if err != nil && !carriesModel(err) {
 		return nil, err
 	}
-	p.rec.setCont(src, z)
+	p.rec.setCont(src, z, p.foldScale, p.reduced)
 	out, derr := p.applyExternalDelaysFrom(src, disc)
 	if derr != nil {
 		return nil, derr
