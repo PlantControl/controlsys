@@ -39,7 +39,8 @@ func TestDelayChainWithinBudgetNecessaryForFoldChain(t *testing.T) {
 		for i := range x0 {
 			x0[i] = float64(i+1) / float64(tc.n)
 		}
-		zs, err := sys.zeroStateResponseForm()
+		form, err := sys.zeroStateResponseForm()
+		zs := form.sys
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +97,8 @@ func BenchmarkNewDelayChainOverBudget(b *testing.B) {
 		mat.NewDense(tc.p, 1, tc.d12), mat.NewDense(1, tc.m, tc.d21), mat.NewDense(1, 1, nil)); err != nil {
 		b.Fatal(err)
 	}
-	zs, err := sys.zeroStateResponseForm()
+	form, err := sys.zeroStateResponseForm()
+	zs := form.sys
 	if err != nil {
 		b.Fatal(err)
 	}

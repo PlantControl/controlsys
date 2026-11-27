@@ -656,14 +656,16 @@ func stiffDescriptorPartsRiders(sys *System, riders *mat.Dense) (stiffSplit, boo
 }
 
 // foldAccurateECond is the 1-norm condition estimate of E below which C2D
-// impulse, C2D with I/O delays and the zero-state Step and Lsim take the LU
-// fold E⁻¹A (ToExplicit) of a full-rank E even when stiffDescriptorParts
-// applies (delay-free ZOH, FOH and Tustin C2D, certified at DC, take the
-// parts from illConditionedECond; c2dDescriptorGated): its
-// cond(E)·ε error then stays under 1e-9 relative in the discrete response
-// and 1e-7 in the step response, where the pencil parts cost a generalized
-// Schur split and several matrix exponentials. Impulse routes at the
-// stiffPencilSplit gate (cond(E) 1e4) instead.
+// impulse, C2D with I/O delays, Step and Lsim with I/O delays, and the
+// free response of Initial and Lsim take the LU fold E⁻¹A (ToExplicit) of
+// a full-rank E even when stiffDescriptorParts applies: its cond(E)·ε
+// error then stays under 1e-9 relative in the discrete response and 1e-7
+// in the step response, where the pencil parts cost a generalized Schur
+// split and several matrix exponentials. Delay-free ZOH, FOH and Tustin
+// C2D (c2dDescriptorGated), the delay-free zero-state Step and Lsim
+// (zeroStateRoute) and Impulse take the parts from the stiffPencilSplit
+// gate (cond(E) 1e4) instead; a split those refuse below foldAccurateECond
+// returns the fold unverified, above it the error.
 const foldAccurateECond = 1e6
 
 // foldInaccurateParts is stiffDescriptorParts for an E whose LU condition

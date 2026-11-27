@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 )
@@ -331,7 +332,8 @@ func (a *ModelArray) FreqResponse(omega []float64) (*ModelArrayFreqResponse, err
 }
 
 // Step simulates the step response of every model to tFinal; void slots
-// stay void.
+// stay void. A response that Step returns with ErrAccuracyUnverified is
+// kept, and the array comes with the first such error.
 func (a *ModelArray) Step(tFinal float64) (*ModelArrayTimeResponse, error) {
 	if a == nil {
 		return nil, fmt.Errorf("ModelArray.Step: nil array: %w", ErrInvalidArgument)
@@ -340,17 +342,21 @@ func (a *ModelArray) Step(tFinal float64) (*ModelArrayTimeResponse, error) {
 		Shape:     slices.Clone(a.shape),
 		responses: make([]*TimeResponse, len(a.models)),
 	}
+	var unverified error
 	for i, sys := range a.models {
 		if sys == nil {
 			continue
 		}
 		resp, err := Step(sys, tFinal)
-		if err != nil {
+		if err != nil && !(resp != nil && errors.Is(err, ErrAccuracyUnverified)) {
 			return nil, fmt.Errorf("ModelArray.Step: model %d: %w", i, err)
+		}
+		if err != nil && unverified == nil {
+			unverified = fmt.Errorf("ModelArray.Step: model %d: %w", i, err)
 		}
 		out.responses[i] = resp
 	}
-	return out, nil
+	return out, unverified
 }
 
 func (a *ModelArray) flatIndex(op string, index []int) (int, error) {

@@ -32,7 +32,8 @@ func TestStepInternalDelayStiffDescriptorRouteFollowsAutoGrid(t *testing.T) {
 		}
 		var want *TimeResponse
 		if tc.fold {
-			zs, err := sys.zeroStateResponseForm()
+			form, err := sys.zeroStateResponseForm()
+			zs := form.sys
 			if err != nil {
 				t.Fatal(err)
 			}

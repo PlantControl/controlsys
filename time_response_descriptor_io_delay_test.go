@@ -230,7 +230,7 @@ func TestInitialLsimIllConditionedEUnsplitDelayMatrixRejected(t *testing.T) {
 		if _, _, res := decomposeIODelay(sd.Delay); !delayMatrixHasNonzero(res) {
 			t.Fatalf("%s: Delay splits into input and output delays", names[k])
 		}
-		if !foldInaccurateContinuous(sd) {
+		if keep, _, _ := sd.zeroStateRoute(); !keep {
 			t.Fatalf("%s: not on the pencil route", names[k])
 		}
 		ran++
