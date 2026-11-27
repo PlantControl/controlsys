@@ -277,3 +277,6 @@
 {"type":"snapshot_dependency","from_id":"GW7IRR","to_id":"DP5QM3"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-27T01:01:00.673664Z","data":{"id":"5ZCX6J","agent_id":"coordinator@fix-5ZCX6J","ts":"2026-11-27T01:01:00.673664Z"}},{"type":"state","ts":"2026-11-27T01:01:00.673664Z","data":{"id":"5ZCX6J","state":"doing","ts":"2026-11-27T01:01:00.673664Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"unclaim","ts":"2026-11-27T01:01:05.665083Z","data":{"id":"5ZCX6J","ts":"2026-11-27T01:01:05.665083Z"}},{"type":"state","ts":"2026-11-27T01:01:05.665083Z","data":{"id":"5ZCX6J","state":"todo","ts":"2026-11-27T01:01:05.665083Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-27T01:01:05.687903Z","data":{"id":"5ZCX6J","agent_id":"coordinator@fix-5ZCX6J","ts":"2026-11-27T01:01:05.687903Z"}},{"type":"state","ts":"2026-11-27T01:01:05.687903Z","data":{"id":"5ZCX6J","state":"doing","ts":"2026-11-27T01:01:05.687903Z"}}]}
