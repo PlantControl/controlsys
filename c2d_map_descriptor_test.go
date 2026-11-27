@@ -194,28 +194,32 @@ func TestC2DMapDescriptorInputDelaySchurParts(t *testing.T) {
 }
 
 // A descriptor whose E is singular by the MATLAB rule is reduced; its
-// algebraic states have no image (EJDS3U ruling R8). stfr/54's C2D ZOH
-// overflows after the plan reduced it, and stfr/678's Tustin fails before;
+// algebraic states have no image (EJDS3U ruling R8). x2 is algebraic in
+// both models: in the first the slow pole 1000 overflows ZOH at dt = 1
+// after C2D's plan reduced the model, and in the second the reduced pole 2
+// = 2/dt makes Tustin's bilinear solve fail before the plan records it.
 // C2DMap reports the reduction either way.
 func TestC2DMapDescriptorReducedKeepsInitialStateError(t *testing.T) {
-	for _, name := range []string{"stfr/45", "stfr/54"} {
-		sys := c2dMapRowSystem(t, name)
-		for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse} {
-			if d, g, err := sys.C2DMap(0.01, C2DOptions{Method: meth}); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
-				t.Errorf("%s/%s: %v, want ErrDescriptorInitialState with no model", name, meth, err)
+	E := mat.NewDense(2, 2, []float64{1, 0, 0, 0})
+	B, C, D := mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, nil)
+	for _, tc := range []struct {
+		pole   float64
+		method C2DMethod
+		c2dErr error
+	}{{1000, C2DMethodZOH, ErrOverflow}, {2, C2DMethodTustin, nil}} {
+		sys, err := NewDescriptor(mat.NewDense(2, 2, []float64{tc.pole, 0, 0, 1}), B, C, D, E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := C2DOptions{Method: tc.method}
+		if d, err := sys.C2D(1, opts); d != nil || tc.c2dErr != nil && !errors.Is(err, tc.c2dErr) {
+			t.Errorf("pole %g/%s: C2D %v; the case no longer fails in C2D", tc.pole, tc.method, err)
+		}
+		for _, meth := range []C2DMethod{tc.method, C2DMethodFOH, C2DMethodImpulse} {
+			if d, g, err := sys.C2DMap(1, C2DOptions{Method: meth}); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
+				t.Errorf("pole %g/%s: %v, want ErrDescriptorInitialState with no model", tc.pole, meth, err)
 			}
 		}
-	}
-	if _, err := c2dMapRowSystem(t, "stfr/54").C2D(0.01, C2DOptions{}); !errors.Is(err, ErrOverflow) {
-		t.Errorf("stfr/54: C2D %v, want ErrOverflow; the row no longer tests the reduction check after C2D", err)
-	}
-	sys := c2dMapRowSystem(t, "stfr/678")
-	tustin := C2DOptions{Method: C2DMethodTustin}
-	if d, _ := sys.C2D(1, tustin); d != nil {
-		t.Error("stfr/678: Tustin C2D at dt = 1 succeeds; the row no longer tests the reduction check before C2D")
-	}
-	if d, g, err := sys.C2DMap(1, tustin); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
-		t.Errorf("stfr/678@1/tustin: %v, want ErrDescriptorInitialState with no model", err)
 	}
 }
 
