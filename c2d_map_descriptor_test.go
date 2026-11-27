@@ -194,13 +194,19 @@ func TestC2DMapDescriptorInputDelaySchurParts(t *testing.T) {
 }
 
 // A descriptor whose E is singular by the MATLAB rule is reduced; its
-// algebraic states have no image (EJDS3U ruling R8).
+// algebraic states have no image (EJDS3U ruling R8). stfr/54's C2D ZOH
+// overflows; C2DMap still reports the reduction.
 func TestC2DMapDescriptorReducedKeepsInitialStateError(t *testing.T) {
-	sys := c2dMapRowSystem(t, "stfr/45")
-	for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse} {
-		if d, g, err := sys.C2DMap(0.01, C2DOptions{Method: meth}); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
-			t.Errorf("%s: %v, want ErrDescriptorInitialState with no model", meth, err)
+	for _, name := range []string{"stfr/45", "stfr/54"} {
+		sys := c2dMapRowSystem(t, name)
+		for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse} {
+			if d, g, err := sys.C2DMap(0.01, C2DOptions{Method: meth}); !errors.Is(err, ErrDescriptorInitialState) || d != nil || g != nil {
+				t.Errorf("%s/%s: %v, want ErrDescriptorInitialState with no model", name, meth, err)
+			}
 		}
+	}
+	if _, err := c2dMapRowSystem(t, "stfr/54").C2D(0.01, C2DOptions{}); !errors.Is(err, ErrOverflow) {
+		t.Errorf("stfr/54: C2D %v, want ErrOverflow; the row no longer tests the reduction check before C2D", err)
 	}
 }
 
