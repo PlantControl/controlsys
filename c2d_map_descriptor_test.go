@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand/v2"
 	"slices"
 	"testing"
 
@@ -158,55 +157,13 @@ func responseError(got, ref *mat.Dense) float64 {
 	return worst
 }
 
-// clusterStiffDescriptor is a stable 5-state descriptor (E symmetric
-// positive definite, A symmetric negative definite) whose E has three stiff
-// singular values within a factor 1.7: its fast modes form one part that
-// splitFastPencil does not split, dense after svdExplicit.
-func clusterStiffDescriptor(t *testing.T) *System {
-	t.Helper()
-	rng := rand.New(rand.NewPCG(0, 99))
-	const n = 5
-	orth := func() *mat.Dense {
-		a := mat.NewDense(n, n, nil)
-		for i := range n {
-			for j := range n {
-				a.Set(i, j, rng.NormFloat64())
-			}
-		}
-		var qr mat.QR
-		qr.Factorize(a)
-		var q mat.Dense
-		qr.QTo(&q)
-		return &q
-	}
-	A := mat.NewDense(n, n, nil)
-	for i := range n {
-		for j := range i + 1 {
-			v := 0.2 * rng.NormFloat64()
-			A.Set(i, j, v)
-			A.Set(j, i, v)
-		}
-		A.Set(i, i, A.At(i, i)-1)
-	}
-	q := orth()
-	var T, E mat.Dense
-	T.Mul(q, mat.NewDiagDense(n, []float64{1, 0.7, 1e-9, 1.3e-9, 1.7e-9}))
-	E.Mul(&T, q.T())
-	sys, err := NewDescriptor(A, mat.NewDense(n, 1, []float64{1, 0.3, -0.7, 0.5, 0.2}),
-		mat.NewDense(1, n, []float64{0.6, -0.9, 0.4, 0.2, 0.1}), mat.NewDense(1, 1, []float64{0.1}), &E, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sys
-}
-
 // With an input delay of whole samples, C2D of a stiff descriptor holds the
 // generalized Schur parts in their real Schur forms (stiffDescriptorExplicit)
 // and C2DMap's G carries Zᵀ·W into them: the free response from G·x0 is the
 // delay-free one, which the input delay does not act on. The cluster row's
 // fast part is dense, so its Schur form changes coordinates.
 func TestC2DMapDescriptorInputDelaySchurParts(t *testing.T) {
-	cluster := clusterStiffDescriptor(t)
+	cluster := c2dMapRowSystem(t, "cluster")
 	sp, ok := foldInaccurateParts(cluster)
 	dense := false
 	for _, part := range sp.parts {
