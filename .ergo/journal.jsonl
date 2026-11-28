@@ -283,16 +283,13 @@
 {"version":1,"task_id":"LJKKDY","kind":"created","at":"2026-11-27T17:41:51.862675Z"}
 {"version":1,"task_id":"HRPG4E","kind":"created","at":"2026-11-27T22:50:54.053113Z"}
 {"version":1,"task_id":"Y3ISLH","kind":"created","at":"2026-11-28T03:21:51.311873Z"}
-{"version":1,"task_id":"AVPMWI","kind":"created","at":"2026-11-28T03:41:57.387851Z"}
 {"version":1,"task_id":"FW6QOL","kind":"created","at":"2026-11-28T03:41:57.424512Z"}
 {"version":1,"task_id":"FCC7BC","kind":"created","at":"2026-11-28T04:36:35.357583Z"}
 {"version":1,"task_id":"ZYIPZL","kind":"created","at":"2026-11-28T05:46:53.797742Z"}
 {"version":1,"task_id":"R3M5GX","kind":"created","at":"2026-11-28T06:05:51.018107Z"}
-{"version":1,"task_id":"5EKNHC","kind":"claim","at":"2026-11-28T06:35:16.239904Z","agent":"coordinator@5eknhc"}
 {"version":1,"task_id":"NVRLPD","kind":"created","at":"2026-11-28T06:42:18.533347Z"}
 {"version":1,"task_id":"FWIAFU","kind":"created","at":"2026-11-28T06:42:18.571061Z"}
 {"version":1,"task_id":"AVPMWI","kind":"claim","at":"2026-11-28T10:13:52.797152Z","agent":"coordinator@avpmwi"}
 {"version":1,"task_id":"YNERCR","kind":"created","at":"2026-11-28T16:37:51.427694Z"}
 {"version":1,"task_id":"VU2XLG","kind":"created","at":"2026-11-28T16:38:50.350698Z"}
 {"version":1,"task_id":"3MIOII","kind":"created","at":"2026-11-28T16:48:23.443756Z"}
-{"version":1,"task_id":"5EKNHC","kind":"done","at":"2026-11-28T18:07:46.852428Z","agent":"coordinator@5eknhc","text":"merged #574: non-finite time response → ErrOverflow no value; follow-ups NVRLPD FWIAFU VU2XLG 3MIOII"}
