@@ -294,3 +294,4 @@
 {"type":"snapshot_dependency","from_id":"GW7IRR","to_id":"DP5QM3"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-28T10:13:52.797152Z","data":{"id":"AVPMWI","agent_id":"coordinator@avpmwi","ts":"2026-11-28T10:13:52.797152Z"}},{"type":"state","ts":"2026-11-28T10:13:52.797152Z","data":{"id":"AVPMWI","state":"doing","ts":"2026-11-28T10:13:52.797152Z"}}]}
