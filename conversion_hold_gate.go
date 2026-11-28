@@ -35,7 +35,11 @@ func holdGated(sys *System, method C2DMethod) bool {
 // model is nil only where, entry by entry, its DC gain ĥ, exact for its
 // stored entries, lies within the descriptor bar (dcBar) of g0 = DCGain of
 // the caller's delay-free model, plus the rounding ε·S of the result's own
-// entries,
+// entries. With internal delays g0 is the DC gain of the closed DC pencil
+// (lftClosedAtDC), certified by its own solve or else DCGain of the
+// pencil, and the bar is that pencil's with each delay channel kept as its
+// own block (channelBar); where C2, D21 and D22 are zero they are the
+// delay-free core's.
 //
 //	S = |D| + Σ|C||X| + |C(I − Φ)⁻¹|·(|Φ||X| + |Γ|),  X = (I − Φ)⁻¹Γ,
 //
@@ -56,7 +60,7 @@ type holdGate struct {
 }
 
 func newHoldGate(sys *System) *holdGate {
-	ref, barRef := lftClosedAtDC(ioDelayFree(sys))
+	ref, barRef, channels := lftClosedAtDC(ioDelayFree(sys))
 	n, m, p := ref.Dims()
 	if m == 0 || p == 0 {
 		return &holdGate{}
@@ -94,6 +98,9 @@ func newHoldGate(sys *System) *holdGate {
 		return gate
 	}
 	gate.bar = newDCBarSolved(barRef, solved)
+	if channels > 0 && gate.bar.reason == "" {
+		gate.bar = channelBar(barRef, channels, gate.bar)
+	}
 	if gate.bar.reason != "" {
 		gate.err = holdUnverified("%s", gate.bar.reason)
 	}
@@ -144,17 +151,18 @@ func (g *holdGate) check(out *System) error {
 // as the discrete descriptor E′ − A′ at z = 1, A′ = [A B2; C2 D22] and
 // E′ = blkdiag(0, I), whose entries are stored ones, so its DC solve takes
 // I − D22 without rounding; bar holds it as the continuous descriptor
-// A′ − E′, E = blkdiag(E, 0), for its descriptor bar (dcBar). Where C2,
-// D21 and D22 are zero, w ≡ 0 and both are the delay-free core.
-func lftClosedAtDC(sys *System) (pencil, bar *System) {
+// A′ − E′, E = blkdiag(E, 0), for its bar (channelBar), with channels the
+// N delay channels, its last N states. Where C2, D21 and D22 are zero,
+// w ≡ 0 and both are the delay-free core, with no channels.
+func lftClosedAtDC(sys *System) (pencil, bar *System, channels int) {
 	L := sys.LFT
 	if L == nil {
-		return sys, sys
+		return sys, sys, 0
 	}
 	if allZeroDense(L.C2) && allZeroDense(L.D21) && allZeroDense(L.D22) {
 		core := *sys
 		core.LFT = nil
-		return &core, &core
+		return &core, &core, 0
 	}
 	n, m, p := sys.Dims()
 	N := sys.internalDelayCount()
@@ -176,7 +184,102 @@ func lftClosedAtDC(sys *System) (pencil, bar *System) {
 		E.Set(n+i, n+i, 1)
 		Ac.Set(n+i, n+i, Ac.At(n+i, n+i)-1)
 	}
-	return &System{A: A, B: B, C: C, D: sys.D, E: E, Dt: 1}, &System{A: Ac, B: B, C: C, D: sys.D, E: Ec}
+	return &System{A: A, B: B, C: C, D: sys.D, E: E, Dt: 1}, &System{A: Ac, B: B, C: C, D: sys.D, E: Ec}, N
+}
+
+// channelBar is b, newDCBar of the continuous closed DC pencil bar of
+// lftClosedAtDC, with the bar of each entry (i, j) taken with each of the
+// last N states (delay channels) as its own block: dcBar's
+// u·(ĉ·m̂·â·m̂·b̂ + ĉ·m̂·b̂ + |D_ij|) with the (1+N)-vectors ĉ = [‖C_i‖,
+// |D12_ik|], b̂ = [‖B_j‖; |D21_kj|] and the matrices â = [‖A‖, ‖B2_·k‖;
+// ‖C2_k·‖, |(D22 − I)_kl|], m̂ the same block norms of M = (−Ã)⁻¹,
+// Frobenius norms. Rescaling a delay channel (w_k → α·w_k) or the state
+// equation, both exact equivalences of the model, acts on them as a
+// diagonal similarity that cancels; one pencil norm would not. With N = 0
+// it is dcBar's.
+func channelBar(bar *System, N int, b dcBar) dcBar {
+	q, m, p := bar.Dims()
+	n := q - N
+	lu := make([]float64, q*q)
+	ar := bar.A.RawMatrix()
+	for i := range q {
+		for j := range q {
+			lu[i*q+j] = -ar.Data[i*ar.Stride+j]
+		}
+	}
+	ipiv := make([]int, q)
+	if !impl.Dgetrf(q, q, lu, q, ipiv) {
+		b.reason = "DC pencil not invertible"
+		return b
+	}
+	inv := make([]float64, q*q)
+	for i := range q {
+		inv[i*q+i] = 1
+	}
+	impl.Dgetrs(blas.NoTrans, q, q, lu, q, ipiv, inv, q)
+	K := 1 + N
+	blockNorms := func(data []float64, stride int) []float64 {
+		out := make([]float64, K*K)
+		for i := range q {
+			bi := 0
+			if i >= n {
+				bi = 1 + i - n
+			}
+			for j := range q {
+				bj := 0
+				if j >= n {
+					bj = 1 + j - n
+				}
+				v := data[i*stride+j]
+				out[bi*K+bj] += v * v
+			}
+		}
+		for k := range out {
+			out[k] = math.Sqrt(out[k])
+		}
+		return out
+	}
+	ah, mh := blockNorms(ar.Data, ar.Stride), blockNorms(inv, q)
+	br, cr := bar.B.RawMatrix(), bar.C.RawMatrix()
+	ch, bh, r, x := make([]float64, K), make([]float64, K), make([]float64, K), make([]float64, K)
+	b.bar, b.lu = make([]float64, p*m), nil
+	for i := range p {
+		for j := range m {
+			clear(ch)
+			clear(bh)
+			for l := range q {
+				bl := 0
+				if l >= n {
+					bl = 1 + l - n
+				}
+				ch[bl] += cr.Data[i*cr.Stride+l] * cr.Data[i*cr.Stride+l]
+				bh[bl] += br.Data[l*br.Stride+j] * br.Data[l*br.Stride+j]
+			}
+			for k := range K {
+				ch[k], bh[k] = math.Sqrt(ch[k]), math.Sqrt(bh[k])
+			}
+			for c := range K {
+				r[c], x[c] = 0, 0
+				for l := range K {
+					r[c] += ch[l] * mh[l*K+c]
+					x[c] += mh[c*K+l] * bh[l]
+				}
+			}
+			t := b.absD[i*m+j]
+			for c := range K {
+				t += r[c] * bh[c]
+				for l := range K {
+					t += r[c] * ah[c*K+l] * x[l]
+				}
+			}
+			v := b.u * t
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				b.reason = "DC bar not finite"
+			}
+			b.bar[i*m+j] = v
+		}
+	}
+	return b
 }
 
 // delaysClosedAtDC returns the discrete out with its internal delays, the

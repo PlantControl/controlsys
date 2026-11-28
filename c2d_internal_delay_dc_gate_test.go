@@ -60,7 +60,7 @@ func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
 		{"all", c2, d21, d22, false},
 	} {
 		sys := internalDelayGateSystem(t, tc.c2, tc.d21, tc.d22)
-		ref, barRef := lftClosedAtDC(sys)
+		ref, barRef, _ := lftClosedAtDC(sys)
 		n, _, _ := ref.Dims()
 		if wantN := map[bool]int{true: 3, false: 5}[tc.wantDelayFree]; ref.LFT != nil || n != wantN {
 			t.Errorf("%s: closed model has %d states, LFT %v; want %d", tc.name, n, ref.LFT != nil, wantN)
@@ -94,8 +94,11 @@ func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
 			continue
 		}
 		wantBar := newDCBar(barRef)
+		if !tc.wantDelayFree {
+			wantBar = channelBar(barRef, 2, wantBar)
+		}
 		for k := range 4 {
-			if b, w := gate.bar.fullBar(k), wantBar.fullBar(k); math.Abs(b-w) > 1e-12*w {
+			if b, w := holdGateBar(gate, k), holdGateBar(&holdGate{bar: wantBar}, k); math.Abs(b-w) > 1e-12*w {
 				t.Errorf("%s: bar of entry %d = %v, want the continuous closed pencil's %v", tc.name, k, b, w)
 			}
 		}
@@ -291,6 +294,57 @@ func TestC2DInternalDelayDescriptorDCGateRows(t *testing.T) {
 			}
 			if errClass(dm, merr) != errClass(d, err) || !bitsEqualSystem(dm, d) || !bitsEqualLFT(dm, d) {
 				t.Errorf("%s: C2DMap %v, C2D %v, same model %v", name, merr, err, bitsEqualSystem(dm, d) && bitsEqualLFT(dm, d))
+			}
+		}
+	}
+}
+
+func holdGateBar(g *holdGate, k int) float64 {
+	if g.bar.lu == nil {
+		return g.bar.bar[k]
+	}
+	return g.bar.fullBar(k)
+}
+
+// The gate's bar for internal delays is the same on exactly equivalent
+// models (PT5WKA re-ruling): a delay channel rescaled, w_k → α·w_k (B2 and
+// D12 column k by α, C2 and D21 row k by 1/α, D22 by the similarity), or
+// the state equation (E, A, B, B2) by τ, α = τ = 2²⁰, on a MIMO model with
+// two delays. One norm of the closed pencil would move by up to 1e23.
+func TestC2DInternalDelayDescriptorGateBarInvariant(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	base := internalDelayGateSystem(t, c2, d21, d22)
+	ch := base.Copy()
+	L := ch.LFT
+	const a = 0x1p20
+	for i := range 3 {
+		L.B2.Set(i, 0, L.B2.At(i, 0)*a)
+		L.C2.Set(0, i, L.C2.At(0, i)/a)
+	}
+	for i := range 2 {
+		L.D12.Set(i, 0, L.D12.At(i, 0)*a)
+		L.D21.Set(0, i, L.D21.At(0, i)/a)
+	}
+	L.D22.Set(0, 1, L.D22.At(0, 1)/a)
+	L.D22.Set(1, 0, L.D22.At(1, 0)*a)
+	st := base.Copy()
+	for _, m := range []*mat.Dense{st.E, st.A, st.B, st.LFT.B2} {
+		m.Scale(a, m)
+	}
+	ref := newHoldGate(base)
+	if ref.err != nil {
+		t.Fatal(ref.err)
+	}
+	for name, sys := range map[string]*System{"channel": ch, "state": st} {
+		g := newHoldGate(sys)
+		if g.err != nil {
+			t.Fatalf("%s: %v", name, g.err)
+		}
+		for k := range 4 {
+			if b, w := holdGateBar(g, k), holdGateBar(ref, k); math.Abs(b-w) > 1e-10*w {
+				t.Errorf("%s: bar of entry %d = %v, unscaled %v", name, k, b, w)
 			}
 		}
 	}
