@@ -100,33 +100,73 @@ func TestTimeResponseOverflowSlowUnstableDescriptor(t *testing.T) {
 	requireOverflow(t, "Impulse", resp, err)
 }
 
-// Census row stfr/714 (5EKNHC): E singular within the rank floor; where
-// the reduction keeps the stiff unstable mode (about 1e14 rad/s) every
-// sample after t = 0 is NaN. Which arches keep it is not asserted: a nil
-// or unverified error must come with finite samples, any other error
-// without a response.
+// Census rows stfr/714 (literal regenerated on arm64) and stfr/243 (on
+// amd64; 5EKNHC): E singular within the rank floor; where the reduction
+// keeps the stiff unstable mode (about 1e14 rad/s) every sample after t = 0
+// is NaN. Which arches keep it is not asserted: a nil or unverified error
+// must come with finite samples, any other error without a response.
 func TestTimeResponseOverflowStiffUnstableMode(t *testing.T) {
-	sys, err := NewDescriptor(
-		mat.NewDense(3, 3, []float64{-0.6806284625252985, -0.37410853321184073, 0.9152193673851281, -0.1840589232166251, 0.3383235068858649, 0.5889930082078766, 0.45666005304728235, -0.9405898512091189, -0.4430204489055137}),
-		mat.NewDense(3, 1, []float64{0.4783591667295819, -1.090219982199198, -0.5154525941854181}),
-		mat.NewDense(1, 3, []float64{0.8337673074717253, -0.4530905746489745, 0.6485233754204445}),
-		mat.NewDense(1, 1, []float64{-0.48954030417559186}),
-		mat.NewDense(3, 3, []float64{0.24370082547719854, 0.6252340402655436, 0.47294023117098943, -0.8703763348502936, -0.17372501746087166, 0.16849535734882953, 0.11069477398056876, -0.04316891887818562, -0.08030045785457147}),
-		0)
+	for _, c := range []struct {
+		name          string
+		a, b, c, d, e *mat.Dense
+	}{
+		{"stfr/714",
+			mat.NewDense(3, 3, []float64{-0.6806284625252985, -0.37410853321184073, 0.9152193673851281, -0.1840589232166251, 0.3383235068858649, 0.5889930082078766, 0.45666005304728235, -0.9405898512091189, -0.4430204489055137}),
+			mat.NewDense(3, 1, []float64{0.4783591667295819, -1.090219982199198, -0.5154525941854181}),
+			mat.NewDense(1, 3, []float64{0.8337673074717253, -0.4530905746489745, 0.6485233754204445}),
+			mat.NewDense(1, 1, []float64{-0.48954030417559186}),
+			mat.NewDense(3, 3, []float64{0.24370082547719854, 0.6252340402655436, 0.47294023117098943, -0.8703763348502936, -0.17372501746087166, 0.16849535734882953, 0.11069477398056876, -0.04316891887818562, -0.08030045785457147})},
+		{"stfr/243",
+			mat.NewDense(4, 4, []float64{0.8667121914531961, -0.03207805341177322, 1.1495581128710775, -0.07892276580642732, -0.06753656522391988, -0.708683226096992, 0.16126974754646847, -1.0785763439184521, -0.5166832697169743, 0.0006026642409087124, -0.46951474150483286, 1.2901046865809624, -0.4698328416905223, -0.1799775265077841, 0.47448423404256634, -0.14049236805976995}),
+			mat.NewDense(4, 1, []float64{0.5260059128759885, -0.8538969561955401, 0.25061577456056644, 0.5510530873322523}),
+			mat.NewDense(1, 4, []float64{0.6313119978632703, -0.5007033626400759, -1.6068521121279586, 0.44806059736590576}),
+			mat.NewDense(1, 1, []float64{0.31194600392720956}),
+			mat.NewDense(4, 4, []float64{0.21149668066626234, -0.25708219265407173, -0.15575991458749638, -0.05468605141385357, -0.004020840544857761, 0.37802083139679177, 0.13451648414194256, 0.026066503497004415, -0.44426197173794024, 0.5241798857749524, -0.5265031019806824, -0.2851375482823841, -0.2638521468937871, -0.3936863472953933, 0.2556820051961284, 0.1676555199927509})},
+	} {
+		sys, err := NewDescriptor(c.a, c.b, c.c, c.d, c.e, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := Step(sys, 0)
+		requireFiniteOrNoResponse(t, c.name+" Step", resp, err)
+		resp, err = Impulse(sys, 0)
+		requireFiniteOrNoResponse(t, c.name+" Impulse", resp, err)
+		for _, dt := range []float64{1e-4, 1e-2, 1} {
+			tt := makeTimeVector(201, dt)
+			u := mat.NewDense(len(tt), 1, nil)
+			for k := range tt {
+				u.Set(k, 0, math.Sin(1.3*tt[k]/(dt*20))+0.5)
+			}
+			resp, err = Lsim(sys, u, tt, nil)
+			requireFiniteOrNoResponse(t, c.name+" Lsim", resp, err)
+		}
+	}
+}
+
+// ModelArray.Step and StepInfoForSystem pass a model's ErrOverflow on
+// without a value; StepInfoForSystem reaches Step only past its stability
+// gate, so the unstable model stops there with ErrUnstable.
+func TestTimeResponseOverflowCallers(t *testing.T) {
+	unstable, err := New(
+		mat.NewDense(2, 2, []float64{-0.005, 0.3, 0, 3}),
+		mat.NewDense(2, 1, []float64{1, 1}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0.5}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := Step(sys, 0)
-	requireFiniteOrNoResponse(t, "Step", resp, err)
-	resp, err = Impulse(sys, 0)
-	requireFiniteOrNoResponse(t, "Impulse", resp, err)
-	for _, dt := range []float64{1e-4, 1e-2, 1} {
-		tt := makeTimeVector(201, dt)
-		u := mat.NewDense(len(tt), 1, nil)
-		for k := range tt {
-			u.Set(k, 0, math.Sin(1.3*tt[k]/(dt*20))+0.5)
-		}
-		resp, err = Lsim(sys, u, tt, nil)
-		requireFiniteOrNoResponse(t, "Lsim", resp, err)
+	stable, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arr, err := NewModelArray([]int{2}, []*System{stable, unstable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := arr.Step(0); !errors.Is(err, ErrOverflow) || out != nil {
+		t.Errorf("ModelArray.Step = %v, %v; want nil, ErrOverflow", out, err)
+	}
+	if info, err := StepInfoForSystem(unstable, 0, nil); !errors.Is(err, ErrUnstable) || info != nil {
+		t.Errorf("StepInfoForSystem = %v, %v; want nil, ErrUnstable", info, err)
 	}
 }
