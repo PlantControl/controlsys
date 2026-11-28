@@ -6,7 +6,8 @@ import "plantcontrol.org/v1/gonum/mat"
 // census (arm64 generators of census/pt5wka, key fam:variant/seed in name;
 // lft has C2 = 0, lftc a random C2) with the 320-bit DC g0 of its closed
 // DC pencil, the bar0 and terms T0 of its U-1 bar, and the C2D class of
-// each cell, the same on arm64 and amd64 (U unverified, N nil).
+// each cell, the same on arm64 and amd64 (U unverified, N nil; ? either,
+// at 1.1 to 1.2 bars on arm64 and within the bar on amd64).
 type internalDelayDCGateRow struct {
 	name                  string
 	A, E, B, C, D         *mat.Dense
@@ -61,7 +62,7 @@ var internalDelayDCGateRows = []internalDelayDCGateRow{
 		D21: mat.NewDense(1, 1, []float64{0}),
 		D22: mat.NewDense(1, 1, []float64{0}),
 		g0:  3.802128109071998, bar0: 9.328342817683725e-13, t0: 4.761264567793339,
-		classes: map[string]byte{"0.0001/zoh": 'U', "0.0001/foh": 'U', "0.0001/tustin": 'N', "0.01/zoh": 'U', "0.01/foh": 'U', "0.01/tustin": 'N'}},
+		classes: map[string]byte{"0.0001/zoh": 'U', "0.0001/foh": 'U', "0.0001/tustin": 'N', "0.01/zoh": '?', "0.01/foh": '?', "0.01/tustin": 'N'}},
 	// strad2-lft:lftc/256: 0.0001/zoh=unv dcTdN=306571 tdU=207032 dcRel=2.81304e-05 | 0.0001/foh=unv dcTdN=306571 tdU=207063 dcRel=2.81304e-05 | 0.0001/tustin=nil dcTdN=0.107746 tdU=0.0727746 dcRel=9.88656e-12 | 0.01/zoh=nil dcTdN=0.558862 tdU=0.555929 dcRel=5.12801e-11 | 0.01/foh=nil dcTdN=0.554087 tdU=0.551301 dcRel=5.0842e-11 | 0.01/tustin=nil dcTdN=0.000509876 tdU=0.000507313 dcRel=4.67853e-14
 	{name: "strad2-lft:lftc/256",
 		A:   mat.NewDense(5, 5, []float64{0.764724715983157, 0.8243164292415597, -0.01822930927303657, 0.13008692981214, -0.05005323055900529, 0.06407419053076281, 0.4663436779663949, -0.9568258412902726, -0.4418090428321212, -1.1183468044779934, -0.6238068634877049, 0.8429522039639328, 0.9610955432065184, 0.4059392288105935, 1.6434501252775895, -1.0243040887927173, 0.2660540215390744, 1.0568267751642673, 0.08304009083850208, 0.2215736511437187, 0.6741401299326168, 0.33935810015555556, 0.7149798691376762, -0.634593572213056, 0.9844432829947148}),

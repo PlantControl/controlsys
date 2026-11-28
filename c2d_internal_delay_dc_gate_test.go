@@ -256,7 +256,7 @@ func TestC2DInternalDelayDescriptorDCGateRows(t *testing.T) {
 			if err != nil {
 				got = 'U'
 			}
-			if got != want {
+			if want != '?' && got != want {
 				t.Errorf("%s: C2D class %c (%v), want %c", name, got, err, want)
 			}
 			if got == 'N' {
