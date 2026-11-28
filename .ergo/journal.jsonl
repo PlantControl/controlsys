@@ -277,15 +277,12 @@
 {"version":1,"task_id":"UWAQWX","kind":"result","at":"2026-11-27T13:57:14.270503Z","text":"T3IVBX ruling Q3: C2DMap FOH +27% (amd64 +21%) vs C2D on cond/13 because Γ1 computed twice."}
 {"version":1,"task_id":"YR6FKO","kind":"result","at":"2026-11-27T13:57:14.298021Z","text":"T3IVBX ruling Q4: amd64 extra nil G cell \u003e1e-6: cond/957 FOH dt 0.01, forced response 2.2e-6."}
 {"version":1,"task_id":"WPRALU","kind":"created","at":"2026-11-27T13:57:40.034822Z"}
-{"version":1,"task_id":"ZC4XHI","kind":"created","at":"2026-11-27T13:57:40.067616Z"}
 {"version":1,"task_id":"7PXISH","kind":"created","at":"2026-11-27T13:57:40.091745Z"}
 {"version":1,"task_id":"EO2WBX","kind":"created","at":"2026-11-27T13:57:40.115888Z"}
 {"version":1,"task_id":"AAT6H2","kind":"created","at":"2026-11-27T13:57:40.154423Z"}
 {"version":1,"task_id":"DPTLBE","kind":"created","at":"2026-11-27T13:57:40.17788Z"}
-{"version":1,"task_id":"BWVNRE","kind":"claim","at":"2026-11-27T17:05:25.680274Z","agent":"coordinator@bwvnre"}
 {"version":1,"task_id":"LJKKDY","kind":"created","at":"2026-11-27T17:41:51.862675Z"}
 {"version":1,"task_id":"HRPG4E","kind":"created","at":"2026-11-27T22:50:54.053113Z"}
 {"version":1,"task_id":"ZC4XHI","kind":"claim","at":"2026-11-28T01:21:55.97175Z","agent":"coordinator@zc4xhi"}
 {"version":1,"task_id":"GM22S5","kind":"created","at":"2026-11-28T01:29:59.995689Z"}
 {"version":1,"task_id":"5EKNHC","kind":"created","at":"2026-11-28T02:43:35.271072Z"}
-{"version":1,"task_id":"BWVNRE","kind":"done","at":"2026-11-28T03:05:53.133488Z","agent":"coordinator@bwvnre","text":"merged #571: C2DMap stiff LFT bitwise C2D with G; residual 128/122 strad2-lft + band → PT5WKA; LJKKDY filed"}
