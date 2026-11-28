@@ -2689,7 +2689,11 @@ func Damp(sys *System) ([]DampInfo, error) {
 
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
-// plus feedthrough, improper ones return ErrImproperModel. A continuous
+// plus feedthrough, improper ones return ErrImproperModel. An E singular
+// within the rank floor counts as singular: where the reduction removes
+// the algebraic part, a nil error means the response of that singular-E
+// model, the one TransferFunction and IsProper return, whose algebraic
+// part acts at once, at t = 0 and at every input jump. A continuous
 // delay-free model whose full-rank E is too ill-conditioned for E⁻¹A (as
 // in TransferFunction and Impulse, LU condition estimate 1e4 or more; with
 // I/O delays 1e6 or more) is simulated from its generalized Schur parts,
@@ -3471,7 +3475,10 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 }
 
 // Lsim simulates the response to u held constant between samples (ZOH).
-// Descriptor models are handled as in Step from a zero x0; with a nonzero
+// Descriptor models are handled as in Step from a zero x0, an E singular
+// within the rank floor included: where the reduction removes the
+// algebraic part, a nil error means the response of that singular-E model,
+// whose algebraic part follows every input jump at once; with a nonzero
 // x0 a continuous descriptor takes its generalized Schur parts only from
 // an LU condition estimate of E of 1e6 (the fold below it, forced and free
 // response alike, with no band certificate). With singular E a nonzero x0
@@ -3490,8 +3497,18 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
-// returns ErrDimensionMismatch.
+// returns ErrDimensionMismatch. As in Step, a proper singular-E descriptor
+// whose reduction TransferFunction does not verify returns its response
+// with an error wrapping ErrAccuracyUnverified.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
+	resp, err := lsim(sys, u, t, x0)
+	if err == nil && sys.reductionUnverified() {
+		err = fmt.Errorf("Lsim: descriptor reduction: %w", ErrAccuracyUnverified)
+	}
+	return resp, err
+}
+
+func lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	if err := requireFiniteSystem("Lsim", sys); err != nil {
 		return nil, err
 	}
