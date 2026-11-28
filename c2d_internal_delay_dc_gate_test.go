@@ -96,7 +96,7 @@ func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
 		}
 		wantBar := newDCBar(barRef)
 		if !tc.wantDelayFree {
-			wantBar = channelBar(ref, barRef, 2, wantBar)
+			wantBar = channelBar(ref, barRef, 2, wantBar, nil, nil)
 		}
 		for k := range 4 {
 			if b, w := holdGateBar(gate, k), holdGateBar(&holdGate{bar: wantBar}, k); math.Abs(b-w) > 1e-12*w {
@@ -372,6 +372,24 @@ func TestC2DInternalDelayDescriptorGateBarValue(t *testing.T) {
 	for k, want := range []float64{1.1945364111544252e-13, 1.5492785077175252e-13, 1.3523895544075391e-13, 1.7921689031205056e-13} {
 		if b := holdGateBar(g, k); math.Abs(b-want) > 1e-12*want {
 			t.Errorf("bar of entry %d = %.17g, want %.17g", k, b, want)
+		}
+	}
+}
+
+// A state-space model with internal delays and no E is not gated: C2D's
+// result and class are those of the ungated route.
+func TestC2DInternalDelayExplicitNotGated(t *testing.T) {
+	sys := internalDelayGateSystem(t, mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5}),
+		mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4}), mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3}))
+	sys.E = nil
+	for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		if holdGated(sys, meth) {
+			t.Errorf("%s: explicit internal-delay model is gated", meth)
+		}
+		want, werr := c2dExit(sys.c2dUnchecked(0.01, C2DOptions{Method: meth}, true, nil))
+		got, err := sys.C2D(0.01, C2DOptions{Method: meth})
+		if (err == nil) != (werr == nil) || !bitsEqualSystem(got, want) || !bitsEqualLFT(got, want) {
+			t.Errorf("%s: C2D (%v) differs from the ungated route (%v)", meth, err, werr)
 		}
 	}
 }

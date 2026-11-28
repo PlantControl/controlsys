@@ -54,7 +54,8 @@ func holdGated(sys *System, method C2DMethod) bool {
 // channel kept as its own block (channelBar); where C2, D21 and D22 are
 // zero they are the delay-free core's. The result is read with its delays
 // closed (delaysClosedAtDC) and its delay states balanced by powers of two
-// (balanceDelayStates), which leaves ĥ and S exactly as they are.
+// (balanceDelayStates), which leaves ĥ and S exactly as they are; where its
+// C2, D21 and D22 are zero, as its delay-free core.
 type holdGate struct {
 	g0      *mat.Dense
 	err     error
@@ -75,9 +76,11 @@ func newHoldGate(sys *System) *holdGate {
 	}
 	var solved []dd
 	var g0 *mat.Dense
+	var lu []float64
+	var ipiv []int
 	if n > 0 {
 		if r := solveDCRegular(e, ref.A, ref.B, ref.C, ref.D, x0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
-			g0, solved = r.g, r.x
+			g0, solved, lu, ipiv = r.g, r.x, r.lu, r.ipiv
 		}
 	}
 	if g0 == nil {
@@ -103,7 +106,7 @@ func newHoldGate(sys *System) *holdGate {
 	}
 	gate.bar = newDCBarSolved(barRef, solved)
 	if channels > 0 && gate.bar.reason == "" {
-		gate.bar = channelBar(ref, barRef, channels, gate.bar)
+		gate.bar = channelBar(ref, barRef, channels, gate.bar, lu, ipiv)
 	}
 	if gate.bar.reason != "" {
 		gate.err = holdUnverified("%s", gate.bar.reason)
@@ -125,7 +128,11 @@ func (g *holdGate) check(out *System) error {
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
 		return holdUnverified("%v", err)
 	}
-	if out.LFT != nil {
+	if L := out.LFT; L != nil && allZeroDense(L.C2) && allZeroDense(L.D21) && allZeroDense(L.D22) {
+		core := *out
+		core.LFT = nil
+		out = &core
+	} else if L != nil {
 		n, _, _ := out.Dims()
 		out = balanceDelayStates(delaysClosedAtDC(out), n)
 	}
@@ -199,24 +206,27 @@ func lftClosedAtDC(sys *System) (pencil, bar *System, channels int) {
 // |D12_ik|], b̂ = [‖B_j‖; |D21_kj|] and the matrices â = [‖A‖, ‖B2_·k‖;
 // ‖C2_k·‖, |D22_kl|], the stored blocks of pencil's A′ (the identity, the
 // delay at DC, is exact and not data), m̂ the same block norms of
-// M = (−Ã)⁻¹, Ã bar's A, Frobenius norms. Rescaling a delay channel (w_k → α·w_k) or the state
+// M = (−Ã)⁻¹, Ã bar's A, Frobenius norms. lu and ipiv, where not nil, are
+// the LU factors of −Ã (the double E′ − A′ of the certified g0 solve). Rescaling a delay channel (w_k → α·w_k) or the state
 // equation, both exact equivalences of the model, acts on them as a
 // diagonal similarity that cancels; one pencil norm would not. With N = 0
 // it is dcBar's.
-func channelBar(pencil, bar *System, N int, b dcBar) dcBar {
+func channelBar(pencil, bar *System, N int, b dcBar, lu []float64, ipiv []int) dcBar {
 	q, m, p := bar.Dims()
 	n := q - N
-	lu := make([]float64, q*q)
 	ar := bar.A.RawMatrix()
-	for i := range q {
-		for j := range q {
-			lu[i*q+j] = -ar.Data[i*ar.Stride+j]
+	if lu == nil {
+		lu = make([]float64, q*q)
+		for i := range q {
+			for j := range q {
+				lu[i*q+j] = -ar.Data[i*ar.Stride+j]
+			}
 		}
-	}
-	ipiv := make([]int, q)
-	if !impl.Dgetrf(q, q, lu, q, ipiv) {
-		b.reason = "DC pencil not invertible"
-		return b
+		ipiv = make([]int, q)
+		if !impl.Dgetrf(q, q, lu, q, ipiv) {
+			b.reason = "DC pencil not invertible"
+			return b
+		}
 	}
 	inv := make([]float64, q*q)
 	for i := range q {
