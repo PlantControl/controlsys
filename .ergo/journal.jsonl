@@ -282,8 +282,6 @@
 {"version":1,"task_id":"DPTLBE","kind":"created","at":"2026-11-27T13:57:40.17788Z"}
 {"version":1,"task_id":"LJKKDY","kind":"created","at":"2026-11-27T17:41:51.862675Z"}
 {"version":1,"task_id":"HRPG4E","kind":"created","at":"2026-11-27T22:50:54.053113Z"}
-{"version":1,"task_id":"5EKNHC","kind":"created","at":"2026-11-28T02:43:35.271072Z"}
-{"version":1,"task_id":"PT5WKA","kind":"claim","at":"2026-11-28T03:06:05.936015Z","agent":"coordinator@pt5wka"}
 {"version":1,"task_id":"Y3ISLH","kind":"created","at":"2026-11-28T03:21:51.311873Z"}
 {"version":1,"task_id":"AVPMWI","kind":"created","at":"2026-11-28T03:41:57.387851Z"}
 {"version":1,"task_id":"FW6QOL","kind":"created","at":"2026-11-28T03:41:57.424512Z"}
@@ -293,4 +291,3 @@
 {"version":1,"task_id":"5EKNHC","kind":"claim","at":"2026-11-28T06:35:16.239904Z","agent":"coordinator@5eknhc"}
 {"version":1,"task_id":"NVRLPD","kind":"created","at":"2026-11-28T06:42:18.533347Z"}
 {"version":1,"task_id":"FWIAFU","kind":"created","at":"2026-11-28T06:42:18.571061Z"}
-{"version":1,"task_id":"PT5WKA","kind":"done","at":"2026-11-28T10:13:34.512029Z","agent":"coordinator@pt5wka","text":"merged #573: internal-delay C2D/C2DMap DC gate, per-channel bar, balanced reading; follow-ups AVPMWI FW6QOL FCC7BC ZYIPZL R3M5GX"}
