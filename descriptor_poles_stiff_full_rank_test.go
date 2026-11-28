@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"cmp"
+	"errors"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -96,6 +97,9 @@ func TestPolesFullRankEKeepsStiffModeOfExplicitModel(t *testing.T) {
 		}
 		if real(largestPole(want)) > 0 {
 			st, err := Step(sys, 5)
+			if errors.Is(err, ErrOverflow) && st == nil {
+				continue
+			}
 			if err != nil {
 				t.Fatalf("%s: Step: %v", c.name, err)
 			}

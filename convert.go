@@ -145,8 +145,9 @@ func (sys *System) c2dRecorded(dt float64, opts C2DOptions, rec *c2dCoords) (*Sy
 	return out, err
 }
 
-// c2dUnguarded is C2D without the check of its result, for Step and Lsim: the
-// non-finite samples of a diverging plant are their response, not a model.
+// c2dUnguarded is C2D without the check of its result, for Step and Lsim:
+// a diverging plant's non-finite samples are reported by their exit check
+// (boundedTimeResponse) as ErrOverflow of the response, not of a model.
 func (sys *System) c2dUnguarded(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err

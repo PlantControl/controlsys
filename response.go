@@ -2727,6 +2727,9 @@ func Damp(sys *System) ([]DampInfo, error) {
 // exact tier's model instead (see TransferFunction), an improper one
 // returns ErrImproperModel and a proper one the float response as before,
 // or ErrDescriptorSingular when the float reduction calls it improper.
+// A response with a sample beyond float64 range (an unstable model over a
+// long horizon, or a kept stiff unstable mode) returns an error wrapping
+// ErrOverflow and no response.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
@@ -2736,6 +2739,7 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 		return nil, fmt.Errorf("Step: descriptor has a polynomial part of degree %d: %w", rg.v.polyDeg, ErrImproperModel)
 	}
 	resp, err := step(sys, tFinal)
+	resp, err = boundedTimeResponse("Step", resp, err)
 	if rg.kind == regimeExact && errors.Is(err, ErrImproperModel) {
 		return nil, fmt.Errorf("Step: float reduction disagrees with the certified proper model: %w", ErrDescriptorSingular)
 	}
@@ -2800,8 +2804,14 @@ func step(sys *System, tFinal float64) (*TimeResponse, error) {
 // for one common delay length within the chain budget, else by the
 // approximate ZOH discretization). Continuous models without internal
 // delays are sampled exactly as C·e^{A·t}·B, shifted by their I/O delays.
-// tFinal and models without inputs or outputs are handled as in Step.
+// tFinal, models without inputs or outputs and a response beyond float64
+// range are handled as in Step.
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
+	resp, err := impulse(sys, tFinal)
+	return boundedTimeResponse("Impulse", resp, err)
+}
+
+func impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {
 		return nil, err
 	}
@@ -2923,6 +2933,16 @@ func (f zeroStateForm) result(op string, resp *TimeResponse) (*TimeResponse, err
 		return nil, fmt.Errorf("%s: %w", op, f.refused)
 	}
 	return resp, fmt.Errorf("%s: pencil split refused, LU fold simulated: %v: %w", op, f.refused, ErrAccuracyUnverified)
+}
+
+// boundedTimeResponse is resp and err of op, or an error wrapping ErrOverflow
+// and no response when a sample of resp is not finite: the simulated
+// response then exceeds float64 range.
+func boundedTimeResponse(op string, resp *TimeResponse, err error) (*TimeResponse, error) {
+	if resp == nil || resp.Y == nil || allFiniteDense(resp.Y) {
+		return resp, err
+	}
+	return nil, fmt.Errorf("%s: response exceeds float64 range: %w", op, ErrOverflow)
 }
 
 // explicitImpulse is the impulse response of the continuous explicit sys
@@ -3153,9 +3173,15 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // that discretization of its parts where Step does on the automatic grid,
 // from x0 mapped to the parts' coordinates.
 //
-// tFinal is handled as in Step. A model without outputs returns
-// ErrDimensionMismatch; one without inputs is valid.
+// tFinal and a response beyond float64 range are handled as in Step. A
+// model without outputs returns ErrDimensionMismatch; one without inputs is
+// valid.
 func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	resp, err := initial(sys, x0, tFinal)
+	return boundedTimeResponse("Initial", resp, err)
+}
+
+func initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
 	if err := requireFiniteSystem("Initial", sys); err != nil {
 		return nil, err
 	}
@@ -3499,9 +3525,11 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
 // returns ErrDimensionMismatch. As in Step, a proper singular-E descriptor
 // whose reduction TransferFunction does not verify returns its response
-// with an error wrapping ErrAccuracyUnverified.
+// with an error wrapping ErrAccuracyUnverified, and one beyond float64
+// range ErrOverflow and no response.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	resp, err := lsim(sys, u, t, x0)
+	resp, err = boundedTimeResponse("Lsim", resp, err)
 	if err == nil && sys.reductionUnverified() {
 		err = fmt.Errorf("Lsim: descriptor reduction: %w", ErrAccuracyUnverified)
 	}

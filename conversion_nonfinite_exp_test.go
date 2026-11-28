@@ -170,7 +170,7 @@ func TestD2CFOHTinyDtNeighborValues(t *testing.T) {
 	}
 }
 
-func TestResponsesNonFiniteExpNormReturnNaN(t *testing.T) {
+func TestResponsesNonFiniteExpNormReturnOverflow(t *testing.T) {
 	sys := nonfiniteExpPlant(t, nonfiniteExpHuge, 0)
 	x0 := mat.NewVecDense(2, []float64{1, 1})
 	for _, tc := range []struct {
@@ -187,12 +187,8 @@ func TestResponsesNonFiniteExpNormReturnNaN(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			returnsWithinDeadline(t, tc.name, func() {
 				resp, err := tc.call()
-				if err != nil {
-					t.Errorf("err = %v, want nil", err)
-					return
-				}
-				if requireFiniteDense("resp", "Y", resp.Y) == nil {
-					t.Errorf("all samples finite, want non-finite past t=0")
+				if !errors.Is(err, ErrOverflow) || resp != nil {
+					t.Errorf("resp %v, err = %v; want no response and ErrOverflow", resp, err)
 				}
 			})
 		})
