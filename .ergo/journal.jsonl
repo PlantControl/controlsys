@@ -287,3 +287,4 @@
 {"version":1,"task_id":"BWVNRE","kind":"claim","at":"2026-11-27T17:05:25.680274Z","agent":"coordinator@bwvnre"}
 {"version":1,"task_id":"LJKKDY","kind":"created","at":"2026-11-27T17:41:51.862675Z"}
 {"version":1,"task_id":"HRPG4E","kind":"created","at":"2026-11-27T22:50:54.053113Z"}
+{"version":1,"task_id":"5ZCX6J","kind":"done","at":"2026-11-28T01:19:32.001483Z","agent":"coordinator@fix-5ZCX6J","text":"merged #570: Step/Lsim zero-state band pencil parts, refused split fold+unverified; x0≠0 old route (7PXISH); perf waiver HRPG4E"}
