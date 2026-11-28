@@ -37,8 +37,8 @@ import (
 // invalid options return ErrInvalidConversionOptions; a result with an Inf or
 // NaN entry in any matrix returns ErrOverflow.
 //
-// ZOH, FOH and Tustin of a continuous descriptor model (without internal
-// delays) are certified at DC: a nil error means that the DC gain of the
+// ZOH, FOH and Tustin of a continuous descriptor model are certified at
+// DC: a nil error means that the DC gain of the
 // result, exact for its stored entries, lies entry by entry within the
 // descriptor bar u·(‖C_i‖‖M‖‖A‖‖M‖‖B_j‖ + ‖C_i‖‖M‖‖B_j‖ + |D_ij|),
 // M = A⁻¹, u = 4(n+5)ε (Frobenius norms of the delay-free sys, row i of C,
@@ -47,11 +47,22 @@ import (
 // S = |Dd| + Σ|Cd||X| + |Cd(I − Ad)⁻¹|·(|Ad||X| + |Bd|), X = (I − Ad)⁻¹Bd,
 // counted only where ε·S_ij ≤ √ε·max(|g0_ij|, Σ|C_i||A⁻¹B_j| + |D_ij|).
 // With I/O delays the check is on the model returned, its internal delays
-// (unity at DC) closed. An entry where g0 is infinite (a pole at DC) is not
+// (unity at DC) closed. With internal delays, g0 is the DC gain of sys
+// with its delays closed (unity at DC), the pencil [A B2; C2 D22 − I] with
+// input [B; D21] and output [C D12], certified by its own solve or else
+// its DCGain as a delay-free descriptor, and the bar keeps each delay
+// channel k as its own block: u·(ĉ·m̂·â·m̂·b̂ + ĉ·m̂·b̂ + |D_ij|),
+// u = 4(n+N+5)ε, with ĉ = [‖C_i‖, |D12_ik|], b̂ = [‖B_j‖; |D21_kj|],
+// â = [‖A‖, ‖B2_·k‖; ‖C2_k·‖, |D22_kl|] and m̂ the same block norms of the
+// pencil's inverse, so that rescaling a delay channel or the state
+// equation, which leaves the model the same, leaves the bar the same; T0
+// is the pencil's Σ|C_i||X_j| + |D_ij|. Where C2, D21 and D22 are zero
+// the delayed signals vanish, and g0 and the bar are those of the
+// delay-free core. An entry where g0 is infinite (a pole at DC) is not
 // checked; where other entries are, there is no bar and the model is
 // unverified. Where the model
-// of a dense E⁻¹A fails that check, ZOH and FOH discretize its real Schur
-// form instead, whose result has new state coordinates and no state names.
+// of a dense E⁻¹A without internal delays fails that check, ZOH and FOH
+// discretize its real Schur form instead, whose result has new state coordinates and no state names.
 // The model is returned with an error wrapping ErrAccuracyUnverified where
 // its DC gain is not within the bar, DCGain fails or is unverified, or the
 // split was refused as above. Neither the response away from DC nor the

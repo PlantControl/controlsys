@@ -31,7 +31,8 @@ import (
 // its w0 columns are those of the split model. A model returned with an error
 // wrapping ErrAccuracyUnverified comes with its G. The error is C2D's
 // verdict on the DC gain of the model; G itself is not checked. Other descriptors take
-// the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
+// the model and G of E⁻¹A; with internal delays, by ZOH, FOH or Tustin,
+// the error is then C2D's verdict on the DC gain of that model too. An Inf or NaN entry in the result or in G
 // returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("C2DMap", sys); err != nil {
@@ -58,6 +59,10 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if err != nil && !errors.Is(err, errMatchedUnverified) {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
+	var gerr error
+	if sys.LFT != nil && holdGated(sys, opts.Method) {
+		gerr = newHoldGate(sys).check(out)
+	}
 	if !conversionCanMapState(std, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(std, dt)) {
 		return nil, nil, fmt.Errorf("C2DMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)
 	}
@@ -67,6 +72,9 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	}
 	if err := finiteDense("C2DMap", "G", G, ErrOverflow); err != nil {
 		return nil, nil, err
+	}
+	if gerr != nil {
+		return out, G, fmt.Errorf("C2DMap: %v: %w", gerr, ErrAccuracyUnverified)
 	}
 	return out, G, nil
 }

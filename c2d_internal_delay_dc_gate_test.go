@@ -1,0 +1,466 @@
+package controlsys
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"runtime"
+	"strings"
+	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
+
+// internalDelayGateSystem is a MIMO continuous descriptor (n = 3, m = 2,
+// p = 2) with N = 2 internal delays and the LFT blocks given; nil blocks
+// are zero.
+func internalDelayGateSystem(t testing.TB, c2, d21, d22 *mat.Dense) *System {
+	t.Helper()
+	sys, err := NewDescriptor(
+		mat.NewDense(3, 3, []float64{-2, 0.7, 0.1, 0.3, -1.5, 0.4, -0.2, 0.5, -3}),
+		mat.NewDense(3, 2, []float64{1, 0.2, -0.4, 1, 0.3, 0.6}),
+		mat.NewDense(2, 3, []float64{1, -0.5, 0.2, 0.1, 0.8, -1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, -0.2}),
+		mat.NewDense(3, 3, []float64{1, 0.3, 0, -0.1, 0.9, 0.2, 0.05, 0, 1.2}),
+		0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 == nil {
+		c2 = mat.NewDense(2, 3, nil)
+	}
+	if d21 == nil {
+		d21 = mat.NewDense(2, 2, nil)
+	}
+	if d22 == nil {
+		d22 = mat.NewDense(2, 2, nil)
+	}
+	if err := sys.SetInternalDelay([]float64{0.05, 0.12}, mat.NewDense(3, 2, []float64{0.5, -0.2, 0.1, 0.7, -0.3, 0.4}), c2, mat.NewDense(2, 2, []float64{0.3, 0, -0.1, 0.2}), d21, d22); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// lftClosedAtDC keeps the delay-free core where C2, D21 and D22 are zero
+// (w ≡ 0) and otherwise closes w = z at DC into an (n+N)-state pencil whose
+// DC gain is that of the LFT: on a MIMO model with two delays and each of
+// C2, D21, D22 nonzero alone or together, it matches DCGain.
+func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	for _, tc := range []struct {
+		name          string
+		c2, d21, d22  *mat.Dense
+		wantDelayFree bool
+	}{
+		{"w-free", nil, nil, nil, true},
+		{"C2", c2, nil, nil, false},
+		{"D21", nil, d21, nil, false},
+		{"D22", nil, nil, d22, false},
+		{"all", c2, d21, d22, false},
+	} {
+		sys := internalDelayGateSystem(t, tc.c2, tc.d21, tc.d22)
+		ref, barRef, _ := lftClosedAtDC(sys)
+		n, _, _ := ref.Dims()
+		if wantN := map[bool]int{true: 3, false: 5}[tc.wantDelayFree]; ref.LFT != nil || n != wantN {
+			t.Errorf("%s: closed model has %d states, LFT %v; want %d", tc.name, n, ref.LFT != nil, wantN)
+			continue
+		}
+		want, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("%s: DCGain: %v", tc.name, err)
+		}
+		x0, e := 0.0, (*mat.Dense)(nil)
+		if ref.IsDiscrete() {
+			x0, e = 1, ref.E
+		}
+		if nb, _, _ := barRef.Dims(); nb != n || barRef.IsDiscrete() {
+			t.Errorf("%s: bar model has %d states, discrete %v", tc.name, nb, barRef.IsDiscrete())
+		}
+		r := solveDCRegular(e, ref.A, ref.B, ref.C, ref.D, x0, false)
+		if r.solveErr != nil || !r.certified {
+			t.Fatalf("%s: closed DC solve not certified: %v", tc.name, r.solveErr)
+		}
+		for i := range 2 {
+			for j := range 2 {
+				if g, w := r.g.At(i, j), want.At(i, j); math.Abs(g-w) > 1e-13*math.Max(1, math.Abs(w)) {
+					t.Errorf("%s: closed DC (%d,%d) = %v, DCGain %v", tc.name, i, j, g, w)
+				}
+			}
+		}
+		gate := newHoldGate(sys)
+		if gate.err != nil || !gate.gated || gate.bar.m != 2 || len(gate.bar.terms) != 4 {
+			t.Errorf("%s: gate err %v gated %v", tc.name, gate.err, gate.gated)
+			continue
+		}
+		wantBar := newDCBar(barRef)
+		if !tc.wantDelayFree {
+			wantBar = channelBar(ref, barRef, 2, wantBar, nil, nil)
+		}
+		for k := range 4 {
+			if b, w := holdGateBar(gate, k), holdGateBar(&holdGate{bar: wantBar}, k); math.Abs(b-w) > 1e-12*w {
+				t.Errorf("%s: bar of entry %d = %v, want the continuous closed pencil's %v", tc.name, k, b, w)
+			}
+		}
+	}
+}
+
+// C2D of an internal-delay descriptor by ZOH, FOH or Tustin is gated on
+// its DC gain (PT5WKA): a nil result's DC, closed at z = 1, is within the
+// gate's bar of DCGain, on MIMO models with two delays, with I/O delays
+// beside them, and C2DMap's verdict is C2D's.
+func TestC2DInternalDelayDescriptorDCGated(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	io := internalDelayGateSystem(t, c2, d21, d22)
+	io.InputDelay = []float64{0.02, 0}
+	io.OutputDelay = []float64{0, 0.03}
+	for name, sys := range map[string]*System{
+		"w-free": internalDelayGateSystem(t, nil, nil, nil),
+		"all":    internalDelayGateSystem(t, c2, d21, d22),
+		"io":     io,
+	} {
+		want, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("%s: DCGain: %v", name, err)
+		}
+		for _, dt := range []float64{1e-3, 0.05} {
+			for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+				key := fmt.Sprintf("%s@%g/%s", name, dt, meth)
+				d, err := sys.C2D(dt, C2DOptions{Method: meth})
+				if err != nil {
+					t.Errorf("%s: C2D: %v", key, err)
+					continue
+				}
+				h, _, _, ok := holdDC(delaysClosedAtDC(ioDelayFree(d)))
+				if !ok {
+					t.Errorf("%s: DC of the result not resolved", key)
+					continue
+				}
+				for k := range 4 {
+					if g, w := h.At(k/2, k%2), want.At(k/2, k%2); math.Abs(g-w) > 1e-12*math.Max(1, math.Abs(w)) {
+						t.Errorf("%s: DC (%d,%d) = %v, DCGain %v", key, k/2, k%2, g, w)
+					}
+				}
+			}
+		}
+	}
+}
+
+// A loop with I − D22 singular at DC (D22 = 1, w otherwise unexcited) has
+// no DC solve of its closed pencil: C2D returns no nil (PT5WKA).
+func TestC2DInternalDelayDescriptorSingularLoop(t *testing.T) {
+	sys, err := NewDescriptor(mat.NewDense(2, 2, []float64{-1, 0.2, 0, -2}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0.5}), mat.NewDense(1, 1, nil), mat.NewDense(2, 2, []float64{1, 0.1, 0, 1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{0.1}, mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, []float64{0.3}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1})); err != nil {
+		t.Fatal(err)
+	}
+	for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		d, err := sys.C2D(0.01, C2DOptions{Method: meth})
+		if err == nil {
+			t.Errorf("%s: C2D nil on a loop singular at DC", meth)
+		}
+		if d != nil && !errors.Is(err, ErrAccuracyUnverified) {
+			t.Errorf("%s: model with %v", meth, err)
+		}
+	}
+}
+
+// fallbackGateSystem is the arbiter's constructed internal-delay
+// descriptor whose closed DC pencil is near singular (d = 2⁻⁵²): the
+// certified solve does not certify and the gate takes DCGain of the pencil
+// (PT5WKA ruling F1).
+func fallbackGateSystem(t *testing.T, c2 []float64) *System {
+	t.Helper()
+	sys, err := NewDescriptor(mat.NewDense(2, 2, []float64{-1, 1, 1, -(1 + 0x1p-52)}), mat.NewDense(2, 1, []float64{1, 0.5}),
+		mat.NewDense(1, 2, []float64{1, 2}), mat.NewDense(1, 1, nil), mat.NewDense(2, 2, []float64{1, 0, 0, 2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{0.05}, mat.NewDense(2, 1, []float64{0.3, -0.7}), mat.NewDense(1, 2, c2),
+		mat.NewDense(1, 1, []float64{0.3}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// Where the closed DC pencil's solve does not certify, the gate's g0 is
+// DCGain of the pencil, not the uncertified evaluation of the LFT (off by
+// 3.2e-4 relative here): with C2 = [2⁻⁵⁰, 0] it is the 320-bit value
+// within ε·T0, and C2D's ZOH result is nil; with C2 = 0 (the delay-free
+// core) DCGain reports a pole within rounding of DC and C2D is unverified.
+func TestC2DInternalDelayDescriptorGateFallback(t *testing.T) {
+	const g320, t0 = 7794691662756627.0, 7.79e15
+	sys := fallbackGateSystem(t, []float64{0x1p-50, 0})
+	gate := newHoldGate(sys)
+	if gate.err != nil || gate.g0 == nil {
+		t.Fatalf("C2 ≠ 0: gate %v", gate.err)
+	}
+	if g := gate.g0.At(0, 0); math.Abs(g-g320) > 0x1p-52*t0+1 {
+		t.Errorf("C2 ≠ 0: gate g0 = %.17g, 320-bit %.17g", g, g320)
+	}
+	if _, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodZOH}); err != nil {
+		t.Errorf("C2 ≠ 0: C2D ZOH: %v", err)
+	}
+	core := fallbackGateSystem(t, []float64{0, 0})
+	if d, err := core.C2D(0.01, C2DOptions{Method: C2DMethodZOH}); d == nil || !errors.Is(err, ErrAccuracyUnverified) {
+		t.Errorf("C2 = 0: C2D ZOH %v, want the model with ErrAccuracyUnverified", err)
+	}
+}
+
+// The closed DC pencil takes I − D22 without rounding (PT5WKA ruling F2):
+// with c = 1 − 2⁻ᵏ and D22 = 2⁻⁵⁴, 1 − D22 rounds to 1 in float64, which
+// moves g0 = c/(1 − D22 − c) by 2⁻⁵⁴⁺ᵏ relative: a third at k = 52, where
+// the solve does not certify, and 6e-11 at k = 20, where it does.
+func TestC2DInternalDelayDescriptorGateExactLoop(t *testing.T) {
+	for _, k := range []int{52, 20} {
+		sys, err := NewDescriptor(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tail := math.Ldexp(1, -k)
+		c := 1 - tail
+		if err := sys.SetInternalDelay([]float64{0.05}, mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{c}),
+			mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{0x1p-54})); err != nil {
+			t.Fatal(err)
+		}
+		want := c / (tail - 0x1p-54)
+		gate := newHoldGate(sys)
+		if gate.g0 == nil || gate.err != nil {
+			t.Fatalf("k=%d: gate: %v", k, gate.err)
+		}
+		if g := gate.g0.At(0, 0); math.Abs(g-want) > 1e-13*want {
+			t.Errorf("k=%d: gate g0 = %.17g, want %.17g", k, g, want)
+		}
+	}
+}
+
+// C2D of the frozen internal-delay census rows (PT5WKA: strad1m-lft/212 on
+// the band fold, strad2-lft/256 on the stiff parts, each with C2 = 0 and
+// with a random C2; sc+6/148, nil at 59× off DC before the gate; rows
+// whose delay channel is rescaled exactly, nil like the unscaled row once
+// the result's delay states are balanced) keeps its model and returns ErrAccuracyUnverified
+// where the DC gain, closed at z = 1, is over the U-1 bar of the closed DC
+// pencil (the core's for C2 = 0), and nil only within it; C2DMap returns
+// C2D's model bitwise with C2D's class and its G.
+func TestC2DInternalDelayDescriptorDCGateRows(t *testing.T) {
+	for _, r := range internalDelayDCGateRows {
+		sys, err := NewDescriptor(r.A, r.B, r.C, r.D, r.E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.SetInternalDelay(r.tau, r.B2, r.C2, r.D12, r.D21, r.D22); err != nil {
+			t.Fatal(err)
+		}
+		for key, want := range r.classes {
+			var dt float64
+			var meth string
+			if _, err := fmt.Sscanf(strings.Replace(key, "/", " ", 1), "%g %s", &dt, &meth); err != nil {
+				t.Fatal(err)
+			}
+			opts := C2DOptions{Method: C2DMethod(meth)}
+			name := r.name + "@" + key
+			d, err := sys.C2D(dt, opts)
+			if d == nil || (err != nil && !errors.Is(err, ErrAccuracyUnverified)) {
+				t.Errorf("%s: C2D model %v, err %v", name, d != nil, err)
+				continue
+			}
+			got := byte('N')
+			if err != nil {
+				got = 'U'
+			}
+			if want == 'A' {
+				want = map[bool]byte{true: 'N', false: '?'}[runtime.GOARCH == "arm64"]
+			}
+			if want != '?' && got != want {
+				t.Errorf("%s: C2D class %c (%v), want %c", name, got, err, want)
+			}
+			if got == 'N' {
+				n, _, _ := d.Dims()
+				h, _, allow, ok := holdDC(balanceDelayStates(delaysClosedAtDC(d), n))
+				if !ok {
+					t.Errorf("%s: DC of the result not resolved", name)
+				} else {
+					a := 0.0
+					if allow != nil && allow[0] <= math.Sqrt(0x1p-52)*math.Max(math.Abs(r.g0), r.t0) {
+						a = allow[0]
+					}
+					if diff := math.Abs(h.At(0, 0) - r.g0); diff > r.bar0+a {
+						t.Errorf("%s: nil with DC %v off the 320-bit %v by %.3g bars", name, h.At(0, 0), r.g0, diff/(r.bar0+a))
+					}
+				}
+			}
+			dm, g, merr := sys.C2DMap(dt, opts)
+			if dm == nil || g == nil {
+				t.Errorf("%s: C2DMap: %v", name, merr)
+				continue
+			}
+			if errClass(dm, merr) != errClass(d, err) || !bitsEqualSystem(dm, d) || !bitsEqualLFT(dm, d) {
+				t.Errorf("%s: C2DMap %v, C2D %v, same model %v", name, merr, err, bitsEqualSystem(dm, d) && bitsEqualLFT(dm, d))
+			}
+		}
+	}
+}
+
+func holdGateBar(g *holdGate, k int) float64 {
+	if g.bar.lu == nil {
+		return g.bar.bar[k]
+	}
+	return g.bar.fullBar(k)
+}
+
+// The gate's bar for internal delays is the same on exactly equivalent
+// models (PT5WKA re-ruling): a delay channel rescaled, w_k → α·w_k (B2 and
+// D12 column k by α, C2 and D21 row k by 1/α, D22 by the similarity), or
+// the state equation (E, A, B, B2) by τ, α = τ = 2²⁰, on a MIMO model with
+// two delays. One norm of the closed pencil would move by up to 1e23.
+func TestC2DInternalDelayDescriptorGateBarInvariant(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	base := internalDelayGateSystem(t, c2, d21, d22)
+	ch := base.Copy()
+	L := ch.LFT
+	const a = 0x1p20
+	for i := range 3 {
+		L.B2.Set(i, 0, L.B2.At(i, 0)*a)
+		L.C2.Set(0, i, L.C2.At(0, i)/a)
+	}
+	for i := range 2 {
+		L.D12.Set(i, 0, L.D12.At(i, 0)*a)
+		L.D21.Set(0, i, L.D21.At(0, i)/a)
+	}
+	L.D22.Set(0, 1, L.D22.At(0, 1)/a)
+	L.D22.Set(1, 0, L.D22.At(1, 0)*a)
+	st := base.Copy()
+	for _, m := range []*mat.Dense{st.E, st.A, st.B, st.LFT.B2} {
+		m.Scale(a, m)
+	}
+	ref := newHoldGate(base)
+	if ref.err != nil {
+		t.Fatal(ref.err)
+	}
+	for name, sys := range map[string]*System{"channel": ch, "state": st} {
+		g := newHoldGate(sys)
+		if g.err != nil {
+			t.Fatalf("%s: %v", name, g.err)
+		}
+		for k := range 4 {
+			if b, w := holdGateBar(g, k), holdGateBar(ref, k); math.Abs(b-w) > 1e-10*w {
+				t.Errorf("%s: bar of entry %d = %v, unscaled %v", name, k, b, w)
+			}
+		}
+	}
+}
+
+// The gate's per-channel bar on the MIMO model with C2, D21 and D22 nonzero
+// is the 320-bit value of the ruled formula (u = 4(n+N+5)ε, â with the
+// stored |D22_kl|), frozen from census/pt5wka's oracle (arbBWBars, bwx):
+// |D22 − I| in â would give 4 to 5 % more, u of the core alone less.
+func TestC2DInternalDelayDescriptorGateBarValue(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	g := newHoldGate(internalDelayGateSystem(t, c2, d21, d22))
+	if g.err != nil {
+		t.Fatal(g.err)
+	}
+	for k, want := range []float64{1.1945364111544252e-13, 1.5492785077175252e-13, 1.3523895544075391e-13, 1.7921689031205056e-13} {
+		if b := holdGateBar(g, k); math.Abs(b-want) > 1e-12*want {
+			t.Errorf("bar of entry %d = %.17g, want %.17g", k, b, want)
+		}
+	}
+}
+
+// A state-space model with internal delays and no E is not gated: C2D's
+// result and class are those of the ungated route.
+func TestC2DInternalDelayExplicitNotGated(t *testing.T) {
+	sys := internalDelayGateSystem(t, mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5}),
+		mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4}), mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3}))
+	sys.E = nil
+	for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		if holdGated(sys, meth) {
+			t.Errorf("%s: explicit internal-delay model is gated", meth)
+		}
+		want, werr := c2dExit(sys.c2dUnchecked(0.01, C2DOptions{Method: meth}, true, nil))
+		got, err := sys.C2D(0.01, C2DOptions{Method: meth})
+		if (err == nil) != (werr == nil) || !bitsEqualSystem(got, want) || !bitsEqualLFT(got, want) {
+			t.Errorf("%s: C2D (%v) differs from the ungated route (%v)", meth, err, werr)
+		}
+	}
+}
+
+// C2D of the gate's MIMO model under each census family of PT5WKA: D21
+// alone, D22 alone, D22 = 0.3, 1 − 2⁻⁴⁰ and 1 with C2 ≠ 0, C2 vanishing
+// (×1e-300 and ×ε), and a closed pencil exactly singular with no zero pivot
+// (column n equal to column 0): a nil result's DC, closed at z = 1, matches
+// DCGain of the closed DC pencil, C2DMap's class is C2D's where it has an
+// exact map (none at dt 0.05, not a whole number of samples), and the
+// singular pencil returns no nil.
+func TestC2DInternalDelayDescriptorDCGateFamilies(t *testing.T) {
+	c2 := func(f float64) *mat.Dense {
+		m := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+		m.Scale(f, m)
+		return m
+	}
+	d22 := func(v ...float64) *mat.Dense { return mat.NewDense(2, 2, v) }
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	sing := internalDelayGateSystem(t, mat.NewDense(2, 3, []float64{0.5, -0.1, 0.2, 0.25, 0.3, -0.5}), nil,
+		d22(1.5, 0, 0.25, 0.3))
+	for i := range 3 {
+		sing.LFT.B2.Set(i, 0, sing.A.At(i, 0))
+	}
+	for name, sys := range map[string]*System{
+		"d21":      internalDelayGateSystem(t, nil, d21, nil),
+		"d22o":     internalDelayGateSystem(t, nil, nil, d22(0.3, 0, 0.1, 0.2)),
+		"d22w":     internalDelayGateSystem(t, c2(1), nil, d22(0.3, 0, 0, 0.3)),
+		"d22n":     internalDelayGateSystem(t, c2(1), nil, d22(1-0x1p-40, 0, 0, 0.3)),
+		"d22s":     internalDelayGateSystem(t, c2(1), nil, d22(1, 0, 0, 0.3)),
+		"v300":     internalDelayGateSystem(t, c2(1e-300), d21, nil),
+		"veps":     internalDelayGateSystem(t, c2(0x1p-52), d21, nil),
+		"singular": sing,
+	} {
+		ref, _, _ := lftClosedAtDC(sys)
+		want, werr := ref.DCGain()
+		nils := 0
+		for _, dt := range []float64{1e-3, 0.05} {
+			for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+				key := fmt.Sprintf("%s@%g/%s", name, dt, meth)
+				d, err := sys.C2D(dt, C2DOptions{Method: meth})
+				if d == nil || (err != nil && !errors.Is(err, ErrAccuracyUnverified)) {
+					t.Errorf("%s: C2D model %v, %v", key, d != nil, err)
+					continue
+				}
+				if dm, g, merr := sys.C2DMap(dt, C2DOptions{Method: meth}); !(dm == nil && errors.Is(merr, ErrOptionUnsupported)) && (dm == nil || g == nil || errClass(dm, merr) != errClass(d, err) || !bitsEqualSystem(dm, d)) {
+					t.Errorf("%s: C2DMap %v, C2D %v", key, merr, err)
+				}
+				if err != nil {
+					continue
+				}
+				nils++
+				if name == "singular" || werr != nil {
+					t.Errorf("%s: nil on a model whose closed DC pencil has no certified gain (%v)", key, werr)
+					continue
+				}
+				n, _, _ := d.Dims()
+				h, _, _, ok := holdDC(balanceDelayStates(delaysClosedAtDC(d), n))
+				if !ok {
+					t.Errorf("%s: DC of the result not resolved", key)
+					continue
+				}
+				for k := range 4 {
+					if g, w := h.At(k/2, k%2), want.At(k/2, k%2); math.Abs(g-w) > 1e-9*math.Max(1, math.Abs(w)) {
+						t.Errorf("%s: DC (%d,%d) = %v, closed pencil %v", key, k/2, k%2, g, w)
+					}
+				}
+			}
+		}
+		if name != "singular" && nils == 0 {
+			t.Errorf("%s: no nil result", name)
+		}
+	}
+}
