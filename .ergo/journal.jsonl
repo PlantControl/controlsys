@@ -293,3 +293,5 @@
 {"version":1,"task_id":"FCC7BC","kind":"created","at":"2026-11-28T04:36:35.357583Z"}
 {"version":1,"task_id":"ZYIPZL","kind":"created","at":"2026-11-28T05:46:53.797742Z"}
 {"version":1,"task_id":"R3M5GX","kind":"created","at":"2026-11-28T06:05:51.018107Z"}
+{"version":1,"task_id":"ZC4XHI","kind":"done","at":"2026-11-28T06:34:58.472719Z","agent":"coordinator@zc4xhi","text":"merged #572: Lsim reduction unverified as Step; perf waiver Y3ISLH"}
+{"version":1,"task_id":"GM22S5","kind":"done","at":"2026-11-28T06:34:58.4976Z","text":"closed by #572: doc + frozen tests (user decision A); NaN rows 5EKNHC"}
