@@ -818,7 +818,7 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod, limit float64, rec *
 		if method == C2DMethodImpulse {
 			return nil, false, nil
 		}
-		return stiffLFTExplicitWithin(sys, limit)
+		return stiffLFTExplicitWithin(sys, limit, rec)
 	}
 	sp, ok := foldInaccuratePartsRiders(ioDelayFreeCore(sys), rec.riders(sys))
 	if !ok {

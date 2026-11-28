@@ -112,6 +112,7 @@ func (p c2dPlan) run() (*System, error) {
 		}
 	}
 	if p.workSys.HasInternalDelay() {
+		p.rec.setCont(p.sys, nil, p.foldScale, p.reduced)
 		return p.discretizeInternalDelay()
 	}
 	disc, src, z, err := p.discretizeMethod()
@@ -133,7 +134,7 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 	if (p.method == C2DMethodZOH || p.method == C2DMethodFOH) && conversionHoldFeedbackNeedsAbsorption(p.workSys, p.contInputDelay, p.contOutputDelay, p.dt) {
 		return discretizeHoldFeedback(p.workSys, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
 	}
-	disc, err := discretizeWithInternalDelay(p.workSys, p.dt, p.opts)
+	disc, err := discretizeInternalModelRec(p.workSys, p.dt, p.opts, p.rec)
 	if err != nil {
 		return nil, err
 	}

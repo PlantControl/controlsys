@@ -35,7 +35,7 @@ func bitsEqualSystem(a, b *System) bool {
 		bitsEqualDense(a.Delay, b.Delay) && slices.Equal(a.StateName, b.StateName)
 }
 
-func c2dMapRowSystem(t *testing.T, name string) *System {
+func c2dMapRowSystem(t testing.TB, name string) *System {
 	t.Helper()
 	for _, rows := range [][]descriptorDCGateRow{descriptorDCGateRows, c2dMapRows} {
 		for _, r := range rows {

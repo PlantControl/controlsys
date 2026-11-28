@@ -24,7 +24,11 @@ import (
 // Schur form, or the generalized Schur parts of the pencil), and G maps the
 // descriptor state into them: on the parts, G = [W 0] for ZOH and impulse,
 // W the map of x0 into the parts' states, and the parts' own Tustin or FOH
-// map composed with diag(W, I) otherwise. A model returned with an error
+// map composed with diag(W, I) otherwise. So does a full-rank continuous
+// descriptor with internal delays, by ZOH, FOH or Tustin, whose E has an
+// LU condition estimate of 1e6 or more (C2D's stiff LFT split): there G
+// maps the descriptor state into the real Schur forms of the parts, and
+// its w0 columns are those of the split model. A model returned with an error
 // wrapping ErrAccuracyUnverified comes with its G. The error is C2D's
 // verdict on the DC gain of the model; G itself is not checked. Other descriptors take
 // the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
@@ -68,20 +72,25 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 }
 
 // c2dMapRouted reports a C2DMap that follows C2D's route (c2dCoords): a
-// continuous descriptor without internal delays by ZOH, FOH, Tustin or
-// impulse whose E is not rank deficient by the MATLAB rule.
+// continuous descriptor whose E is not rank deficient by the MATLAB rule,
+// without internal delays by ZOH, FOH, Tustin or impulse, or with them by
+// ZOH, FOH or Tustin where C2D tries the stiff LFT split (LU condition
+// estimate of E foldAccurateECond or more).
 func c2dMapRouted(sys *System, method C2DMethod) bool {
 	switch method {
 	case C2DMethodZOH, C2DMethodFOH, C2DMethodTustin, C2DMethodImpulse:
 	default:
 		return false
 	}
-	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.LFT != nil {
+	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.LFT != nil && method == C2DMethodImpulse {
 		return false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	return !eRankDeficient(sys.E, &lu)
+	if eRankDeficient(sys.E, &lu) {
+		return false
+	}
+	return sys.LFT == nil || lu.Cond() >= foldAccurateECond
 }
 
 // c2dMapRouted is C2DMap of a c2dMapRouted sys: C2D's result and the map
@@ -129,6 +138,7 @@ type c2dCoords struct {
 	t, z      *mat.Dense
 	foldScale int
 	reduced   bool
+	gamma1    *mat.Dense
 }
 
 // riders returns [E A] of the descriptor sys, the riders whose transforms
@@ -256,6 +266,9 @@ func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64
 		}
 		return G, nil
 	}
+	if method == C2DMethodFOH && c.t != nil && c.cont.HasInternalDelay() {
+		return c.lftFOHMap(nt)
+	}
 	gc, err := conversionStateMap(c.cont, out, method, prewarp, false)
 	if err != nil {
 		return nil, err
@@ -280,6 +293,26 @@ func (c *c2dCoords) stateMap(sys, out *System, method C2DMethod, prewarp float64
 	}
 	if cols > nc {
 		G.Slice(0, nt, n, n+cols-nc).(*mat.Dense).Copy(gc.Slice(0, nt, nc, cols))
+	}
+	return G, nil
+}
+
+// lftFOHMap is the FOH G of the stiff LFT route: [T −Γ1], Γ1 the hold of
+// [B B2] that C2D's discretization of the split model took (gamma1).
+func (c *c2dCoords) lftFOHMap(nt int) (*mat.Dense, error) {
+	nc, m, _ := c.cont.Dims()
+	_, n := c.t.Dims()
+	nw := c.cont.internalDelayCount()
+	if nt != nc {
+		return nil, fmt.Errorf("foh changes the state dimension: %w", ErrOptionUnsupported)
+	}
+	G := newDense(nt, n+m+nw)
+	G.Slice(0, nt, 0, n).(*mat.Dense).Copy(c.t)
+	if nt > 0 && m+nw > 0 {
+		if c.gamma1 == nil {
+			return nil, fmt.Errorf("foh hold of the split model not recorded: %w", ErrOptionUnsupported)
+		}
+		G.Slice(0, nt, n, n+m+nw).(*mat.Dense).Scale(-1, c.gamma1)
 	}
 	return G, nil
 }
