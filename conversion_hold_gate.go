@@ -56,22 +56,25 @@ type holdGate struct {
 }
 
 func newHoldGate(sys *System) *holdGate {
-	free := ioDelayFree(sys)
-	ref := lftClosedAtDC(free)
+	ref, barRef := lftClosedAtDC(ioDelayFree(sys))
 	n, m, p := ref.Dims()
 	if m == 0 || p == 0 {
 		return &holdGate{}
 	}
+	x0, e := 0.0, (*mat.Dense)(nil)
+	if ref.IsDiscrete() {
+		x0, e = 1, ref.E
+	}
 	var solved []dd
 	var g0 *mat.Dense
 	if n > 0 {
-		if r := solveDCRegular(nil, ref.A, ref.B, ref.C, ref.D, 0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
+		if r := solveDCRegular(e, ref.A, ref.B, ref.C, ref.D, x0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
 			g0, solved = r.g, r.x
 		}
 	}
 	if g0 == nil {
 		var err error
-		if g0, err = free.DCGain(); err != nil {
+		if g0, err = ref.DCGain(); err != nil {
 			return &holdGate{err: holdUnverified("DCGain of the model: %v", err)}
 		}
 	}
@@ -90,7 +93,7 @@ func newHoldGate(sys *System) *holdGate {
 	if gate.err != nil {
 		return gate
 	}
-	gate.bar = newDCBarSolved(ref, solved)
+	gate.bar = newDCBarSolved(barRef, solved)
 	if gate.bar.reason != "" {
 		gate.err = holdUnverified("%s", gate.bar.reason)
 	}
@@ -134,40 +137,46 @@ func (g *holdGate) check(out *System) error {
 	return nil
 }
 
-// lftClosedAtDC returns the continuous sys with its internal delays, the
-// identity at s = 0, closed without rounding but for D22 − I: the delayed
-// signals w become algebraic states of 0 = A·x + B2·w + B·u,
-// 0 = C2·x + (D22 − I)·w + D21·u, output C·x + D12·w + D·u, E = blkdiag(E, 0),
-// whose DC gain is that of sys. Where C2, D21 and D22 are zero, w ≡ 0 and
-// sys is its delay-free core.
-func lftClosedAtDC(sys *System) *System {
+// lftClosedAtDC returns the DC pencil of the delay-free sys or of sys with
+// its internal delays closed, the identity at s = 0: the delayed signals w
+// become algebraic states of 0 = A·x + B2·w + B·u,
+// 0 = C2·x + (D22 − I)·w + D21·u, output C·x + D12·w + D·u. pencil holds it
+// as the discrete descriptor E′ − A′ at z = 1, A′ = [A B2; C2 D22] and
+// E′ = blkdiag(0, I), whose entries are stored ones, so its DC solve takes
+// I − D22 without rounding; bar holds it as the continuous descriptor
+// A′ − E′, E = blkdiag(E, 0), for its descriptor bar (dcBar). Where C2,
+// D21 and D22 are zero, w ≡ 0 and both are the delay-free core.
+func lftClosedAtDC(sys *System) (pencil, bar *System) {
 	L := sys.LFT
 	if L == nil {
-		return sys
+		return sys, sys
 	}
 	if allZeroDense(L.C2) && allZeroDense(L.D21) && allZeroDense(L.D22) {
 		core := *sys
 		core.LFT = nil
-		return &core
+		return &core, &core
 	}
 	n, m, p := sys.Dims()
 	N := sys.internalDelayCount()
-	A, B, C, E := newDense(n+N, n+N), newDense(n+N, m), newDense(p, n+N), newDense(n+N, n+N)
+	A, B, C := newDense(n+N, n+N), newDense(n+N, m), newDense(p, n+N)
+	E, Ec := newDense(n+N, n+N), newDense(n+N, n+N)
 	if n > 0 {
 		setBlock(A, 0, 0, sys.A)
 		setBlock(A, 0, n, L.B2)
 		setBlock(A, n, 0, L.C2)
 		setBlock(B, 0, 0, sys.B)
 		setBlock(C, 0, 0, sys.C)
-		setBlock(E, 0, 0, sys.E)
+		setBlock(Ec, 0, 0, sys.E)
 	}
 	setBlock(A, n, n, L.D22)
-	for i := range N {
-		A.Set(n+i, n+i, A.At(n+i, n+i)-1)
-	}
 	setBlock(B, n, 0, L.D21)
 	setBlock(C, 0, n, L.D12)
-	return &System{A: A, B: B, C: C, D: sys.D, E: E}
+	Ac := denseCopy(A)
+	for i := range N {
+		E.Set(n+i, n+i, 1)
+		Ac.Set(n+i, n+i, Ac.At(n+i, n+i)-1)
+	}
+	return &System{A: A, B: B, C: C, D: sys.D, E: E, Dt: 1}, &System{A: Ac, B: B, C: C, D: sys.D, E: Ec}
 }
 
 // delaysClosedAtDC returns the discrete out with its internal delays, the
