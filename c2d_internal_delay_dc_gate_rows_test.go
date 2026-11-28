@@ -11,6 +11,8 @@ import "plantcontrol.org/v1/gonum/mat"
 // the C2D class of each cell (U unverified, N nil; ? where the arm64 and
 // amd64 census rows, 1 ulp apart, disagree, or these arm64 entries give
 // another class on amd64: lft/256 at dt 0.01, 1.1 to 1.2 bars on arm64;
+// strad1m-lft/212's unverified cells, 2 to 5 bars on arm64, which move 2×
+// between arm64 and amd64 (a nil there is still checked against the bar);
 // A nil on arm64, either elsewhere: sc−6/220 at 0.90 bars on arm64, its
 // arm64 entries unverified on amd64).
 type internalDelayDCGateRow struct {
@@ -37,7 +39,7 @@ var internalDelayDCGateRows = []internalDelayDCGateRow{
 		D21: mat.NewDense(1, 1, []float64{0}),
 		D22: mat.NewDense(1, 1, []float64{0}),
 		g0:  -0.32821838626447736, bar0: 0.0002769967092464285, t0: 2.196725673067583,
-		classes: map[string]byte{"0.0001/zoh": 'U', "0.0001/foh": 'U', "0.0001/tustin": 'N', "0.01/zoh": 'U', "0.01/foh": 'U', "0.01/tustin": 'N'}},
+		classes: map[string]byte{"0.0001/zoh": '?', "0.0001/foh": '?', "0.0001/tustin": 'N', "0.01/zoh": '?', "0.01/foh": '?', "0.01/tustin": 'N'}},
 	// strad1m-lft:lftc/212: 0.0001/zoh=unv tdU=4.49187 | 0.0001/foh=unv tdU=4.49187 | 0.0001/tustin=nil tdU=0.280147 | 0.01/zoh=unv tdU=2.80872 | 0.01/foh=unv tdU=2.80872 | 0.01/tustin=nil tdU=0.0453563
 	{name: "strad1m-lft:lftc/212",
 		A:   mat.NewDense(5, 5, []float64{1.9897017751681653e+08, -4.796321816369241e+08, -2.1962824882622615e+07, 6.246151035563678e+07, -6.419890427295446e+08, -1.0228140936906656e+09, -2.896770383434383e+09, -4.065877835345012e+08, 3.588981146751553e+08, 1.319355271611586e+09, -2.201470171172013e+08, -3.185242083385125e+08, -5.796822967319423e+07, 3.857597540572042e+07, 3.966263771378149e+08, -7.769214800199325e+08, 1.3482339724035053e+09, 3.493749830881594e+07, -1.7737214528459692e+08, 2.3130019781348033e+09, -5.1940902265229374e+08, 8.049318223319539e+08, 1.4015820353692379e+07, -1.0635409932004179e+08, 1.5107325421889973e+09}),
@@ -52,7 +54,7 @@ var internalDelayDCGateRows = []internalDelayDCGateRow{
 		D21: mat.NewDense(1, 1, []float64{0}),
 		D22: mat.NewDense(1, 1, []float64{0}),
 		g0:  -0.32440827849910986, bar0: 0.00030328067462223547, t0: 2.2123923444463585,
-		classes: map[string]byte{"0.0001/zoh": 'U', "0.0001/foh": 'U', "0.0001/tustin": 'N', "0.01/zoh": 'U', "0.01/foh": 'U', "0.01/tustin": 'N'}},
+		classes: map[string]byte{"0.0001/zoh": '?', "0.0001/foh": '?', "0.0001/tustin": 'N', "0.01/zoh": '?', "0.01/foh": '?', "0.01/tustin": 'N'}},
 	// strad2-lft:lft/256: 0.0001/zoh=unv tdU=520952 | 0.0001/foh=unv tdU=521012 | 0.0001/tustin=nil tdU=0.187665 | 0.01/zoh=unv tdU=1.16359 | 0.01/foh=unv tdU=1.10668 | 0.01/tustin=nil tdU=0.00896456
 	{name: "strad2-lft:lft/256",
 		A:   mat.NewDense(5, 5, []float64{0.764724715983157, 0.8243164292415597, -0.01822930927303657, 0.13008692981214, -0.05005323055900529, 0.06407419053076281, 0.4663436779663949, -0.9568258412902726, -0.4418090428321212, -1.1183468044779934, -0.6238068634877049, 0.8429522039639328, 0.9610955432065184, 0.4059392288105935, 1.6434501252775895, -1.0243040887927173, 0.2660540215390744, 1.0568267751642673, 0.08304009083850208, 0.2215736511437187, 0.6741401299326168, 0.33935810015555556, 0.7149798691376762, -0.634593572213056, 0.9844432829947148}),

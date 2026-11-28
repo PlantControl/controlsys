@@ -393,3 +393,74 @@ func TestC2DInternalDelayExplicitNotGated(t *testing.T) {
 		}
 	}
 }
+
+// C2D of the gate's MIMO model under each census family of PT5WKA: D21
+// alone, D22 alone, D22 = 0.3, 1 − 2⁻⁴⁰ and 1 with C2 ≠ 0, C2 vanishing
+// (×1e-300 and ×ε), and a closed pencil exactly singular with no zero pivot
+// (column n equal to column 0): a nil result's DC, closed at z = 1, matches
+// DCGain of the closed DC pencil, C2DMap's class is C2D's where it has an
+// exact map (none at dt 0.05, not a whole number of samples), and the
+// singular pencil returns no nil.
+func TestC2DInternalDelayDescriptorDCGateFamilies(t *testing.T) {
+	c2 := func(f float64) *mat.Dense {
+		m := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+		m.Scale(f, m)
+		return m
+	}
+	d22 := func(v ...float64) *mat.Dense { return mat.NewDense(2, 2, v) }
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	sing := internalDelayGateSystem(t, mat.NewDense(2, 3, []float64{0.5, -0.1, 0.2, 0.25, 0.3, -0.5}), nil,
+		d22(1.5, 0, 0.25, 0.3))
+	for i := range 3 {
+		sing.LFT.B2.Set(i, 0, sing.A.At(i, 0))
+	}
+	for name, sys := range map[string]*System{
+		"d21":      internalDelayGateSystem(t, nil, d21, nil),
+		"d22o":     internalDelayGateSystem(t, nil, nil, d22(0.3, 0, 0.1, 0.2)),
+		"d22w":     internalDelayGateSystem(t, c2(1), nil, d22(0.3, 0, 0, 0.3)),
+		"d22n":     internalDelayGateSystem(t, c2(1), nil, d22(1-0x1p-40, 0, 0, 0.3)),
+		"d22s":     internalDelayGateSystem(t, c2(1), nil, d22(1, 0, 0, 0.3)),
+		"v300":     internalDelayGateSystem(t, c2(1e-300), d21, nil),
+		"veps":     internalDelayGateSystem(t, c2(0x1p-52), d21, nil),
+		"singular": sing,
+	} {
+		ref, _, _ := lftClosedAtDC(sys)
+		want, werr := ref.DCGain()
+		nils := 0
+		for _, dt := range []float64{1e-3, 0.05} {
+			for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+				key := fmt.Sprintf("%s@%g/%s", name, dt, meth)
+				d, err := sys.C2D(dt, C2DOptions{Method: meth})
+				if d == nil || (err != nil && !errors.Is(err, ErrAccuracyUnverified)) {
+					t.Errorf("%s: C2D model %v, %v", key, d != nil, err)
+					continue
+				}
+				if dm, g, merr := sys.C2DMap(dt, C2DOptions{Method: meth}); !(dm == nil && errors.Is(merr, ErrOptionUnsupported)) && (dm == nil || g == nil || errClass(dm, merr) != errClass(d, err) || !bitsEqualSystem(dm, d)) {
+					t.Errorf("%s: C2DMap %v, C2D %v", key, merr, err)
+				}
+				if err != nil {
+					continue
+				}
+				nils++
+				if name == "singular" || werr != nil {
+					t.Errorf("%s: nil on a model whose closed DC pencil has no certified gain (%v)", key, werr)
+					continue
+				}
+				n, _, _ := d.Dims()
+				h, _, _, ok := holdDC(balanceDelayStates(delaysClosedAtDC(d), n))
+				if !ok {
+					t.Errorf("%s: DC of the result not resolved", key)
+					continue
+				}
+				for k := range 4 {
+					if g, w := h.At(k/2, k%2), want.At(k/2, k%2); math.Abs(g-w) > 1e-9*math.Max(1, math.Abs(w)) {
+						t.Errorf("%s: DC (%d,%d) = %v, closed pencil %v", key, k/2, k%2, g, w)
+					}
+				}
+			}
+		}
+		if name != "singular" && nils == 0 {
+			t.Errorf("%s: no nil result", name)
+		}
+	}
+}
