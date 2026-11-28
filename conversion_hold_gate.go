@@ -35,11 +35,7 @@ func holdGated(sys *System, method C2DMethod) bool {
 // model is nil only where, entry by entry, its DC gain ĥ, exact for its
 // stored entries, lies within the descriptor bar (dcBar) of g0 = DCGain of
 // the caller's delay-free model, plus the rounding ε·S of the result's own
-// entries. With internal delays g0 is the DC gain of the closed DC pencil
-// (lftClosedAtDC), certified by its own solve or else DCGain of the
-// pencil, and the bar is that pencil's with each delay channel kept as its
-// own block (channelBar); where C2, D21 and D22 are zero they are the
-// delay-free core's.
+// entries,
 //
 //	S = |D| + Σ|C||X| + |C(I − Φ)⁻¹|·(|Φ||X| + |Γ|),  X = (I − Φ)⁻¹Γ,
 //
@@ -51,6 +47,14 @@ func holdGated(sys *System, method C2DMethod) bool {
 // entry of g0 that is ±Inf (a pole at DC) is not gated; where other
 // entries are, no bar exists and the model is unverified. refused marks a
 // fold taken for a stiff split that was not certified: always unverified.
+//
+// With internal delays, g0 is the DC gain of the closed DC pencil
+// (lftClosedAtDC), certified by its own solve or else DCGain of the
+// pencil, T0 its terms, and the bar is that pencil's with each delay
+// channel kept as its own block (channelBar); where C2, D21 and D22 are
+// zero they are the delay-free core's. The result is read with its delays
+// closed (delaysClosedAtDC) and its delay states balanced by powers of two
+// (balanceDelayStates), which leaves ĥ and S exactly as they are.
 type holdGate struct {
 	g0      *mat.Dense
 	err     error
@@ -122,7 +126,8 @@ func (g *holdGate) check(out *System) error {
 		return holdUnverified("%v", err)
 	}
 	if out.LFT != nil {
-		out = delaysClosedAtDC(out)
+		n, _, _ := out.Dims()
+		out = balanceDelayStates(delaysClosedAtDC(out), n)
 	}
 	h, herr, allow, ok := holdDC(out)
 	if !ok {
@@ -313,6 +318,87 @@ func delaysClosedAtDC(out *System) *System {
 	set(C, 0, 0, out.C)
 	set(C, 0, n, L.D12)
 	return &System{A: A, B: B, C: C, D: out.D, Dt: out.Dt}
+}
+
+// balanceDelayStates returns the closed result cl of delaysClosedAtDC with
+// its delay states, those after the first n, rescaled by powers of two:
+// D·A·D⁻¹, D·B, C·D⁻¹, D = diag(I_n, 2^e_k), e_k the rounded half log2 of
+// the ratio of the off-diagonal column norm (with C's column) to the
+// off-diagonal row norm (with B's row) of delay state k, swept until no
+// exponent changes. A scaling that would leave the normal range is
+// skipped, so the DC gain and the allowance S of the result are exactly
+// those of cl, while the condition of I − A, which the allowance's guard
+// reads, no longer grows with the scale of a delay channel (an exact
+// equivalence of the model). The state rows and columns are not touched.
+func balanceDelayStates(cl *System, n int) *System {
+	q, m, p := cl.Dims()
+	if q == n {
+		return cl
+	}
+	A, B, C := denseCopy(cl.A), denseCopy(cl.B), denseCopy(cl.C)
+	a, b, c := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
+	exact := func(v, f float64) bool {
+		w := math.Abs(v * f)
+		return v == 0 || (w >= 0x1p-1022 && !math.IsInf(w, 0))
+	}
+	for range 2*(q-n) + 2 {
+		changed := false
+		for k := n; k < q; k++ {
+			var rn, cn float64
+			for j := range q {
+				if j != k {
+					rn = math.Hypot(rn, a.Data[k*a.Stride+j])
+					cn = math.Hypot(cn, a.Data[j*a.Stride+k])
+				}
+			}
+			for j := range m {
+				rn = math.Hypot(rn, b.Data[k*b.Stride+j])
+			}
+			for i := range p {
+				cn = math.Hypot(cn, c.Data[i*c.Stride+k])
+			}
+			if rn == 0 || cn == 0 {
+				continue
+			}
+			e := int(math.Round(0.5 * math.Log2(cn/rn)))
+			if e == 0 {
+				continue
+			}
+			f, fi := math.Ldexp(1, e), math.Ldexp(1, -e)
+			ok := true
+			for j := range q {
+				if j != k {
+					ok = ok && exact(a.Data[k*a.Stride+j], f) && exact(a.Data[j*a.Stride+k], fi)
+				}
+			}
+			for j := range m {
+				ok = ok && exact(b.Data[k*b.Stride+j], f)
+			}
+			for i := range p {
+				ok = ok && exact(c.Data[i*c.Stride+k], fi)
+			}
+			if !ok {
+				continue
+			}
+			for j := range q {
+				if j != k {
+					a.Data[k*a.Stride+j] *= f
+					a.Data[j*a.Stride+k] *= fi
+				}
+			}
+			for j := range m {
+				b.Data[k*b.Stride+j] *= f
+			}
+			for i := range p {
+				c.Data[i*c.Stride+k] *= fi
+			}
+			changed = true
+		}
+		if !changed {
+			break
+		}
+	}
+	return &System{A: A, B: B, C: C, D: cl.D, Dt: cl.Dt}
 }
 
 func halfUlp(v float64) float64 {
