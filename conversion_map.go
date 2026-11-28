@@ -31,7 +31,8 @@ import (
 // its w0 columns are those of the split model. A model returned with an error
 // wrapping ErrAccuracyUnverified comes with its G. The error is C2D's
 // verdict on the DC gain of the model; G itself is not checked. Other descriptors take
-// the model and G of E⁻¹A. An Inf or NaN entry in the result or in G
+// the model and G of E⁻¹A; with internal delays, by ZOH, FOH or Tustin,
+// the error is then C2D's verdict on the DC gain of that model too. An Inf or NaN entry in the result or in G
 // returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("C2DMap", sys); err != nil {
