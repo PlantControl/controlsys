@@ -95,7 +95,7 @@ func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
 		}
 		wantBar := newDCBar(barRef)
 		if !tc.wantDelayFree {
-			wantBar = channelBar(barRef, 2, wantBar)
+			wantBar = channelBar(ref, barRef, 2, wantBar)
 		}
 		for k := range 4 {
 			if b, w := holdGateBar(gate, k), holdGateBar(&holdGate{bar: wantBar}, k); math.Abs(b-w) > 1e-12*w {

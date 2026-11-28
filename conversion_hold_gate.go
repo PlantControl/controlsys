@@ -99,7 +99,7 @@ func newHoldGate(sys *System) *holdGate {
 	}
 	gate.bar = newDCBarSolved(barRef, solved)
 	if channels > 0 && gate.bar.reason == "" {
-		gate.bar = channelBar(barRef, channels, gate.bar)
+		gate.bar = channelBar(ref, barRef, channels, gate.bar)
 	}
 	if gate.bar.reason != "" {
 		gate.err = holdUnverified("%s", gate.bar.reason)
@@ -192,12 +192,13 @@ func lftClosedAtDC(sys *System) (pencil, bar *System, channels int) {
 // last N states (delay channels) as its own block: dcBar's
 // u·(ĉ·m̂·â·m̂·b̂ + ĉ·m̂·b̂ + |D_ij|) with the (1+N)-vectors ĉ = [‖C_i‖,
 // |D12_ik|], b̂ = [‖B_j‖; |D21_kj|] and the matrices â = [‖A‖, ‖B2_·k‖;
-// ‖C2_k·‖, |(D22 − I)_kl|], m̂ the same block norms of M = (−Ã)⁻¹,
-// Frobenius norms. Rescaling a delay channel (w_k → α·w_k) or the state
+// ‖C2_k·‖, |D22_kl|], the stored blocks of pencil's A′ (the identity, the
+// delay at DC, is exact and not data), m̂ the same block norms of
+// M = (−Ã)⁻¹, Ã bar's A, Frobenius norms. Rescaling a delay channel (w_k → α·w_k) or the state
 // equation, both exact equivalences of the model, acts on them as a
 // diagonal similarity that cancels; one pencil norm would not. With N = 0
 // it is dcBar's.
-func channelBar(bar *System, N int, b dcBar) dcBar {
+func channelBar(pencil, bar *System, N int, b dcBar) dcBar {
 	q, m, p := bar.Dims()
 	n := q - N
 	lu := make([]float64, q*q)
@@ -239,7 +240,8 @@ func channelBar(bar *System, N int, b dcBar) dcBar {
 		}
 		return out
 	}
-	ah, mh := blockNorms(ar.Data, ar.Stride), blockNorms(inv, q)
+	pr := pencil.A.RawMatrix()
+	ah, mh := blockNorms(pr.Data, pr.Stride), blockNorms(inv, q)
 	br, cr := bar.B.RawMatrix(), bar.C.RawMatrix()
 	ch, bh, r, x := make([]float64, K), make([]float64, K), make([]float64, K), make([]float64, K)
 	b.bar, b.lu = make([]float64, p*m), nil
