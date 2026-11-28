@@ -91,6 +91,13 @@ func TestLFTClosedAtDCMatchesDCGain(t *testing.T) {
 		gate := newHoldGate(sys)
 		if gate.err != nil || !gate.gated || gate.bar.m != 2 || len(gate.bar.terms) != 4 {
 			t.Errorf("%s: gate err %v gated %v", tc.name, gate.err, gate.gated)
+			continue
+		}
+		wantBar := newDCBar(barRef)
+		for k := range 4 {
+			if b, w := gate.bar.fullBar(k), wantBar.fullBar(k); math.Abs(b-w) > 1e-12*w {
+				t.Errorf("%s: bar of entry %d = %v, want the continuous closed pencil's %v", tc.name, k, b, w)
+			}
 		}
 	}
 }
@@ -202,25 +209,29 @@ func TestC2DInternalDelayDescriptorGateFallback(t *testing.T) {
 }
 
 // The closed DC pencil takes I − D22 without rounding (PT5WKA ruling F2):
-// with c = 1 − 2⁻⁵² and D22 = 2⁻⁵⁴, 1 − D22 rounds to 1 in float64, which
-// moves g0 = c/(1 − D22 − c) = (1 − 2⁻⁵²)·2⁵⁴/3 by a third.
+// with c = 1 − 2⁻ᵏ and D22 = 2⁻⁵⁴, 1 − D22 rounds to 1 in float64, which
+// moves g0 = c/(1 − D22 − c) by 2⁻⁵⁴⁺ᵏ relative: a third at k = 52, where
+// the solve does not certify, and 6e-11 at k = 20, where it does.
 func TestC2DInternalDelayDescriptorGateExactLoop(t *testing.T) {
-	sys, err := NewDescriptor(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1}), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := 1 - 0x1p-52
-	if err := sys.SetInternalDelay([]float64{0.05}, mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{c}),
-		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{0x1p-54})); err != nil {
-		t.Fatal(err)
-	}
-	want := c * 0x1p54 / 3
-	gate := newHoldGate(sys)
-	if gate.g0 == nil || gate.err != nil {
-		t.Fatalf("gate: %v", gate.err)
-	}
-	if g := gate.g0.At(0, 0); math.Abs(g-want) > 1e-12*want {
-		t.Errorf("gate g0 = %.17g, want %.17g", g, want)
+	for _, k := range []int{52, 20} {
+		sys, err := NewDescriptor(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tail := math.Ldexp(1, -k)
+		c := 1 - tail
+		if err := sys.SetInternalDelay([]float64{0.05}, mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{c}),
+			mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{0x1p-54})); err != nil {
+			t.Fatal(err)
+		}
+		want := c / (tail - 0x1p-54)
+		gate := newHoldGate(sys)
+		if gate.g0 == nil || gate.err != nil {
+			t.Fatalf("k=%d: gate: %v", k, gate.err)
+		}
+		if g := gate.g0.At(0, 0); math.Abs(g-want) > 1e-13*want {
+			t.Errorf("k=%d: gate g0 = %.17g, want %.17g", k, g, want)
+		}
 	}
 }
 
