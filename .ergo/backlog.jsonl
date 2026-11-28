@@ -289,3 +289,4 @@
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"PT5WKA","to_id":"BWVNRE"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-28T01:21:55.97175Z","data":{"id":"ZC4XHI","agent_id":"coordinator@zc4xhi","ts":"2026-11-28T01:21:55.97175Z"}},{"type":"state","ts":"2026-11-28T01:21:55.97175Z","data":{"id":"ZC4XHI","state":"doing","ts":"2026-11-28T01:21:55.97175Z"}}]}
