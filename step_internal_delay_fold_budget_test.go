@@ -20,7 +20,8 @@ func TestStepInternalDelayStiffDescriptorKeepsPartsWhenFoldChainOverBudget(t *te
 	sys := tc.system(t)
 	x0 := mat.NewVecDense(tc.n, []float64{0.7, -0.4, 1.1})
 
-	zs, err := sys.zeroStateResponseForm()
+	form, err := sys.zeroStateResponseForm()
+	zs := form.sys
 	if err != nil {
 		t.Fatal(err)
 	}

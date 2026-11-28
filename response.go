@@ -34,6 +34,9 @@ type timeResponsePlan struct {
 
 type timeResponsePlanner struct {
 	sys *System
+	// parts are the certified pencil parts of a continuous descriptor sys
+	// (zeroStateRoute), discretized in place of sys.
+	parts []*System
 }
 
 type standardInputResponse uint8
@@ -168,6 +171,19 @@ func prepareAutoTimeResponse(sys *System, tFinal, dt float64) (timeResponsePlan,
 	return newTimeResponsePlanner(sys).auto(tFinal, dt)
 }
 
+// discretize is the ZOH model of the continuous p.sys at dt that the
+// response simulates, from p.parts when set.
+func (p timeResponsePlanner) discretize(dt float64) (*System, error) {
+	if p.parts == nil {
+		return p.sys.c2dUnguarded(dt, C2DOptions{})
+	}
+	normalized, err := normalizeC2DOptions(dt, C2DOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("C2D: %w", err)
+	}
+	return c2dExit(discretizeStiffDescriptor(p.sys, p.parts, dt, normalized))
+}
+
 func (p timeResponsePlanner) grid(tFinal, dt float64) (t []float64, actualDt float64, err error) {
 	if err := validateTimeHorizon(tFinal); err != nil {
 		return nil, 0, err
@@ -204,7 +220,7 @@ func (p timeResponsePlanner) auto(tFinal, dt float64) (timeResponsePlan, error) 
 	if p.sys.IsDiscrete() {
 		return plan, nil
 	}
-	if plan.sim, err = p.sys.c2dUnguarded(dt, C2DOptions{}); err != nil {
+	if plan.sim, err = p.discretize(dt); err != nil {
 		return timeResponsePlan{}, fmt.Errorf("auto-discretize: %w", err)
 	}
 	plan.wasContinuous = true
@@ -360,7 +376,7 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 
 	var dsys *System
 	if p.sys.IsContinuous() {
-		dsys, err = p.sys.c2dUnguarded(dt, C2DOptions{})
+		dsys, err = p.discretize(dt)
 		if err != nil {
 			return timeResponsePlan{}, nil, fmt.Errorf("Lsim: %w", err)
 		}
@@ -2674,14 +2690,18 @@ func Damp(sys *System) ([]DampInfo, error) {
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
 // plus feedthrough, improper ones return ErrImproperModel. A continuous
-// model without internal delays whose full-rank E is too ill-conditioned
-// for E⁻¹A (as in TransferFunction, with LU condition estimate 1e6 or more;
-// for Impulse from 1e4) is simulated from its generalized Schur parts, so
-// the response follows the poles of the pencil (A, E); as in MATLAB, its
-// I/O delays shift the delay-free response. Where the stiff and slow modes
-// of such an E cannot be separated reliably (the split is not certified),
-// Step, Impulse, Initial and Lsim return an error wrapping ErrSchurFailed
-// and no response. Continuous models
+// delay-free model whose full-rank E is too ill-conditioned for E⁻¹A (as
+// in TransferFunction and Impulse, LU condition estimate 1e4 or more; with
+// I/O delays 1e6 or more) is simulated from its generalized Schur parts,
+// so the response follows the poles of the pencil (A, E) and a nil error
+// means the response of a model within the rounding of the stored data;
+// as in MATLAB, its I/O delays shift the delay-free response. Where the
+// stiff and slow modes of such an E cannot be separated reliably (the
+// split is not certified), Impulse and Initial return an error wrapping
+// ErrSchurFailed and no response; so do Step and Lsim from a condition
+// estimate of 1e6, while below it they return the response of the LU fold
+// with an error wrapping ErrAccuracyUnverified, or the ErrSchurFailed
+// error and no response when a sample of it is not finite. Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
@@ -2722,38 +2742,40 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 }
 
 func step(sys *System, tFinal float64) (*TimeResponse, error) {
-	var zs *System
+	var zs zeroStateForm
 	var zsErr error
+	formed := false
 	ex, _, ok, err := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {
 		_, dt, _ := newTimeResponsePlanner(out).grid(tFinal, 0)
 		return dt
 	}, func() bool {
+		formed = true
 		if zs, zsErr = sys.zeroStateResponseForm(); zsErr != nil {
 			return true
 		}
-		t, dt, err := newTimeResponsePlanner(zs).grid(tFinal, 0)
-		return err != nil || delayChainWithinBudget(zs, dt, len(t), 1, delayShiftCount(zs))
+		t, dt, err := newTimeResponsePlanner(zs.sys).grid(tFinal, 0)
+		return err != nil || delayChainWithinBudget(zs.sys, dt, len(t), 1, delayShiftCount(zs.sys))
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Step: %w", err)
 	}
 	if ok {
-		sys = ex
+		sys, zs = ex, zeroStateForm{sys: ex}
 	} else {
-		if zs == nil && zsErr == nil {
+		if !formed {
 			zs, zsErr = sys.zeroStateResponseForm()
 		}
 		if zsErr != nil {
 			return nil, fmt.Errorf("Step: %w", zsErr)
 		}
-		sys = zs
+		sys = zs.sys
 		if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); err != nil {
 			return nil, fmt.Errorf("Step: %w", err)
 		} else if ok {
-			return resp, nil
+			return zs.result("Step", resp)
 		}
 	}
-	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
+	plan, err := timeResponsePlanner{sys: sys, parts: zs.parts}.auto(tFinal, 0)
 	if err != nil {
 		return nil, fmt.Errorf("Step: %w", err)
 	}
@@ -2761,7 +2783,7 @@ func step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Step: %w", err)
 	}
-	return resp, nil
+	return zs.result("Step", resp)
 }
 
 // Impulse returns the impulse response of each input channel. For
@@ -2828,27 +2850,75 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	return resp, nil
 }
 
-// zeroStateResponseForm is timeResponseForm without an initial state,
-// except that a continuous descriptor with foldInaccurateParts stays a
-// descriptor: its poles are then those of the pencil and C2D discretizes
-// its parts instead of the LU fold E⁻¹A.
-func (sys *System) zeroStateResponseForm() (*System, error) {
-	if foldInaccurateContinuous(sys) {
-		return sys, nil
-	}
-	out, _, _, err := sys.timeResponseForm(nil)
-	return out, err
+// zeroStateForm is the model the zero-state Step and Lsim simulate
+// (zeroStateRoute): sys, the certified pencil parts of a descriptor sys
+// that stays a descriptor, and refused, the error of a split refused on a
+// band row, whose sys is then the LU fold.
+type zeroStateForm struct {
+	sys     *System
+	parts   []*System
+	refused error
 }
 
-// foldInaccurateContinuous reports whether the continuous sys has
-// foldInaccurateParts of its I/O-delay-free core (ioDelayFreeCore): MATLAB
-// simulates a dss with I/O delays as the shifted delay-free response.
-func foldInaccurateContinuous(sys *System) bool {
-	if !sys.IsContinuous() {
-		return false
+// zeroStateResponseForm is timeResponseForm without an initial state,
+// except that a continuous descriptor that zeroStateRoute keeps stays a
+// descriptor: its poles are then those of the pencil and it is discretized
+// from its parts instead of the LU fold E⁻¹A.
+func (sys *System) zeroStateResponseForm() (zeroStateForm, error) {
+	keep, parts, refused := sys.zeroStateRoute()
+	if keep {
+		return zeroStateForm{sys: sys, parts: parts}, nil
 	}
-	_, ok := foldInaccurateParts(ioDelayFreeCore(sys))
-	return ok
+	out, _, _, err := sys.timeResponseForm(nil)
+	return zeroStateForm{sys: out, refused: refused}, err
+}
+
+// zeroStateRoute decides how the zero-state Step and Lsim simulate the
+// continuous sys. A delay-free descriptor takes the parts of
+// stiffDescriptorParts, the stiffPencilSplit gate C2D uses (cond(E) 1e4):
+// the LU fold there is off by cond(E)·ε, beyond the rounding of the stored
+// data. With I/O delays the split is that of foldInaccurateParts of the
+// delay-free core, simulated through stiffDescriptorExplicit (MATLAB
+// simulates a dss with I/O delays as the shifted delay-free response).
+// keep reports that sys stays a descriptor, with parts set when they are
+// certified within ζ″ ≤ 1 and delay-free; a split refused at an LU
+// condition estimate of foldAccurateECond or more is kept and returns its
+// error on discretization. A split refused below it returns keep false and
+// refused: the response is then that of the fold, unverified
+// (zeroStateForm.result), as C2D returns it.
+func (sys *System) zeroStateRoute() (keep bool, parts []*System, refused error) {
+	if !sys.IsContinuous() {
+		return false, nil, nil
+	}
+	if sys.HasDelay() {
+		_, ok := foldInaccurateParts(ioDelayFreeCore(sys))
+		return ok, nil, nil
+	}
+	sp, ok := stiffDescriptorParts(sys)
+	if !ok {
+		return false, nil, nil
+	}
+	err := sp.within(1)
+	switch {
+	case err == nil:
+		return true, sp.parts, nil
+	case sp.eCond >= foldAccurateECond:
+		return true, nil, nil
+	}
+	return false, nil, err
+}
+
+// result is resp of the zero-state form f for op: with a refused split,
+// the fold's response with an error wrapping ErrAccuracyUnverified, or the
+// split's error and no response when a sample is not finite.
+func (f zeroStateForm) result(op string, resp *TimeResponse) (*TimeResponse, error) {
+	if f.refused == nil || resp == nil {
+		return resp, nil
+	}
+	if resp.Y != nil && !allFiniteDense(resp.Y) {
+		return nil, fmt.Errorf("%s: %w", op, f.refused)
+	}
+	return resp, fmt.Errorf("%s: pencil split refused, LU fold simulated: %v: %w", op, f.refused, ErrAccuracyUnverified)
 }
 
 // explicitImpulse is the impulse response of the continuous explicit sys
@@ -3401,7 +3471,10 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 }
 
 // Lsim simulates the response to u held constant between samples (ZOH).
-// Descriptor models are handled as in Step; with singular E a nonzero x0
+// Descriptor models are handled as in Step from a zero x0; with a nonzero
+// x0 a continuous descriptor takes its generalized Schur parts only from
+// an LU condition estimate of E of 1e6 (the fold below it, forced and free
+// response alike, with no band certificate). With singular E a nonzero x0
 // returns ErrDescriptorInitialState, as in MATLAB, and a nonzero x0 of a
 // model Step simulates by the pencil adds its free response as Initial
 // does. x0 with Delay follows Simulate.
@@ -3444,7 +3517,17 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 			sys, x0, stiffLFT = ex, xt, true
 		}
 	}
-	if foldInaccurateContinuous(sys) {
+	var keep bool
+	var parts []*System
+	var refused error
+	if x0 == nil || allZeroVec(x0) {
+		keep, parts, refused = sys.zeroStateRoute()
+	} else if sys.IsContinuous() {
+		_, keep = foldInaccurateParts(ioDelayFreeCore(sys))
+	}
+	form := zeroStateForm{refused: refused}
+	if keep {
+		form.parts = parts
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 		}
@@ -3461,8 +3544,9 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	}
 	if _, m, _ := sys.Dims(); m == 0 && (u == nil || u.IsEmpty()) {
 		sys, u = zeroInputModel(sys), mat.NewDense(max(len(t), 1), 1, nil)
+		form.parts = nil
 	}
-	plan, uSim, err := prepareLsimResponse(sys, u, t)
+	plan, uSim, err := timeResponsePlanner{sys: sys, parts: form.parts}.lsim(u, t)
 	if err != nil {
 		return nil, err
 	}
@@ -3475,7 +3559,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 			if err := addStiffFreeSamples(sys, freeX0, plan, Y); err != nil {
 				return nil, fmt.Errorf("Lsim: %w", err)
 			}
-			return plan.response(Y), nil
+			return form.result("Lsim", plan.response(Y))
 		}
 	}
 	exactFree := x0 != nil && plan.wasContinuous && sys.HasDelay() && !sys.HasInternalDelay() && !sys.IsDescriptor()
@@ -3498,7 +3582,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		return nil, fmt.Errorf("Lsim: %w", err)
 	}
 
-	return plan.response(resp.Y), nil
+	return form.result("Lsim", plan.response(resp.Y))
 }
 
 // addStiffFreeSamples adds to Y the free response from x0 of a continuous
