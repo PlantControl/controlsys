@@ -295,3 +295,4 @@
 {"version":1,"task_id":"YNERCR","kind":"created","at":"2026-11-28T16:37:51.427694Z"}
 {"version":1,"task_id":"VU2XLG","kind":"created","at":"2026-11-28T16:38:50.350698Z"}
 {"version":1,"task_id":"3MIOII","kind":"created","at":"2026-11-28T16:48:23.443756Z"}
+{"version":1,"task_id":"5EKNHC","kind":"done","at":"2026-11-28T18:07:46.852428Z","agent":"coordinator@5eknhc","text":"merged #574: non-finite time response → ErrOverflow no value; follow-ups NVRLPD FWIAFU VU2XLG 3MIOII"}
