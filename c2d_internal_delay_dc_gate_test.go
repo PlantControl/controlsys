@@ -13,7 +13,7 @@ import (
 // internalDelayGateSystem is a MIMO continuous descriptor (n = 3, m = 2,
 // p = 2) with N = 2 internal delays and the LFT blocks given; nil blocks
 // are zero.
-func internalDelayGateSystem(t *testing.T, c2, d21, d22 *mat.Dense) *System {
+func internalDelayGateSystem(t testing.TB, c2, d21, d22 *mat.Dense) *System {
 	t.Helper()
 	sys, err := NewDescriptor(
 		mat.NewDense(3, 3, []float64{-2, 0.7, 0.1, 0.3, -1.5, 0.4, -0.2, 0.5, -3}),
