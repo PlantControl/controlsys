@@ -3490,8 +3490,18 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
-// returns ErrDimensionMismatch.
+// returns ErrDimensionMismatch. As in Step, a proper singular-E descriptor
+// whose reduction TransferFunction does not verify returns its response
+// with an error wrapping ErrAccuracyUnverified.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
+	resp, err := lsim(sys, u, t, x0)
+	if err == nil && sys.reductionUnverified() {
+		err = fmt.Errorf("Lsim: descriptor reduction: %w", ErrAccuracyUnverified)
+	}
+	return resp, err
+}
+
+func lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	if err := requireFiniteSystem("Lsim", sys); err != nil {
 		return nil, err
 	}
