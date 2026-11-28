@@ -271,7 +271,6 @@
 {"version":1,"task_id":"UIYDKF","kind":"created","at":"2026-11-26T22:16:37.470868Z"}
 {"version":1,"task_id":"4CL6F3","kind":"created","at":"2026-11-27T10:19:42.686816Z"}
 {"version":1,"task_id":"U3IWY4","kind":"created","at":"2026-11-27T10:19:42.707027Z"}
-{"version":1,"task_id":"PT5WKA","kind":"created","at":"2026-11-27T13:57:14.19515Z"}
 {"version":1,"task_id":"EHHD4B","kind":"created","at":"2026-11-27T13:57:14.224617Z"}
 {"version":1,"task_id":"4CL6F3","kind":"result","at":"2026-11-27T13:57:14.249533Z","text":"Direction (T3IVBX ruling Q4): runtime t=0 identity check C_d·G_x = C, C_d·G_u + D_d = D as path to a documented G bar."}
 {"version":1,"task_id":"UWAQWX","kind":"result","at":"2026-11-27T13:57:14.270503Z","text":"T3IVBX ruling Q3: C2DMap FOH +27% (amd64 +21%) vs C2D on cond/13 because Γ1 computed twice."}
@@ -283,8 +282,6 @@
 {"version":1,"task_id":"DPTLBE","kind":"created","at":"2026-11-27T13:57:40.17788Z"}
 {"version":1,"task_id":"LJKKDY","kind":"created","at":"2026-11-27T17:41:51.862675Z"}
 {"version":1,"task_id":"HRPG4E","kind":"created","at":"2026-11-27T22:50:54.053113Z"}
-{"version":1,"task_id":"ZC4XHI","kind":"claim","at":"2026-11-28T01:21:55.97175Z","agent":"coordinator@zc4xhi"}
-{"version":1,"task_id":"GM22S5","kind":"created","at":"2026-11-28T01:29:59.995689Z"}
 {"version":1,"task_id":"5EKNHC","kind":"created","at":"2026-11-28T02:43:35.271072Z"}
 {"version":1,"task_id":"PT5WKA","kind":"claim","at":"2026-11-28T03:06:05.936015Z","agent":"coordinator@pt5wka"}
 {"version":1,"task_id":"Y3ISLH","kind":"created","at":"2026-11-28T03:21:51.311873Z"}
@@ -293,5 +290,3 @@
 {"version":1,"task_id":"FCC7BC","kind":"created","at":"2026-11-28T04:36:35.357583Z"}
 {"version":1,"task_id":"ZYIPZL","kind":"created","at":"2026-11-28T05:46:53.797742Z"}
 {"version":1,"task_id":"R3M5GX","kind":"created","at":"2026-11-28T06:05:51.018107Z"}
-{"version":1,"task_id":"ZC4XHI","kind":"done","at":"2026-11-28T06:34:58.472719Z","agent":"coordinator@zc4xhi","text":"merged #572: Lsim reduction unverified as Step; perf waiver Y3ISLH"}
-{"version":1,"task_id":"GM22S5","kind":"done","at":"2026-11-28T06:34:58.4976Z","text":"closed by #572: doc + frozen tests (user decision A); NaN rows 5EKNHC"}
