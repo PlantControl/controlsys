@@ -295,3 +295,4 @@
 {"type":"snapshot_dependency","from_id":"GW7IRR","to_id":"DP5QM3"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-28T06:35:16.239904Z","data":{"id":"5EKNHC","agent_id":"coordinator@5eknhc","ts":"2026-11-28T06:35:16.239904Z"}},{"type":"state","ts":"2026-11-28T06:35:16.239904Z","data":{"id":"5EKNHC","state":"doing","ts":"2026-11-28T06:35:16.239904Z"}}]}
