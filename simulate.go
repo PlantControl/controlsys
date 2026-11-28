@@ -65,6 +65,11 @@ type SimulateOpts struct {
 // ErrInsufficientData. A model without outputs has no representable Y (gonum
 // cannot hold a 0×steps matrix), so it is accepted only with FinalState, and
 // Y is then nil; otherwise it returns ErrDimensionMismatch.
+//
+// A sample of Y, or an entry of a requested XFinal, beyond float64 range (an
+// unstable model over a long horizon) returns ErrOverflow and no response.
+// Without FinalState only Y is checked: the state one step past the last
+// sample may overflow while every sample of Y is finite.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if err := requireFiniteSystem("Simulate", sys); err != nil {
 		return nil, err
@@ -72,12 +77,32 @@ func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if err := requireFiniteSignals("Simulate", u, x0); err != nil {
 		return nil, err
 	}
-	return sys.simulate(u, x0, opts)
+	return boundedSimulation(sys.simulate(u, x0, opts))
 }
 
-// simulate is Simulate without the finiteness check, for the time responses
-// of finite models whose discretization overflowed, which return non-finite
-// samples as MATLAB does.
+// boundedSimulation is resp and err of Simulate, or an error wrapping
+// ErrOverflow and no response when a sample of Y or an entry of XFinal is not
+// finite: the simulated response then exceeds float64 range.
+func boundedSimulation(resp *Response, err error) (*Response, error) {
+	if resp == nil {
+		return resp, err
+	}
+	if resp.Y != nil && !allFiniteDense(resp.Y) {
+		return nil, fmt.Errorf("Simulate: response exceeds float64 range: %w", ErrOverflow)
+	}
+	if resp.XFinal != nil {
+		for i := range resp.XFinal.Len() {
+			if !isFinite(resp.XFinal.AtVec(i)) {
+				return nil, fmt.Errorf("Simulate: final state exceeds float64 range: %w", ErrOverflow)
+			}
+		}
+	}
+	return resp, err
+}
+
+// simulate is Simulate without the finiteness checks of its data and result,
+// for the time responses of finite models whose discretization overflowed;
+// those responses bound their own samples (boundedTimeResponse).
 func (sys *System) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if err := requireSystem("Simulate", sys); err != nil {
 		return nil, err

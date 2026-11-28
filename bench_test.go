@@ -571,6 +571,7 @@ func BenchmarkControllabilityStaircase(b *testing.B) {
 func BenchmarkSimulateNoDelay(b *testing.B) {
 	sys := benchSys(b, 20, 3, 4)
 	sys.Dt = 0.01
+	benchStableDiscrete(sys)
 	steps := 500
 	u := mat.NewDense(3, steps, nil)
 	for j := range 3 {
@@ -1062,6 +1063,7 @@ func BenchmarkSimulate_Large(b *testing.B) {
 	n, m, p := 50, 5, 5
 	sys := benchSys(b, n, m, p)
 	sys.Dt = 0.01
+	benchStableDiscrete(sys)
 	steps := 1000
 	u := mat.NewDense(m, steps, nil)
 	for j := range m {
@@ -1893,6 +1895,13 @@ func BenchmarkFreqRespEst_MIMO(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// benchStableDiscrete scales A to spectral radius below 0.9: benchSys is a
+// continuous plant, and read as discrete its poles leave the unit circle and
+// Simulate overflows.
+func benchStableDiscrete(sys *System) {
+	sys.A.Scale(0.9/mat.Norm(sys.A, math.Inf(1)), sys.A)
 }
 
 func benchSys(tb testing.TB, n, m, p int) *System {
