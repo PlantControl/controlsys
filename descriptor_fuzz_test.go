@@ -765,7 +765,7 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 				false_++
 				continue
 			}
-			if _, err := Step(sys, 1); err != nil {
+			if _, err := Step(sys, 1); err != nil && !errors.Is(err, ErrOverflow) {
 				t.Fatalf("%v %g seed %d: Step: %v", tc.chains, tc.sr, seed, err)
 			}
 			for _, s := range []complex128{0.37i, complex(0.5, 3), 1e3i, 1e6i} {

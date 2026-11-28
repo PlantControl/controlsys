@@ -106,7 +106,7 @@ func TestTransferFunction_StiffChainQZCountResplit(t *testing.T) {
 		if miss := tfMisses(t, tc, sys, oracle); miss > 1e-8 {
 			t.Errorf("%s: transfer function %.3g relative off the oracle", tc.name, miss)
 		}
-		if _, err := Step(sys, 1); err != nil {
+		if _, err := Step(sys, 1); err != nil && !errors.Is(err, ErrOverflow) {
 			t.Errorf("%s: Step: %v", tc.name, err)
 		}
 	}

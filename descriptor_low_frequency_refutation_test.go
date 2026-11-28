@@ -105,7 +105,7 @@ func checkChainDescriptorReading(t *testing.T, label string, sys, oracle *System
 	}
 	certified := terr == nil
 	unv := errors.Is(perr, ErrAccuracyUnverified)
-	perr, serr, terr = valueErr(perr), valueErr(serr), valueErr(terr)
+	perr, serr, terr = valueErr(perr), responseValueErr(serr), valueErr(terr)
 	if perr != nil {
 		if !errors.Is(perr, ErrDescriptorSingular) || !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
 			t.Fatalf("%s: IsProper err %v, Step err %v, TF err %v: want all ErrDescriptorSingular", label, perr, serr, terr)

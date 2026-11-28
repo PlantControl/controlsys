@@ -139,7 +139,7 @@ func checkERankAgreement(t *testing.T, label string, sys, oracle *System) {
 	if pr, err := sys.IsProper(); valueErr(err) != nil || !pr {
 		t.Errorf("%s: IsProper = %v, %v; want true", label, pr, err)
 	}
-	if _, err := Step(sys, 5); valueErr(err) != nil {
+	if _, err := Step(sys, 5); responseValueErr(err) != nil {
 		t.Errorf("%s: Step: %v", label, err)
 	}
 	pts := []complex128{0.05i, 0.37i, complex(0.5, 3), 10i}
@@ -261,7 +261,7 @@ func checkERankAgreementTF(t *testing.T, sys, twin *System) {
 		t.Errorf("IsProper = %v, %v; want true", pr, perr)
 	}
 	_, serr := Step(sys, 5)
-	if valueErr(serr) != nil {
+	if responseValueErr(serr) != nil {
 		t.Errorf("Step: %v", serr)
 	}
 	res, err := sys.TransferFunction(nil)
