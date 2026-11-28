@@ -59,7 +59,8 @@ var (
 
 	// ErrOverflow reports polynomial or matrix coefficients that overflow
 	// float64 during a conversion, a norm whose value exceeds float64, or a
-	// time response with a sample beyond float64 range.
+	// time response with a sample (or Simulate's final state) beyond float64
+	// range.
 	ErrOverflow = errors.New("controlsys: coefficient overflow")
 
 	// ErrImproperTF reports a transfer function whose numerator degree exceeds
