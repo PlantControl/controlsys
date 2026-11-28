@@ -349,3 +349,22 @@ func TestC2DInternalDelayDescriptorGateBarInvariant(t *testing.T) {
 		}
 	}
 }
+
+// The gate's per-channel bar on the MIMO model with C2, D21 and D22 nonzero
+// is the 320-bit value of the ruled formula (u = 4(n+N+5)ε, â with the
+// stored |D22_kl|), frozen from census/pt5wka's oracle (arbBWBars, bwx):
+// |D22 − I| in â would give 4 to 5 % more, u of the core alone less.
+func TestC2DInternalDelayDescriptorGateBarValue(t *testing.T) {
+	c2 := mat.NewDense(2, 3, []float64{0.4, -0.1, 0.2, 0, 0.3, -0.5})
+	d21 := mat.NewDense(2, 2, []float64{0.2, -0.3, 0.1, 0.4})
+	d22 := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.3})
+	g := newHoldGate(internalDelayGateSystem(t, c2, d21, d22))
+	if g.err != nil {
+		t.Fatal(g.err)
+	}
+	for k, want := range []float64{1.1945364111544252e-13, 1.5492785077175252e-13, 1.3523895544075391e-13, 1.7921689031205056e-13} {
+		if b := holdGateBar(g, k); math.Abs(b-want) > 1e-12*want {
+			t.Errorf("bar of entry %d = %.17g, want %.17g", k, b, want)
+		}
+	}
+}
