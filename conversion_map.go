@@ -58,6 +58,10 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if err != nil && !errors.Is(err, errMatchedUnverified) {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
+	var gerr error
+	if sys.LFT != nil && holdGated(sys, opts.Method) {
+		gerr = newHoldGate(sys).check(out)
+	}
 	if !conversionCanMapState(std, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(std, dt)) {
 		return nil, nil, fmt.Errorf("C2DMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)
 	}
@@ -67,6 +71,9 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	}
 	if err := finiteDense("C2DMap", "G", G, ErrOverflow); err != nil {
 		return nil, nil, err
+	}
+	if gerr != nil {
+		return out, G, fmt.Errorf("C2DMap: %v: %w", gerr, ErrAccuracyUnverified)
 	}
 	return out, G, nil
 }

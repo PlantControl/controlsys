@@ -20,15 +20,15 @@ func holdUnverified(format string, args ...any) error {
 }
 
 // holdGated reports a C2D of sys by method that holdGate judges: a
-// continuous delay-free-core descriptor (I/O delays allowed, no LFT) by
-// ZOH, FOH or Tustin.
+// continuous descriptor (I/O and internal delays allowed) by ZOH, FOH or
+// Tustin.
 func holdGated(sys *System, method C2DMethod) bool {
 	switch method {
 	case "", C2DMethodZOH, C2DMethodFOH, C2DMethodTustin:
 	default:
 		return false
 	}
-	return sys.IsContinuous() && sys.IsDescriptor() && sys.LFT == nil
+	return sys.IsContinuous() && sys.IsDescriptor()
 }
 
 // holdGate is the DC gate of ZOH, FOH and Tustin C2D of a descriptor: the
@@ -57,14 +57,15 @@ type holdGate struct {
 
 func newHoldGate(sys *System) *holdGate {
 	free := ioDelayFree(sys)
-	n, m, p := free.Dims()
+	ref := lftClosedAtDC(free)
+	n, m, p := ref.Dims()
 	if m == 0 || p == 0 {
 		return &holdGate{}
 	}
 	var solved []dd
 	var g0 *mat.Dense
 	if n > 0 {
-		if r := solveDCRegular(nil, free.A, free.B, free.C, free.D, 0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
+		if r := solveDCRegular(nil, ref.A, ref.B, ref.C, ref.D, 0, n > exactDetMaxOrder); r.solveErr == nil && !r.overflow && r.certified {
 			g0, solved = r.g, r.x
 		}
 	}
@@ -89,7 +90,7 @@ func newHoldGate(sys *System) *holdGate {
 	if gate.err != nil {
 		return gate
 	}
-	gate.bar = newDCBarSolved(free, solved)
+	gate.bar = newDCBarSolved(ref, solved)
 	if gate.bar.reason != "" {
 		gate.err = holdUnverified("%s", gate.bar.reason)
 	}
@@ -131,6 +132,42 @@ func (g *holdGate) check(out *System) error {
 		}
 	}
 	return nil
+}
+
+// lftClosedAtDC returns the continuous sys with its internal delays, the
+// identity at s = 0, closed without rounding but for D22 − I: the delayed
+// signals w become algebraic states of 0 = A·x + B2·w + B·u,
+// 0 = C2·x + (D22 − I)·w + D21·u, output C·x + D12·w + D·u, E = blkdiag(E, 0),
+// whose DC gain is that of sys. Where C2, D21 and D22 are zero, w ≡ 0 and
+// sys is its delay-free core.
+func lftClosedAtDC(sys *System) *System {
+	L := sys.LFT
+	if L == nil {
+		return sys
+	}
+	if allZeroDense(L.C2) && allZeroDense(L.D21) && allZeroDense(L.D22) {
+		core := *sys
+		core.LFT = nil
+		return &core
+	}
+	n, m, p := sys.Dims()
+	N := sys.internalDelayCount()
+	A, B, C, E := newDense(n+N, n+N), newDense(n+N, m), newDense(p, n+N), newDense(n+N, n+N)
+	if n > 0 {
+		setBlock(A, 0, 0, sys.A)
+		setBlock(A, 0, n, L.B2)
+		setBlock(A, n, 0, L.C2)
+		setBlock(B, 0, 0, sys.B)
+		setBlock(C, 0, 0, sys.C)
+		setBlock(E, 0, 0, sys.E)
+	}
+	setBlock(A, n, n, L.D22)
+	for i := range N {
+		A.Set(n+i, n+i, A.At(n+i, n+i)-1)
+	}
+	setBlock(B, n, 0, L.D21)
+	setBlock(C, 0, n, L.D12)
+	return &System{A: A, B: B, C: C, D: sys.D, E: E}
 }
 
 // delaysClosedAtDC returns the discrete out with its internal delays, the
